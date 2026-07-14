@@ -52,3 +52,57 @@ class RegistrationSerializer(serializers.ModelSerializer):
         except Exception as exc:  # django.core.exceptions.ValidationError
             raise serializers.ValidationError({'password': list(exc.messages)})
         return attrs
+
+
+class LoginSerializer(serializers.Serializer):
+    """Login input. Deliberately does not touch the DB or call
+    `authenticate()` itself — the view does that, since `ModelBackend`'s
+    `is_active` check must be the single source of truth for "can this
+    user log in" (see U3 plan Approach: no separate hand-rolled
+    `is_active` check, to avoid a timing/enumeration side channel).
+    """
+
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, style={'input_type': 'password'})
+
+
+class MeSerializer(serializers.ModelSerializer):
+    """Current-user info returned by `GET /api/auth/me/`."""
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'email', 'full_name', 'contact_number', 'country', 'job_title',
+        ]
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    """`password-reset-confirm` input. Password strength is validated in
+    `validate()`, same pattern as `RegistrationSerializer`, but against the
+    *existing* user instance resolved by the view (passed in via
+    `set_user_context`) rather than an in-memory candidate — the user
+    already exists here, unlike at registration.
+    """
+
+    uid = serializers.CharField()
+    token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True, style={'input_type': 'password'})
+
+    def set_user_context(self, user):
+        self._user = user
+
+    def validate(self, attrs):
+        user = getattr(self, '_user', None)
+        if user is not None:
+            password = attrs.get('new_password')
+            try:
+                password_validation.validate_password(password, user=user)
+            except serializers.ValidationError:
+                raise
+            except Exception as exc:  # django.core.exceptions.ValidationError
+                raise serializers.ValidationError({'new_password': list(exc.messages)})
+        return attrs

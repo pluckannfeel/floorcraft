@@ -147,3 +147,28 @@ DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@floorcraft.lo
 # Used to build absolute links (e.g. email verification URLs) outside of a
 # request/response cycle.
 SITE_URL = os.environ.get('SITE_URL', 'http://localhost:8000')
+
+
+# Session / CSRF cookie hardening (U3)
+# https://docs.djangoproject.com/en/5.2/ref/settings/#session-cookie-samesite
+#
+# Safe given the stack is genuinely same-origin via Nginx in both dev and
+# prod (see plan's Key Technical Decisions) — "Strict" would otherwise
+# break any legitimate cross-site navigation into an authenticated page.
+SESSION_COOKIE_SAMESITE = 'Strict'
+CSRF_COOKIE_SAMESITE = 'Strict'
+
+# The session cookie is never read by JS — httpOnly is a pure win.
+SESSION_COOKIE_HTTPONLY = True
+
+# The CSRF cookie MUST stay JS-readable: axios's `xsrfCookieName`/
+# `xsrfHeaderName` config reads this cookie client-side and echoes it back
+# as a request header (the "double submit cookie" pattern) — flipping this
+# to `True` would silently break every unsafe (POST/PATCH/DELETE) request.
+CSRF_COOKIE_HTTPONLY = False
+
+# No cost given `SECURE_PROXY_SSL_HEADER` is already wired for the
+# Nginx-TLS-termination topology above — prevents cookies from ever being
+# sent over a plaintext channel if TLS termination is ever misconfigured.
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
