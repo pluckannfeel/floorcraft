@@ -1,6 +1,7 @@
 from django.test import TestCase
 from rest_framework.test import APITestCase
 
+from accounts.models import User
 from fm_generator.models import FloorPlan, Objects
 from fm_generator.serializers import ObjectSerializer
 
@@ -144,6 +145,14 @@ class ObjectViewSetOrderingTests(APITestCase):
     """
 
     def setUp(self):
+        # The list endpoint requires an authenticated session (U4); this
+        # test is only exercising ordering behavior, so authenticate a
+        # throwaway user rather than testing permissions here.
+        user = User.objects.create_user(email='ordering@example.com', password='Correct-Horse-9427!')
+        user.is_active = True
+        user.save()
+        self.client.force_authenticate(user=user)
+
         self.floor_plan = FloorPlan.objects.create(name='Ordering Floor Plan')
         # Deliberately create out of z_index order, with duplicate z_index
         # values to exercise the id secondary sort key.

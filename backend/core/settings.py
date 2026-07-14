@@ -172,3 +172,17 @@ CSRF_COOKIE_HTTPONLY = False
 # sent over a plaintext channel if TLS termination is ever misconfigured.
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
+
+
+# Django REST Framework (U4)
+# Session-authenticated and locked down by default; individual views opt
+# into anonymous access explicitly (see accounts.views) rather than the
+# other way around.
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+}
