@@ -131,3 +131,19 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# Email
+# https://docs.djangoproject.com/en/5.2/topics/email/
+# Console backend for local dev — prints outgoing mail to stdout instead of
+# actually sending it. Swap via env var once a real SMTP/provider backend
+# is wired up for a non-local environment.
+
+EMAIL_BACKEND = os.environ.get(
+    'EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend'
+)
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@floorcraft.local')
+
+# Used to build absolute links (e.g. email verification URLs) outside of a
+# request/response cycle.
+SITE_URL = os.environ.get('SITE_URL', 'http://localhost:8000')
