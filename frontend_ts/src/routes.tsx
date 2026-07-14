@@ -5,20 +5,7 @@ import { VerifyEmailPage } from './auth/VerifyEmailPage'
 import { LoginPage } from './auth/LoginPage'
 import { ForgotPasswordPage } from './auth/ForgotPasswordPage'
 import { ResetPasswordPage } from './auth/ResetPasswordPage'
-
-/**
- * Placeholder for the canvas editor route (U7 replaces this with
- * `canvas/CanvasEditorPage.tsx`). Mounted at "/" — see LoginPage's
- * `CANVAS_ROUTE` constant, which must be kept in sync with this path.
- */
-function CanvasPlaceholder() {
-  return (
-    <section>
-      <h1>Canvas editor</h1>
-      <p>The canvas editor will be built in U7.</p>
-    </section>
-  )
-}
+import { CanvasEditorPage } from './canvas/CanvasEditorPage'
 
 export function AppRoutes() {
   return (
@@ -32,7 +19,7 @@ export function AppRoutes() {
         path="/"
         element={
           <RequireAuth>
-            <CanvasPlaceholder />
+            <CanvasEditorPage />
           </RequireAuth>
         }
       />
