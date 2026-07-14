@@ -54,3 +54,117 @@ export function clampToBounds(
     y: Math.min(Math.max(point.y, 0), maxY),
   }
 }
+
+/** U8's Transformer `boundBoxFunc` minimum item size (10px), per the plan's
+ * Key Technical Decisions. */
+export const MIN_ITEM_SIZE = 10
+
+export interface BoundingBox {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/**
+ * Computes the axis-aligned bounding box of a `width` x `height` rectangle
+ * rotated by `rotationDeg` degrees around its own (x, y) top-left corner.
+ *
+ * This matches `ObjectShape`'s Konva `Group` convention: the Group's
+ * `rotation` pivots around its own `x`/`y` (offsetX/offsetY are never set),
+ * i.e. rotation around the rect's top-left corner, NOT its center.
+ */
+export function getRotatedBoundingBox(
+  point: Point,
+  width: number,
+  height: number,
+  rotationDeg: number,
+): BoundingBox {
+  const theta = (rotationDeg * Math.PI) / 180
+  const cos = Math.cos(theta)
+  const sin = Math.sin(theta)
+  const corners = [
+    { x: 0, y: 0 },
+    { x: width, y: 0 },
+    { x: width, y: height },
+    { x: 0, y: height },
+  ].map((corner) => ({
+    x: point.x + corner.x * cos - corner.y * sin,
+    y: point.y + corner.x * sin + corner.y * cos,
+  }))
+
+  const xs = corners.map((corner) => corner.x)
+  const ys = corners.map((corner) => corner.y)
+  const minX = Math.min(...xs)
+  const minY = Math.min(...ys)
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(...xs) - minX,
+    height: Math.max(...ys) - minY,
+  }
+}
+
+/**
+ * The shape Konva's Transformer `boundBoxFunc` callback passes/expects:
+ * `x`/`y` are the box's top-left position (pre-rotation-pivot, same
+ * convention as `getRotatedBoundingBox`), and `rotation` is in RADIANS —
+ * Konva's convention for this specific callback, unlike `node.rotation()`
+ * elsewhere which is degrees.
+ */
+export interface TransformBoundBox {
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation: number
+}
+
+/**
+ * Rejects (falls back to `oldBox`) a resize/rotate that would shrink below
+ * `minSize`, or push the item's post-rotation axis-aligned bounding box
+ * outside `[0, canvasWidth] x [0, canvasHeight]`; otherwise passes `newBox`
+ * through unchanged.
+ *
+ * Pure and Konva-independent so `SelectionTransformer`'s `boundBoxFunc` (and
+ * this logic's tests) don't need a real Konva `Transformer` instance.
+ */
+export function constrainTransformBox(
+  oldBox: TransformBoundBox,
+  newBox: TransformBoundBox,
+  canvasWidth: number,
+  canvasHeight: number,
+  minSize: number = MIN_ITEM_SIZE,
+): TransformBoundBox {
+  if (newBox.width < minSize || newBox.height < minSize) {
+    return oldBox
+  }
+
+  const rotationDeg = (newBox.rotation * 180) / Math.PI
+  const bbox = getRotatedBoundingBox({ x: newBox.x, y: newBox.y }, newBox.width, newBox.height, rotationDeg)
+
+  if (bbox.x < 0 || bbox.y < 0 || bbox.x + bbox.width > canvasWidth || bbox.y + bbox.height > canvasHeight) {
+    return oldBox
+  }
+
+  return newBox
+}
+
+/**
+ * Determines whether a `keydown` event should delete the currently-selected
+ * item: only `Delete`/`Backspace`, only when something is selected, and not
+ * while focus is in a text field. No such fields exist yet in this unit
+ * (U8), but this guard is cheap now and forward-safe for U10's Property
+ * Panel inputs, which will share the same window-level listener.
+ */
+export function shouldHandleDeleteKey(
+  key: string,
+  selectedItemId: unknown,
+  activeElementTag: string | undefined,
+): boolean {
+  if (selectedItemId == null) return false
+  if (key !== 'Delete' && key !== 'Backspace') return false
+  const tag = activeElementTag?.toUpperCase()
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return false
+  return true
+}

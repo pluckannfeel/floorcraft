@@ -1,7 +1,10 @@
-import { forwardRef } from 'react'
+import { forwardRef, useEffect, useRef } from 'react'
 import type Konva from 'konva'
 import { Layer, Line, Rect, Stage } from 'react-konva'
+import { shouldHandleDeleteKey } from './coordinates'
 import { ObjectShape } from './ObjectShape'
+import { SelectionTransformer } from './SelectionTransformer'
+import type { TransformGeometryPatch } from './SelectionTransformer'
 import type { CanvasObject } from './types'
 
 interface CanvasStageProps {
@@ -11,6 +14,15 @@ interface CanvasStageProps {
   objects: CanvasObject[]
   selectedItemId: CanvasObject['id'] | null
   onSelectObject: (id: CanvasObject['id'] | null) => void
+  /** Commits a drag-reposition's or resize/rotate's final geometry to the
+   * store (U8). Optional so callers/tests that don't exercise
+   * select/drag/transform can omit it. */
+  onGeometryChange?: (
+    id: CanvasObject['id'],
+    patch: Partial<Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>>,
+  ) => void
+  /** Deletes the currently-selected item (U8's Delete/Backspace shortcut). */
+  onDeleteSelected?: () => void
 }
 
 /** Builds the static grid line coordinates for a `width` x `height` canvas
@@ -41,10 +53,29 @@ function buildGridLines(width: number, height: number, gridSize: number): number
  * guides (U9/U28) render into it in later units.
  */
 export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function CanvasStage(
-  { width, height, gridSize, objects, selectedItemId, onSelectObject },
+  { width, height, gridSize, objects, selectedItemId, onSelectObject, onGeometryChange, onDeleteSelected },
   ref,
 ) {
   const gridLines = buildGridLines(width, height, gridSize)
+
+  // Map<id, Konva.Node> resolving the selected item's live node for
+  // SelectionTransformer's `.nodes([ref])` attach — populated/cleared by
+  // each ObjectShape's `shapeRef` callback as items mount/unmount.
+  const shapeNodesRef = useRef(new Map<CanvasObject['id'], Konva.Node>())
+
+  // U8: Delete/Backspace removes the selected item. A window-level listener
+  // (not a Stage keydown handler) since Konva Stages aren't natively
+  // focusable/don't receive keyboard events by default.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const activeElementTag = document.activeElement?.tagName
+      if (shouldHandleDeleteKey(event.key, selectedItemId, activeElementTag)) {
+        onDeleteSelected?.()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selectedItemId, onDeleteSelected])
 
   return (
     <Stage
@@ -74,12 +105,33 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             object={object}
             isSelected={object.id === selectedItemId}
             onSelect={onSelectObject}
+            gridSize={gridSize}
+            canvasWidth={width}
+            canvasHeight={height}
+            onGeometryChange={onGeometryChange}
+            shapeRef={(node) => {
+              if (node) {
+                shapeNodesRef.current.set(object.id, node)
+              } else {
+                shapeNodesRef.current.delete(object.id)
+              }
+            }}
           />
         ))}
       </Layer>
 
-      {/* UI overlay layer: Transformer/alignment guides land here in later units. */}
-      <Layer listening={false} />
+      {/* UI overlay layer: SelectionTransformer (U8); alignment guides land
+          here in a later unit. Must remain listening (not `listening={false}`
+          like the grid layer) since the Transformer's handles are interactive. */}
+      <Layer>
+        <SelectionTransformer
+          selectedItemId={selectedItemId}
+          getNode={(id) => shapeNodesRef.current.get(id)}
+          canvasWidth={width}
+          canvasHeight={height}
+          onTransformEnd={(id, patch: TransformGeometryPatch) => onGeometryChange?.(id, patch)}
+        />
+      </Layer>
     </Stage>
   )
 })

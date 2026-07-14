@@ -28,6 +28,22 @@ export interface CanvasState {
 
   /** Selects an item, or clears selection when passed `null`. */
   selectItem: (id: CanvasObject['id'] | null) => void
+
+  /**
+   * Patches an item's geometry (x/y/width/height/rotation) — the single
+   * mutation point for U8's drag-reposition (`dragend`) and
+   * resize/rotate (`transformend`) commits. Deliberately narrow (geometry
+   * only, not `properties`/`name`) so U9 can wrap it as one clean,
+   * coalesced undo/redo history entry without also snapshotting unrelated
+   * fields property edits (U10) would touch.
+   */
+  updateItemGeometry: (
+    id: CanvasObject['id'],
+    patch: Partial<Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>>,
+  ) => void
+
+  /** Removes an item and clears selection if it was the selected item. */
+  deleteItem: (id: CanvasObject['id']) => void
 }
 
 export const useCanvasStore = create<CanvasState>((set) => ({
@@ -42,4 +58,15 @@ export const useCanvasStore = create<CanvasState>((set) => ({
     })),
 
   selectItem: (id) => set({ selectedItemId: id }),
+
+  updateItemGeometry: (id, patch) =>
+    set((state) => ({
+      items: state.items.map((item) => (item.id === id ? { ...item, ...patch } : item)),
+    })),
+
+  deleteItem: (id) =>
+    set((state) => ({
+      items: state.items.filter((item) => item.id !== id),
+      selectedItemId: state.selectedItemId === id ? null : state.selectedItemId,
+    })),
 }))

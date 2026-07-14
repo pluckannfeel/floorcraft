@@ -39,6 +39,12 @@ export function CanvasEditorPage() {
   const setItems = useCanvasStore((state) => state.setItems)
   const createItemLocal = useCanvasStore((state) => state.createItemLocal)
   const selectItem = useCanvasStore((state) => state.selectItem)
+  const updateItemGeometry = useCanvasStore((state) => state.updateItemGeometry)
+  const deleteItem = useCanvasStore((state) => state.deleteItem)
+
+  const handleDeleteSelected = useCallback(() => {
+    if (selectedItemId != null) deleteItem(selectedItemId)
+  }, [selectedItemId, deleteItem])
 
   // Seed the store from the fetched Objects once they load. Later fetches
   // (e.g. a refetch) also resync — U13 layers real mutations on top without
@@ -121,6 +127,8 @@ export function CanvasEditorPage() {
             objects={items}
             selectedItemId={selectedItemId}
             onSelectObject={selectItem}
+            onGeometryChange={updateItemGeometry}
+            onDeleteSelected={handleDeleteSelected}
           />
         </div>
       </div>
