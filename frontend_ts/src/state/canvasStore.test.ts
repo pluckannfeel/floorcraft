@@ -272,6 +272,113 @@ describe('canvasStore undo/redo (U9)', () => {
   })
 })
 
+// U18: `reorderZIndex` sets the selected item's `z_index` to one past the
+// current max ('front') or min ('back') among all of `items` — these tests
+// prove the ordering semantics and that the action is undo-tracked (per the
+// plan's U18 test scenarios and its Key Technical Decisions list, which
+// names z-reorder alongside create/move/resize/rotate/delete as undoable).
+// Rendering order itself (CanvasStage.tsx sorting `objects` by `z_index`
+// then `id`) is exercised in canvas/CanvasStage.test.tsx, not here — this
+// store-level suite only covers the local `items` state change.
+describe('canvasStore reorderZIndex (U18)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({ items: [], selectedItemId: null, activeTool: 'select' })
+    useCanvasStore.temporal.getState().clear()
+  })
+
+  it('bringing an item to front sets its z_index above all siblings', () => {
+    useCanvasStore.setState({
+      items: [
+        makeItem({ id: 'a', z_index: 0 }),
+        makeItem({ id: 'b', z_index: 5 }),
+        makeItem({ id: 'c', z_index: 2 }),
+      ],
+    })
+
+    useCanvasStore.getState().reorderZIndex('a', 'front')
+
+    const items = useCanvasStore.getState().items
+    const itemA = items.find((item) => item.id === 'a')!
+    const siblingZIndexes = items.filter((item) => item.id !== 'a').map((item) => item.z_index)
+    expect(itemA.z_index).toBeGreaterThan(Math.max(...siblingZIndexes))
+  })
+
+  it('sending an item to back sets its z_index below all siblings', () => {
+    useCanvasStore.setState({
+      items: [
+        makeItem({ id: 'a', z_index: 0 }),
+        makeItem({ id: 'b', z_index: 5 }),
+        makeItem({ id: 'c', z_index: 2 }),
+      ],
+    })
+
+    useCanvasStore.getState().reorderZIndex('b', 'back')
+
+    const items = useCanvasStore.getState().items
+    const itemB = items.find((item) => item.id === 'b')!
+    const siblingZIndexes = items.filter((item) => item.id !== 'b').map((item) => item.z_index)
+    expect(itemB.z_index).toBeLessThan(Math.min(...siblingZIndexes))
+  })
+
+  it('leaves every other item, and every other field on the reordered item, unchanged', () => {
+    useCanvasStore.setState({
+      items: [
+        makeItem({ id: 'a', z_index: 0, x: 10, name: 'A' }),
+        makeItem({ id: 'b', z_index: 5, x: 20, name: 'B' }),
+      ],
+    })
+
+    useCanvasStore.getState().reorderZIndex('a', 'front')
+
+    const items = useCanvasStore.getState().items
+    expect(items.find((item) => item.id === 'b')).toEqual(
+      expect.objectContaining({ id: 'b', z_index: 5, x: 20, name: 'B' }),
+    )
+    expect(items.find((item) => item.id === 'a')).toEqual(
+      expect.objectContaining({ id: 'a', x: 10, name: 'A' }),
+    )
+  })
+
+  it('is a no-op when the id does not match any item', () => {
+    const original = [makeItem({ id: 'a', z_index: 0 }), makeItem({ id: 'b', z_index: 5 })]
+    useCanvasStore.setState({ items: original })
+    useCanvasStore.temporal.getState().clear()
+
+    useCanvasStore.getState().reorderZIndex('missing-id', 'front')
+
+    expect(useCanvasStore.getState().items).toEqual(original)
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('is undoable: bring-to-front can be undone back to the prior z_index', () => {
+    useCanvasStore.setState({
+      items: [makeItem({ id: 'a', z_index: 0 }), makeItem({ id: 'b', z_index: 5 })],
+    })
+    useCanvasStore.temporal.getState().clear()
+
+    useCanvasStore.getState().reorderZIndex('a', 'front')
+    expect(useCanvasStore.getState().items.find((item) => item.id === 'a')!.z_index).toBeGreaterThan(5)
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+
+    undo()
+    expect(useCanvasStore.getState().items.find((item) => item.id === 'a')!.z_index).toBe(0)
+
+    redo()
+    expect(useCanvasStore.getState().items.find((item) => item.id === 'a')!.z_index).toBeGreaterThan(5)
+  })
+
+  it('a single reorder produces exactly one coalesced history entry', () => {
+    useCanvasStore.setState({
+      items: [makeItem({ id: 'a', z_index: 0 }), makeItem({ id: 'b', z_index: 5 })],
+    })
+    useCanvasStore.temporal.getState().clear()
+
+    useCanvasStore.getState().reorderZIndex('a', 'front')
+
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+  })
+})
+
 // U17: `updateLinePoints` commits an anchor-handle drag's final point into
 // the selected Line's `properties.points` array. Per the "U17 decision" doc
 // comment on `canvasStore.ts`, this is undo-tracked (like

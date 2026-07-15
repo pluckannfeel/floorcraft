@@ -158,6 +158,38 @@ export interface CanvasState {
   deleteItem: (id: CanvasObject['id']) => void
 
   /**
+   * U18: moves an item to the front (`'front'`) or back (`'back'`) of the
+   * floor plan's stacking order by setting its `z_index` to one above the
+   * current max, or one below the current min, among ALL of this store's
+   * `items` (siblings on the same FloorPlan — this store never holds more
+   * than one FloorPlan's items at a time, per `DEFAULT_FLOOR_PLAN_ID`'s "no
+   * floor-plan selector" scope, so no extra `floor_plan` filtering is
+   * needed here). Mirrors `handleDrop`/`handleCreateShape`/`handleCreateLine`
+   * in `CanvasEditorPage.tsx`, which already compute a new item's initial
+   * `z_index` the same "one past the current max" way.
+   *
+   * Rendering order itself is NOT touched here or anywhere in this store —
+   * per the plan's Key Technical Decision, `CanvasStage.tsx` derives render
+   * order by sorting `items` by `z_index` (then `id`) immediately before
+   * mapping to `ObjectShape`s, matching the backend's `('z_index', 'id')`
+   * queryset ordering. This action's only job is updating the persisted
+   * field; it deliberately does NOT call any imperative Konva
+   * `.moveToTop()`/`.zIndex()` API, which react-konva's own docs warn will
+   * fight React's own re-renders.
+   *
+   * Undo-tracked (R15/U9): replaces `items` with a new array reference like
+   * `updateItemGeometry`/`updateLinePoints`, so it participates in undo
+   * history via the store's reference-equality `equality` check — per the
+   * plan's U18 test scenarios ("z-reordering is undoable via U9's store")
+   * and its Key Technical Decisions list, which names z-reorder alongside
+   * create/move/resize/rotate/delete as undo-tracked.
+   *
+   * A no-op if `id` doesn't match any item, or if `items` has only one
+   * item (nothing to reorder relative to).
+   */
+  reorderZIndex: (id: CanvasObject['id'], direction: 'front' | 'back') => void
+
+  /**
    * Patches a single point (by index) in a Line-typed item's
    * `properties.points` array — the mutation point for U17's anchor-handle
    * drag commits (`dragend`). Deliberately mirrors `updateItemGeometry`
@@ -249,6 +281,22 @@ export const useCanvasStore = create<CanvasState>()(
           selectedItemId: state.selectedItemId === id ? null : state.selectedItemId,
         })),
 
+      reorderZIndex: (id, direction) =>
+        set((state) => {
+          const item = state.items.find((candidate) => candidate.id === id)
+          if (!item || state.items.length < 2) return {}
+
+          const zIndexes = state.items.map((candidate) => candidate.z_index)
+          const nextZIndex =
+            direction === 'front' ? Math.max(...zIndexes) + 1 : Math.min(...zIndexes) - 1
+
+          return {
+            items: state.items.map((candidate) =>
+              candidate.id === id ? { ...candidate, z_index: nextZIndex } : candidate,
+            ),
+          }
+        }),
+
       updateLinePoints: (id, pointIndex, point) =>
         set((state) => {
           const item = state.items.find((candidate) => candidate.id === id)
@@ -309,9 +357,9 @@ export const useCanvasStore = create<CanvasState>()(
       // Reference equality on `items` is sufficient for the actions that
       // rely on it: selectItem/setActiveTool never reassign `items`, so its
       // reference is unchanged across those calls and no entry is created.
-      // setItems, createItemLocal, updateItemGeometry, deleteItem, and
-      // updateLinePoints always build a new `items` array, so those do
-      // produce an entry. `updateItemProperties` ALSO builds a new `items`
+      // setItems, createItemLocal, updateItemGeometry, deleteItem,
+      // reorderZIndex, and updateLinePoints always build a new `items`
+      // array, so those do produce an entry. `updateItemProperties` ALSO builds a new `items`
       // array (see its doc comment) but is kept out of history via
       // `temporal.pause()`/`resume()` instead of relying on this equality
       // check, since reference equality alone can't distinguish it from

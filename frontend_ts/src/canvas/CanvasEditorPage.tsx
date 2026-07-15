@@ -49,6 +49,7 @@ export function CanvasEditorPage() {
   const updateItemGeometry = useCanvasStore((state) => state.updateItemGeometry)
   const updateLinePoints = useCanvasStore((state) => state.updateLinePoints)
   const deleteItem = useCanvasStore((state) => state.deleteItem)
+  const reorderZIndex = useCanvasStore((state) => state.reorderZIndex)
   const setActiveTool = useCanvasStore((state) => state.setActiveTool)
   const setZoomAndPosition = useCanvasStore((state) => state.setZoomAndPosition)
   const setStagePosition = useCanvasStore((state) => state.setStagePosition)
@@ -187,7 +188,7 @@ export function CanvasEditorPage() {
         </button>
       </header>
 
-      <Toolbar getStage={getStage} />
+      <Toolbar getStage={getStage} selectedItemId={selectedItemId} onReorderZIndex={reorderZIndex} />
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <Sidebar

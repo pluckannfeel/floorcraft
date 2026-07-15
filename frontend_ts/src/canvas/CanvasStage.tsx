@@ -77,6 +77,29 @@ function buildGridLines(width: number, height: number, gridSize: number): number
 }
 
 /**
+ * U18: sorts `objects` by `z_index` (then `id` as a tiebreaker) — the pure
+ * function `CanvasStage` maps to `ObjectShape`s in render order, so a
+ * higher `z_index` renders later (i.e. visually on top). Matches the
+ * backend `ObjectViewSet` queryset's `('z_index', 'id')` ordering, so a
+ * fresh fetch and this store-driven client-side ordering agree. Pulled out
+ * as its own exported, Konva-independent function (like `buildGridLines`
+ * above) so it's unit-testable without mounting a real Konva `<Stage>` —
+ * this codebase's existing tests (e.g. `SelectionTransformer.test.tsx`)
+ * avoid mounting Konva trees in jsdom, which has no `<canvas>`
+ * implementation, by testing the pure logic a component delegates to
+ * instead. Returns a NEW array — never mutates `objects` in place, since
+ * that may be the store's own `items` reference and `Array.prototype.sort`
+ * sorts in place otherwise.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function sortObjectsByZIndex(objects: CanvasObject[]): CanvasObject[] {
+  return [...objects].sort((a, b) => {
+    if (a.z_index !== b.z_index) return a.z_index - b.z_index
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+  })
+}
+
+/**
  * 3-layer Konva Stage (grid/background, interactive Objects, UI overlay) —
  * NOT the originally-discussed 4-layer grid/structural/interactive/UI split.
  * Per the plan's Key Technical Decisions: once Objects were unified into one
@@ -343,7 +366,12 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           own drawing handlers above rather than selecting or repositioning
           an existing Object underneath the drag/click. */}
       <Layer listening={!drawingShape && !drawingLine}>
-        {objects.map((object) => (
+        {/* U18: render order comes from `sortObjectsByZIndex` (above) —
+            deliberately NOT from imperative Konva `.moveToTop()`/`.zIndex()`
+            calls, which react-konva's own docs warn will fight React's own
+            re-renders. Render order must come from component/array order in
+            state instead. */}
+        {sortObjectsByZIndex(objects).map((object) => (
           <ObjectShape
             key={object.id}
             object={object}

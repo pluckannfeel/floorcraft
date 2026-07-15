@@ -2,7 +2,7 @@ import type Konva from 'konva'
 import { useStore } from 'zustand'
 import { redo, undo, useCanvasStore } from '../state/canvasStore'
 import { exportStageToPng } from './export'
-import type { LineType, ShapeType } from './types'
+import type { CanvasObject, LineType, ShapeType } from './types'
 
 /** U15's three shape-drawing tools, with their toolbar labels. */
 const SHAPE_TOOLS: { type: ShapeType; label: string }[] = [
@@ -20,9 +20,9 @@ const LINE_TOOLS: { type: LineType; label: string }[] = [
 
 /**
  * Canvas editor toolbar (U9: undo/redo; U15: shape drawing tools; U16: line
- * drawing tools; U12: PNG export). Later units append more controls to this
- * same component — z-order (U18/U19) — per the plan's Output Structure,
- * rather than each unit creating a separate toolbar.
+ * drawing tools; U12: PNG export; U18: z-order). Later units append more
+ * controls to this same component per the plan's Output Structure, rather
+ * than each unit creating a separate toolbar.
  *
  * Undo/redo availability comes from zundo's temporal store
  * (`useCanvasStore.temporal`), a separate vanilla store from the main
@@ -36,9 +36,21 @@ interface ToolbarProps {
    * getStage-as-prop pattern `Sidebar.tsx` already uses for its
    * drop-coordinate conversion. */
   getStage: () => Konva.Stage | null
+  /** U18: the currently-selected Object's id, or `null` when nothing is
+   * selected — "Bring to front"/"Send to back" are only meaningful (and
+   * only rendered enabled) when an Object is selected, same
+   * selection-gating `Toolbar.tsx` would use for a Delete button if one
+   * lived here (U8's Delete is instead a keyboard shortcut on
+   * `CanvasStage.tsx`, but the gating logic mirrors it: no-op without a
+   * selection). */
+  selectedItemId: CanvasObject['id'] | null
+  /** U18: commits a z-order change for the selected item — thin delegation
+   * to the store's `reorderZIndex` action, matching how `onGeometryChange`/
+   * `onDeleteSelected` delegate their store writes from `CanvasStage.tsx`. */
+  onReorderZIndex: (id: CanvasObject['id'], direction: 'front' | 'back') => void
 }
 
-export function Toolbar({ getStage }: ToolbarProps) {
+export function Toolbar({ getStage, selectedItemId, onReorderZIndex }: ToolbarProps) {
   const canUndo = useStore(useCanvasStore.temporal, (state) => state.pastStates.length > 0)
   const canRedo = useStore(useCanvasStore.temporal, (state) => state.futureStates.length > 0)
   const activeTool = useCanvasStore((state) => state.activeTool)
@@ -148,6 +160,30 @@ export function Toolbar({ getStage }: ToolbarProps) {
       {/* U12: exports the current floor plan as a PNG download. */}
       <button type="button" onClick={handleExport}>
         Export PNG
+      </button>
+
+      <div style={{ width: 1, backgroundColor: '#e5e7eb', margin: '0 4px' }} aria-hidden="true" />
+
+      {/* U18: z-order controls, gated on a selection existing — clicking
+          sets the selected Object's z_index to one past the current
+          max/min among `items` (see `canvasStore.ts`'s `reorderZIndex`).
+          Purely a local `items` state change (no backend persistence yet —
+          that's U13); render order itself comes from `CanvasStage.tsx`
+          sorting `objects` by `z_index`, not from anything these buttons do
+          directly. */}
+      <button
+        type="button"
+        onClick={() => selectedItemId != null && onReorderZIndex(selectedItemId, 'front')}
+        disabled={selectedItemId == null}
+      >
+        Bring to Front
+      </button>
+      <button
+        type="button"
+        onClick={() => selectedItemId != null && onReorderZIndex(selectedItemId, 'back')}
+        disabled={selectedItemId == null}
+      >
+        Send to Back
       </button>
     </div>
   )
