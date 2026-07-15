@@ -7,6 +7,7 @@ import { useObjects } from '../hooks/useObjects'
 import { useCanvasStore } from '../state/canvasStore'
 import { CanvasStage } from './CanvasStage'
 import { Sidebar } from './Sidebar'
+import { Toolbar } from './Toolbar'
 import type { CanvasObject, CatalogType, FloorPlan, Point } from './types'
 import { DEFAULT_FLOOR_PLAN_ID } from './types'
 
@@ -109,6 +110,8 @@ export function CanvasEditorPage() {
           Log out
         </button>
       </header>
+
+      <Toolbar />
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <Sidebar
