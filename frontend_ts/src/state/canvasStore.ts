@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { temporal } from 'zundo'
 import { clampZoom } from '../canvas/coordinates'
-import type { CanvasObject, LineType, Point, ShapeType } from '../canvas/types'
+import { isLocalId, type CanvasObject, type LineType, type Point, type ShapeType } from '../canvas/types'
 
 /** U11's default zoom step for the Toolbar's zoom in/out buttons (a gentler
  * per-click step than a single wheel "tick" would feel like, since a click
@@ -111,6 +111,127 @@ export type ActiveTool = 'select' | ShapeType | LineType
  * source), so this is a genuine "skip this set from history" primitive,
  * not a workaround.
  */
+/**
+ * U13: the interface `undo()`/`redo()` (below) dispatch through to re-issue
+ * the same persistence call the original action would have made (Key
+ * Technical Decisions: "Undo/redo re-issues the same persistence call the
+ * original action would have made"). Defined here (not imported from
+ * `hooks/useObjects.ts`) to avoid a circular import — `useObjects.ts`
+ * imports `useCanvasStore` from this module already, so this module can't
+ * also import mutation hooks from `useObjects.ts`.
+ *
+ * A React component (`CanvasEditorPage` via `useObjectPersistence`, see
+ * `useObjects.ts`) registers the live implementation — backed by
+ * TanStack Query mutations — on mount, and unregisters it on unmount. Until
+ * a dispatcher is registered (e.g. in this store's own unit tests, which
+ * call `undo()`/`redo()` directly with no `CanvasEditorPage` mounted),
+ * `undo()`/`redo()` still perform their local state traversal correctly;
+ * they simply have no persistence call to make.
+ */
+export interface PersistenceDispatcher {
+  /** Re-issues a create (`POST`) for an item that came back into `items`
+   * (redo of a create, or undo of a delete) without a corresponding
+   * `beforeById` entry. The dispatcher is responsible for swapping the
+   * item's id for the server-assigned one on success (`swapItemId`,
+   * below), same as the original create flow. */
+  createObject: (item: CanvasObject) => void
+  /** Re-issues an update (`PATCH`) for an item whose geometry/z_index/
+   * properties differ between the pre- and post-traversal `items`
+   * snapshots. `previous` is the pre-traversal item, for the mutation's
+   * onError rollback. */
+  updateObject: (id: CanvasObject['id'], patch: Record<string, unknown>, previous: CanvasObject) => void
+  /** Re-issues a delete (`DELETE`) for an item present before the
+   * traversal but missing after (redo of a delete, or undo of a create).
+   * `previous` is the item as it existed before the traversal, for the
+   * mutation's onError rollback (re-adding it). */
+  deleteObject: (id: CanvasObject['id'], previous: CanvasObject) => void
+}
+
+let persistenceDispatcher: PersistenceDispatcher | null = null
+
+/** Registers (or, passed `null`, clears) the live persistence dispatcher.
+ * Exported so `useObjects.ts`'s `useObjectPersistence` hook can wire it up
+ * from a `useEffect` without this module needing to know anything about
+ * TanStack Query. */
+export function registerPersistenceDispatcher(dispatcher: PersistenceDispatcher | null): void {
+  persistenceDispatcher = dispatcher
+}
+
+/**
+ * Diffs two `items` snapshots (taken immediately before/after an undo() or
+ * redo() traversal) and dispatches the minimal set of persistence calls
+ * needed to bring the backend in line with the traversal's result:
+ *   - an id present before but not after -> that item was removed by the
+ *     traversal -> issue a delete (skipped if the id was only ever local,
+ *     i.e. never actually persisted).
+ *   - an id present after but not before -> that item was (re)added by the
+ *     traversal -> issue a create (skipped if the id is still local-only —
+ *     never actually persisted — since re-dispatching a create for it would
+ *     risk a duplicate POST once its original, still-in-flight create call
+ *     also resolves).
+ *   - an id present in both, with differing geometry/z_index/properties
+ *     -> issue an update with just the changed fields.
+ * This one function is genuinely uniform across every undo/redo-able
+ * action (create/move/resize/rotate/delete/z-reorder/line-point-edit) —
+ * none of them need bespoke undo-persistence logic, since they all reduce
+ * to "how did the `items` array change."
+ */
+function diffAndDispatchPersistence(before: CanvasObject[], after: CanvasObject[]): void {
+  const dispatcher = persistenceDispatcher
+  if (!dispatcher) return
+
+  const beforeById = new Map(before.map((item) => [item.id, item]))
+  const afterById = new Map(after.map((item) => [item.id, item]))
+
+  for (const [id, item] of beforeById) {
+    if (!afterById.has(id) && !isLocalId(id)) {
+      dispatcher.deleteObject(id, item)
+    }
+  }
+
+  for (const [id, item] of afterById) {
+    // Skip items that are still local-id-only: they were never actually
+    // persisted in the first place (their original creation's own
+    // `persistence.createObject` call — dispatched directly by
+    // `CanvasEditorPage.tsx`, not through this diff — is solely responsible
+    // for that POST). Re-dispatching a create here for a still-local-id
+    // item that reappears (e.g. undo of a delete performed before its
+    // original create ever resolved, or redo of a create whose POST is
+    // still in flight) would risk firing a second, duplicate POST for the
+    // same logical item once the original call also resolves.
+    if (!beforeById.has(id) && !isLocalId(id)) {
+      dispatcher.createObject(item)
+    }
+  }
+
+  for (const [id, afterItem] of afterById) {
+    const beforeItem = beforeById.get(id)
+    if (!beforeItem || isLocalId(id)) continue
+    const patch = diffPersistedFields(beforeItem, afterItem)
+    if (patch) dispatcher.updateObject(id, patch, beforeItem)
+  }
+}
+
+/** Returns just the fields that differ between two snapshots of the same
+ * item (by id), in the shape a `PATCH` body expects — or `null` if nothing
+ * persisted actually changed. `properties` is compared by value (JSON
+ * string), not reference, since `updateLinePoints`/`updateItemProperties`
+ * always build a new `properties` object even when the values are
+ * unchanged. */
+function diffPersistedFields(before: CanvasObject, after: CanvasObject): Record<string, unknown> | null {
+  const patch: Record<string, unknown> = {}
+  if (before.x !== after.x) patch.x = after.x
+  if (before.y !== after.y) patch.y = after.y
+  if (before.width !== after.width) patch.width = after.width
+  if (before.height !== after.height) patch.height = after.height
+  if (before.rotation !== after.rotation) patch.rotation = after.rotation
+  if (before.z_index !== after.z_index) patch.z_index = after.z_index
+  if (JSON.stringify(before.properties) !== JSON.stringify(after.properties)) {
+    patch.properties = after.properties
+  }
+  return Object.keys(patch).length > 0 ? patch : null
+}
+
 export interface CanvasState {
   items: CanvasObject[]
   selectedItemId: CanvasObject['id'] | null
@@ -129,7 +250,32 @@ export interface CanvasState {
    * reasoning as `zoom` above. */
   stagePosition: Point
 
-  /** Replaces the full items list (e.g. after the initial fetch resolves). */
+  /**
+   * Replaces the full items list — called on the initial fetch AND on every
+   * subsequent refetch-driven resync (`CanvasEditorPage.tsx`'s effect on
+   * `objectsQuery.data`, which changes on every U13 mutation's `onSettled`
+   * `invalidateQueries`, i.e. after essentially every user action).
+   *
+   * BUG FIX (U13 root cause of the reported "undo is one step behind /
+   * redo doesn't work" issue): this action was originally left as a plain
+   * tracked `set()` call, on the assumption it only ran once at initial
+   * load. It does not — it reruns on every post-mutation refetch. Because
+   * `equality` compares `items` by *reference* and a refetch always
+   * produces a brand-new array (even when its contents are byte-identical
+   * to the current store state), every refetch pushed a SECOND, spurious
+   * history entry on top of the one the user's actual action (drag/resize/
+   * delete/etc.) had already pushed moments earlier, and cleared
+   * `futureStates` (zundo's `_handleSet` always does on a tracked push).
+   * Net effect: one user action = two history entries, so a single undo()
+   * only unwound the harmless "resync from server" entry (visually a
+   * no-op, since the resynced data matches what's already on screen) and
+   * left the actual change in place — requiring a second undo press to
+   * revert it — and any pending redo stack was wiped after the very next
+   * interaction's refetch landed. Fixed the same way `updateItemProperties`/
+   * `removeItemUntracked`/etc. are kept out of history: bracket the `set()`
+   * with `temporal.pause()`/`resume()`. A server resync is never a
+   * user-undoable step.
+   */
   setItems: (items: CanvasObject[]) => void
 
   /**
@@ -229,6 +375,46 @@ export interface CanvasState {
     patch: { name?: string; properties?: Record<string, unknown> },
   ) => void
 
+  /**
+   * U13: removes a local-only "ghost" item after its create mutation fails
+   * (Key Technical Decisions: create-failure removes the ghost rather than
+   * reverting a position, since a brand-new item has no prior position to
+   * revert to). This is a system-driven rollback, not a user action, so —
+   * like `updateItemProperties` — it brackets its `set()` with
+   * `temporal.pause()`/`temporal.resume()`: a failed create must not itself
+   * become an undoable/redoable step (undoing "the ghost got removed"
+   * makes no sense to a user who never asked for that removal).
+   */
+  removeItemUntracked: (id: CanvasObject['id']) => void
+
+  /**
+   * U13: restores a single item to a prior snapshot after a failed update
+   * or delete mutation (R17) — replacing the item in place if it's still
+   * present (a failed update PATCH: revert its fields), or re-adding it if
+   * it's gone (a failed delete: put it back). Untracked by undo for the
+   * same reason as `removeItemUntracked` — a failed-mutation rollback is
+   * not a user-initiated action.
+   */
+  restoreItemUntracked: (item: CanvasObject) => void
+
+  /**
+   * U13: swaps a local-only or stale id for the real backend-assigned id
+   * after a create mutation succeeds — both the initial sidebar/shape/line
+   * creation flow (local id -> real id) and undo-of-delete's "recreate via
+   * new id" case (stale real id -> new real id, since the original backend
+   * row is genuinely gone once its DELETE has succeeded). Untracked by undo
+   * (system-driven correction, not a user action).
+   *
+   * Also purges any zundo history entries (past AND future) whose `items`
+   * snapshot still references `oldId` — per the plan's documented
+   * limitation ("undo-of-delete recreates via new id; later history entries
+   * referencing the old id are dropped"), those snapshots are now
+   * unreconcilable with the swapped-in item's new identity, so rather than
+   * silently misbehaving if a later undo/redo ever reached one, they're
+   * dropped outright.
+   */
+  swapItemId: (oldId: CanvasObject['id'], newItem: CanvasObject) => void
+
   /** Sets the active drawing tool (U15/U16 scaffolding). Untracked by undo. */
   setActiveTool: (tool: ActiveTool) => void
 
@@ -261,7 +447,15 @@ export const useCanvasStore = create<CanvasState>()(
       zoom: 1,
       stagePosition: { x: 0, y: 0 },
 
-      setItems: (items) => set({ items }),
+      setItems: (items) => {
+        // See this action's doc comment on the `CanvasState` interface above:
+        // this runs on every post-mutation refetch resync, not just the
+        // initial load, and must never itself be undoable/redoable.
+        const temporalStore = useCanvasStore.temporal.getState()
+        temporalStore.pause()
+        set({ items })
+        temporalStore.resume()
+      },
 
       createItemLocal: (item) =>
         set((state) => ({
@@ -336,6 +530,52 @@ export const useCanvasStore = create<CanvasState>()(
         temporalStore.resume()
       },
 
+      removeItemUntracked: (id) => {
+        const temporalStore = useCanvasStore.temporal.getState()
+        temporalStore.pause()
+        set((state) => ({
+          items: state.items.filter((item) => item.id !== id),
+          selectedItemId: state.selectedItemId === id ? null : state.selectedItemId,
+        }))
+        temporalStore.resume()
+      },
+
+      restoreItemUntracked: (item) => {
+        const temporalStore = useCanvasStore.temporal.getState()
+        temporalStore.pause()
+        set((state) => {
+          const exists = state.items.some((candidate) => candidate.id === item.id)
+          return {
+            items: exists
+              ? state.items.map((candidate) => (candidate.id === item.id ? item : candidate))
+              : [...state.items, item],
+          }
+        })
+        temporalStore.resume()
+      },
+
+      swapItemId: (oldId, newItem) => {
+        const temporalStore = useCanvasStore.temporal.getState()
+        temporalStore.pause()
+        set((state) => ({
+          items: state.items.map((item) => (item.id === oldId ? newItem : item)),
+          selectedItemId: state.selectedItemId === oldId ? newItem.id : state.selectedItemId,
+        }))
+        temporalStore.resume()
+
+        // Drop any history entries (past or future) that still reference
+        // the swapped-out id — see this action's doc comment above. zundo
+        // types each history entry as `Partial<{items: CanvasObject[]}>`
+        // (the partialized/tracked slice), so `items` is technically
+        // optional even though `partialize` above always includes it.
+        const referencesOldId = (snapshot: Partial<{ items: CanvasObject[] }>) =>
+          (snapshot.items ?? []).some((item) => item.id === oldId)
+        useCanvasStore.temporal.setState((temporal) => ({
+          pastStates: temporal.pastStates.filter((snapshot) => !referencesOldId(snapshot)),
+          futureStates: temporal.futureStates.filter((snapshot) => !referencesOldId(snapshot)),
+        }))
+      },
+
       setActiveTool: (tool) => set({ activeTool: tool }),
 
       setZoomAndPosition: (zoom, position) => set({ zoom: clampZoom(zoom), stagePosition: position }),
@@ -357,13 +597,15 @@ export const useCanvasStore = create<CanvasState>()(
       // Reference equality on `items` is sufficient for the actions that
       // rely on it: selectItem/setActiveTool never reassign `items`, so its
       // reference is unchanged across those calls and no entry is created.
-      // setItems, createItemLocal, updateItemGeometry, deleteItem,
-      // reorderZIndex, and updateLinePoints always build a new `items`
-      // array, so those do produce an entry. `updateItemProperties` ALSO builds a new `items`
-      // array (see its doc comment) but is kept out of history via
+      // createItemLocal, updateItemGeometry, deleteItem, reorderZIndex, and
+      // updateLinePoints always build a new `items` array, so those do
+      // produce an entry. `setItems` and `updateItemProperties` ALSO build a
+      // new `items` array reference but are kept out of history via
       // `temporal.pause()`/`resume()` instead of relying on this equality
-      // check, since reference equality alone can't distinguish it from
-      // updateItemGeometry/updateLinePoints.
+      // check, since reference equality alone can't distinguish "a real user
+      // action" from "a server resync"/"a property edit." See `setItems`'s
+      // doc comment for why leaving it tracked was the actual root cause of
+      // a real reported undo/redo bug.
       equality: (past, current) => past.items === current.items,
     },
   ),
@@ -372,15 +614,24 @@ export const useCanvasStore = create<CanvasState>()(
 /**
  * Undo/redo entry points. Thin wrappers around zundo's temporal store
  * (`useCanvasStore.temporal.getState()`) rather than every call site (e.g.
- * `Toolbar.tsx`) reaching into `.temporal` directly — this indirection is
- * U9's extension point for U13, which will wrap these with "re-issue the
- * original mutation's persistence call" behavior once the mutation-function
- * infrastructure exists, without needing to touch call sites again.
+ * `Toolbar.tsx`) reaching into `.temporal` directly — this indirection was
+ * U9's extension point for U13, used here: each call snapshots `items`
+ * immediately before and after the zundo traversal, then hands both to
+ * `diffAndDispatchPersistence` (above), which re-issues whatever
+ * create/update/delete call(s) the traversal's net effect implies via the
+ * registered `PersistenceDispatcher`. No dispatcher is registered outside a
+ * mounted `CanvasEditorPage` (e.g. this store's own unit tests), in which
+ * case the diff is computed and immediately discarded — harmless, since
+ * `diffAndDispatchPersistence` no-ops without a dispatcher.
  */
 export function undo(): void {
+  const before = useCanvasStore.getState().items
   useCanvasStore.temporal.getState().undo()
+  diffAndDispatchPersistence(before, useCanvasStore.getState().items)
 }
 
 export function redo(): void {
+  const before = useCanvasStore.getState().items
   useCanvasStore.temporal.getState().redo()
+  diffAndDispatchPersistence(before, useCanvasStore.getState().items)
 }

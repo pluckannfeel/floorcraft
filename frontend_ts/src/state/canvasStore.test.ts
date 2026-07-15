@@ -270,6 +270,55 @@ describe('canvasStore undo/redo (U9)', () => {
     redo()
     expect(useCanvasStore.getState().items).toHaveLength(0)
   })
+
+  // Regression test for a real, manually-reported bug: "undo feels one step
+  // behind, I have to press it twice" / "redo doesn't work as expected."
+  //
+  // Root cause: `CanvasEditorPage.tsx` re-runs `setItems(objectsQuery.data)`
+  // on every refetch, and every U13 mutation's `onSettled` triggers exactly
+  // such a refetch after essentially every user action (drag/resize/delete/
+  // etc.). Before the fix, `setItems` was a plain tracked `set()` call, so
+  // each of those post-action resyncs pushed a SECOND history entry (on top
+  // of the one the actual action had just pushed) and wiped the redo stack
+  // (zundo's tracked-set path always clears `futureStates`). One undo() then
+  // only unwound the harmless resync entry, leaving the real change in
+  // place — a second undo() was needed to actually revert it — and any
+  // pending redo was gone after the very next action's resync landed.
+  it('a server resync (setItems) after a tracked action does not require a second undo, and does not clear the redo stack', () => {
+    useCanvasStore.getState().createItemLocal(makeItem({ x: 10, y: 10 }))
+    useCanvasStore.temporal.getState().clear() // isolate the move below from the create entry
+
+    useCanvasStore.getState().updateItemGeometry('item-1', { x: 200, y: 340 })
+    expect(useCanvasStore.getState().items[0]).toMatchObject({ x: 200, y: 340 })
+
+    // Simulate the post-mutation refetch resync CanvasEditorPage.tsx performs
+    // on every `onSettled` — a brand-new array reference with the same
+    // (server-confirmed) contents as what's already in the store.
+    useCanvasStore.getState().setItems([...useCanvasStore.getState().items])
+
+    // setItems must not have pushed its own history entry: exactly the one
+    // entry from the move above should exist.
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+
+    // A SINGLE undo() must fully revert the move — not just undo the resync.
+    undo()
+    expect(useCanvasStore.getState().items[0]).toMatchObject({ x: 10, y: 10 })
+
+    // The redo stack must have survived the resync.
+    redo()
+    expect(useCanvasStore.getState().items[0]).toMatchObject({ x: 200, y: 340 })
+  })
+
+  it('setItems on its own (e.g. the initial load) creates no undo entry and is not itself undoable', () => {
+    useCanvasStore.getState().setItems([makeItem()])
+
+    expect(useCanvasStore.getState().items).toHaveLength(1)
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+
+    undo()
+    // Nothing to undo — the seeded item stays.
+    expect(useCanvasStore.getState().items).toHaveLength(1)
+  })
 })
 
 // U18: `reorderZIndex` sets the selected item's `z_index` to one past the

@@ -64,3 +64,15 @@ export interface Point {
 /** Currently the only `FloorPlan` row in the system (confirmed scope: no
  * floor-plan selector). */
 export const DEFAULT_FLOOR_PLAN_ID = 1
+
+/**
+ * U13: true for a client-side-only id assigned to a not-yet-persisted item
+ * (`local-${crypto.randomUUID()}`, see `CanvasEditorPage.tsx`'s create
+ * handlers). Used to decide whether an item has a real backend id yet that
+ * an update/delete persistence call can legally target — an item still
+ * carrying a local id hasn't had its create `POST` resolve, so there's no
+ * backend row to `PATCH`/`DELETE` against.
+ */
+export function isLocalId(id: CanvasObject['id']): boolean {
+  return typeof id === 'string' && id.startsWith('local-')
+}

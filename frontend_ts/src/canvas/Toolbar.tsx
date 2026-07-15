@@ -59,7 +59,6 @@ export function Toolbar({ getStage, selectedItemId, onReorderZIndex }: ToolbarPr
   const zoomIn = useCanvasStore((state) => state.zoomIn)
   const zoomOut = useCanvasStore((state) => state.zoomOut)
   const resetZoom = useCanvasStore((state) => state.resetZoom)
-  const selectedItemId = useCanvasStore((state) => state.selectedItemId)
   const selectItem = useCanvasStore((state) => state.selectItem)
 
   // U12: clears selection (detaching Transformer/anchor handles), waits for
