@@ -7,6 +7,7 @@ import { useObjects } from '../hooks/useObjects'
 import { useCanvasStore } from '../state/canvasStore'
 import { CanvasStage } from './CanvasStage'
 import { computeLineBoundingBox, curveStyleForType } from './LineTool'
+import { PropertyPanel } from './PropertyPanel'
 import type { ShapeGeometry } from './ShapeTool'
 import { Sidebar } from './Sidebar'
 import { Toolbar } from './Toolbar'
@@ -209,6 +210,7 @@ export function CanvasEditorPage() {
             onLinePointDragEnd={updateLinePoints}
           />
         </div>
+        <PropertyPanel />
       </div>
     </div>
   )

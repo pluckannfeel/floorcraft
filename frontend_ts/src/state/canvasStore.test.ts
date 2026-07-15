@@ -109,7 +109,7 @@ describe('canvasStore geometry/delete actions (U8)', () => {
 // participates in history.
 describe('canvasStore undo/redo (U9)', () => {
   beforeEach(() => {
-    useCanvasStore.setState({ items: [], selectedItemId: null, itemProperties: {}, activeTool: 'select' })
+    useCanvasStore.setState({ items: [], selectedItemId: null, activeTool: 'select' })
     useCanvasStore.temporal.getState().clear()
   })
 
@@ -157,15 +157,64 @@ describe('canvasStore undo/redo (U9)', () => {
     useCanvasStore.getState().createItemLocal(makeItem())
     useCanvasStore.temporal.getState().clear()
 
-    useCanvasStore.getState().updateItemProperties('item-1', { color: 'red' })
+    useCanvasStore.getState().updateItemProperties('item-1', { properties: { color: 'red' } })
 
-    expect(useCanvasStore.getState().itemProperties['item-1']).toEqual({ color: 'red' })
+    // U10 fix: property edits patch `items[i].properties` directly (the
+    // same place ObjectShape.tsx renders from), not a separate map — this
+    // asserts against `items` for that reason, not a since-removed
+    // `itemProperties` field.
+    expect(useCanvasStore.getState().items[0].properties).toEqual({ color: 'red' })
     expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
 
     // Confirms it's genuinely untracked, not just coincidentally absent:
     // undo has nothing to revert.
     undo()
-    expect(useCanvasStore.getState().itemProperties['item-1']).toEqual({ color: 'red' })
+    expect(useCanvasStore.getState().items[0].properties).toEqual({ color: 'red' })
+  })
+
+  it('a name edit via updateItemProperties does not create an undo entry and is visible on the item', () => {
+    useCanvasStore.getState().createItemLocal(makeItem({ name: '' }))
+    useCanvasStore.temporal.getState().clear()
+
+    useCanvasStore.getState().updateItemProperties('item-1', { name: 'A/C Unit 1' })
+
+    expect(useCanvasStore.getState().items[0].name).toBe('A/C Unit 1')
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('updateItemProperties replaces properties wholesale, allowing key deletion', () => {
+    useCanvasStore.getState().createItemLocal(makeItem({ properties: { color: 'red', size: 'large' } }))
+    useCanvasStore.temporal.getState().clear()
+
+    useCanvasStore.getState().updateItemProperties('item-1', { properties: { color: 'red' } })
+
+    expect(useCanvasStore.getState().items[0].properties).toEqual({ color: 'red' })
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('is a no-op when the id does not match any item', () => {
+    const original = [makeItem()]
+    useCanvasStore.setState({ items: original })
+    useCanvasStore.temporal.getState().clear()
+
+    useCanvasStore.getState().updateItemProperties('missing-id', { name: 'nope' })
+
+    expect(useCanvasStore.getState().items).toEqual(original)
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('resumes tracking after a property edit: a subsequent geometry update is still undoable', () => {
+    useCanvasStore.getState().createItemLocal(makeItem())
+    useCanvasStore.temporal.getState().clear()
+
+    useCanvasStore.getState().updateItemProperties('item-1', { name: 'renamed' })
+    useCanvasStore.getState().updateItemGeometry('item-1', { x: 500 })
+
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+    undo()
+    expect(useCanvasStore.getState().items[0].x).toBe(10)
+    // The untracked rename survives the geometry undo (different field).
+    expect(useCanvasStore.getState().items[0].name).toBe('renamed')
   })
 
   it('selecting an item and switching the active tool do not create undo entries', () => {
@@ -239,7 +288,7 @@ describe('canvasStore updateLinePoints (U17)', () => {
   }
 
   beforeEach(() => {
-    useCanvasStore.setState({ items: [], selectedItemId: null, itemProperties: {}, activeTool: 'select' })
+    useCanvasStore.setState({ items: [], selectedItemId: null, activeTool: 'select' })
     useCanvasStore.temporal.getState().clear()
   })
 

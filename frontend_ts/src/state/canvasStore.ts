@@ -20,35 +20,39 @@ export type ActiveTool = 'select' | ShapeType | LineType
  * store rather than replacing it:
  *   - U8 adds resize/rotate/delete-related actions.
  *   - U9 wraps it with `zundo` temporal middleware for undo/redo and adds
- *     `activeTool`/`itemProperties` fields.
+ *     `activeTool` field.
  *   - U13 wires these actions to real persistence (optimistic mutations).
  *
  * U9 undo/redo design notes:
  * - `zundo`'s `partialize` returns only `{ items }`, so `undo()`/`redo()`
- *   read/write *only* the `items` key on this store — `selectedItemId`,
- *   `itemProperties`, and `activeTool` are never touched by a history
- *   traversal, matching R15's "property edits are excluded" scope decision
- *   and the plan's Key Technical Decision that undo/redo is partitioned to
- *   `items` only.
+ *   read/write *only* the `items` key on this store — `selectedItemId` and
+ *   `activeTool` are never touched by a history traversal, matching R15's
+ *   "property edits are excluded" scope decision and the plan's Key
+ *   Technical Decision that undo/redo is partitioned to `items` only.
  * - `equality` gates whether a given `set()` call pushes a new history
  *   entry at all: it compares the `items` array by *reference*. Every
  *   action below that isn't supposed to be undoable (`selectItem`,
- *   `setActiveTool`, `updateItemProperties`) only ever `set()`s keys other
- *   than `items`, so `items` keeps the same reference across those calls
- *   and no history entry is created. `setItems`, `createItemLocal`,
- *   `updateItemGeometry`, and `deleteItem` all replace `items` with a new
- *   array, so those calls do produce a history entry. This is simpler and
- *   safer than a `partialize` that strips fields per-item (e.g. dropping
- *   `properties`): zundo's `undo()`/`redo()` write the partialized
- *   snapshot straight back into the store via a shallow merge, so a
- *   partialize that reshapes/omits fields would silently corrupt `items`
- *   (losing `properties`) the first time `undo()` ran. Keeping `items`
- *   snapshots whole avoids that trap entirely.
- * - Property edits live in the separate untracked `itemProperties` map
- *   rather than mutating `items[i].properties` in place — this is what
- *   actually keeps property edits out of undo history (not the
- *   `partialize`/`equality` config alone), since `items` never changes
- *   reference when only `itemProperties` is written.
+ *   `setActiveTool`) only ever `set()`s keys other than `items`, so `items`
+ *   keeps the same reference across those calls and no history entry is
+ *   created. `setItems`, `createItemLocal`, `updateItemGeometry`, and
+ *   `deleteItem` all replace `items` with a new array, so those calls do
+ *   produce a history entry. This is simpler and safer than a `partialize`
+ *   that strips fields per-item (e.g. dropping `properties`): zundo's
+ *   `undo()`/`redo()` write the partialized snapshot straight back into the
+ *   store via a shallow merge, so a partialize that reshapes/omits fields
+ *   would silently corrupt `items` (losing `properties`) the first time
+ *   `undo()` ran. Keeping `items` snapshots whole avoids that trap
+ *   entirely.
+ * - `updateItemProperties` (U10) is the one action that DOES replace
+ *   `items` with a new array reference (it patches `items[i].name`/
+ *   `items[i].properties` directly) yet must NOT create a history entry
+ *   (R15). Reference-equality alone can't distinguish that case from
+ *   `updateItemGeometry`, so this action instead brackets its `set()` call
+ *   with zundo's own `temporal.pause()`/`temporal.resume()` — see that
+ *   action's doc comment below for the full "why `items[i].properties`
+ *   instead of a separate untracked map" reasoning (U9 originally scaffolded
+ *   a separate `itemProperties` map for this; U10 found and fixed a
+ *   disconnect between that map and what actually renders — removed here).
  * - Undo-of-delete: because `partialize`/`undo` restore the exact prior
  *   `items` snapshot verbatim, undoing a delete brings the item back with
  *   its *original* id at this (purely in-memory) store layer — zundo has
@@ -73,29 +77,36 @@ export type ActiveTool = 'select' | ShapeType | LineType
  *      delete" — a Line's points ARE its shape, so repositioning one is a
  *      "move" of that Line's geometry, not a cosmetic/property change like
  *      color or name.
- *   2. This codebase's `itemProperties` map is genuinely disconnected from
- *      rendering: `ObjectShape.tsx` reads `object.properties.points`
- *      directly off `items[i]`, never from `itemProperties`. Routing point
- *      edits through `updateItemProperties` (the untracked map) would not
- *      even be visible on next render without also duplicating the write
- *      into `items` — so `items` is already the de facto source of truth
- *      for `properties.points`, undo-tracked slice or not.
+ *   2. `ObjectShape.tsx` reads `object.properties.points` directly off
+ *      `items[i]` — `items` is the sole source of truth for
+ *      `properties.points` and always has been.
  * `updateLinePoints` therefore patches `items[i].properties.points` (like
  * `updateItemGeometry` patches `items[i].x/y/...`), producing a new `items`
  * array reference and thus a coalesced history entry on each anchor-handle
  * `dragend` — consistent with every other "commit final drag position"
  * action in this store.
+ *
+ * U10 finding (property panel foundation): U9 originally scaffolded a
+ * separate, untracked `itemProperties: Record<id, propertiesJson>` map as
+ * this action's target, reasoning that keeping property writes off `items`
+ * was *how* they'd stay out of undo history. But by the time U10 was built,
+ * nothing read from that map: `ObjectShape.tsx` renders `object.name` and
+ * (for Lines) `object.properties.points` straight off `items[i]`, and U17's
+ * `updateLinePoints` already established `items[i].properties` as the real
+ * source of truth for a Line's structural data. A Property Panel writing
+ * to `itemProperties` would have silently edited a piece of state nothing
+ * displays or persists — a real bug, not just a scaffold to build on top
+ * of. Fixed by deleting the `itemProperties` field/map entirely and having
+ * `updateItemProperties` patch `items[i].name`/`items[i].properties`
+ * directly, same as every other field on an Object. Untracked-ness (R15)
+ * is now achieved via `temporal.pause()`/`temporal.resume()` around the
+ * `set()` call instead of via a separate map — zundo's `_handleSet` no-ops
+ * entirely while `isTracking` is false (confirmed against zundo 2.3.0's
+ * source), so this is a genuine "skip this set from history" primitive,
+ * not a workaround.
  */
 export interface CanvasState {
   items: CanvasObject[]
-  /**
-   * Per-item `properties` JSON (U10's property panel target), keyed by
-   * `CanvasObject['id']` (as a string). Deliberately NOT stored on
-   * `items[i].properties` — see the class doc above for why keeping it
-   * separate is what keeps property edits out of undo history and safe
-   * from being clobbered by an `undo()`/`redo()` snapshot restore.
-   */
-  itemProperties: Record<string, Record<string, unknown>>
   selectedItemId: CanvasObject['id'] | null
   /** Drawing-tool mode for U15/U16's shape/line creation flows. */
   activeTool: ActiveTool
@@ -142,11 +153,31 @@ export interface CanvasState {
   updateLinePoints: (id: CanvasObject['id'], pointIndex: number, point: Point) => void
 
   /**
-   * Patches an item's `properties` JSON (U10's property panel writes).
-   * Intentionally NOT undoable (R15's confirmed scope decision) — see the
-   * class doc for how this stays out of undo history.
+   * Patches an item's `name` and/or `properties` JSON (U10's property panel
+   * writes) directly on `items[i]` — the same location `ObjectShape.tsx`
+   * renders `name`/`properties.points` from, so a saved edit is guaranteed
+   * to actually be visible (see the class doc's "U10 finding" for why this
+   * matters). `properties`, when provided, REPLACES the item's `properties`
+   * object wholesale rather than shallow-merging — this lets the Property
+   * Panel's generic key-value editor support deleting a key (the panel
+   * builds the full next-`properties` object itself, preserving any
+   * Line-structural keys like `points`/`curve_style` it doesn't expose in
+   * its generic editor, and omitting whatever the user deleted). `name`,
+   * when provided, replaces the item's `name`.
+   *
+   * Intentionally NOT undoable (R15's confirmed scope decision): even
+   * though this produces a new `items` array reference (which would
+   * otherwise register as a history-worthy change under the store's
+   * reference-equality check), the implementation brackets its `set()` call
+   * with `temporal.pause()`/`temporal.resume()` so zundo's history tracking
+   * is genuinely suspended for the duration — see the class doc for why
+   * this is the correct primitive (not a coincidental side effect).
+   * A no-op if `id` doesn't match any item.
    */
-  updateItemProperties: (id: CanvasObject['id'], patch: Record<string, unknown>) => void
+  updateItemProperties: (
+    id: CanvasObject['id'],
+    patch: { name?: string; properties?: Record<string, unknown> },
+  ) => void
 
   /** Sets the active drawing tool (U15/U16 scaffolding). Untracked by undo. */
   setActiveTool: (tool: ActiveTool) => void
@@ -156,7 +187,6 @@ export const useCanvasStore = create<CanvasState>()(
   temporal(
     (set) => ({
       items: [],
-      itemProperties: {},
       selectedItemId: null,
       activeTool: 'select',
 
@@ -197,29 +227,44 @@ export const useCanvasStore = create<CanvasState>()(
           }
         }),
 
-      updateItemProperties: (id, patch) =>
-        set((state) => {
-          const key = String(id)
-          return {
-            itemProperties: {
-              ...state.itemProperties,
-              [key]: { ...state.itemProperties[key], ...patch },
-            },
-          }
-        }),
+      updateItemProperties: (id, patch) => {
+        // Suspend zundo tracking for exactly this set() call (R15: property
+        // edits must not create undo history), then immediately resume so
+        // every other action continues to be tracked normally. See the
+        // class doc's "U10 finding" for why pause/resume (not a separate
+        // untracked map) is the correct primitive here.
+        const temporalStore = useCanvasStore.temporal.getState()
+        temporalStore.pause()
+        set((state) => ({
+          items: state.items.map((item) =>
+            item.id === id
+              ? {
+                  ...item,
+                  ...(patch.name !== undefined ? { name: patch.name } : {}),
+                  ...(patch.properties !== undefined ? { properties: patch.properties } : {}),
+                }
+              : item,
+          ),
+        }))
+        temporalStore.resume()
+      },
 
       setActiveTool: (tool) => set({ activeTool: tool }),
     }),
     {
       // Only `items` is part of the tracked/restorable snapshot — undo()/
-      // redo() never touch selectedItemId, itemProperties, or activeTool.
+      // redo() never touch selectedItemId or activeTool.
       partialize: (state) => ({ items: state.items }),
-      // Reference equality on `items` is sufficient: every action that
-      // shouldn't create a history entry (selectItem, setActiveTool,
-      // updateItemProperties) never reassigns `items`, so its reference is
-      // unchanged across those calls. Every action that should create an
-      // entry (setItems, createItemLocal, updateItemGeometry, deleteItem)
-      // always builds a new `items` array.
+      // Reference equality on `items` is sufficient for the actions that
+      // rely on it: selectItem/setActiveTool never reassign `items`, so its
+      // reference is unchanged across those calls and no entry is created.
+      // setItems, createItemLocal, updateItemGeometry, deleteItem, and
+      // updateLinePoints always build a new `items` array, so those do
+      // produce an entry. `updateItemProperties` ALSO builds a new `items`
+      // array (see its doc comment) but is kept out of history via
+      // `temporal.pause()`/`resume()` instead of relying on this equality
+      // check, since reference equality alone can't distinguish it from
+      // updateItemGeometry/updateLinePoints.
       equality: (past, current) => past.items === current.items,
     },
   ),
