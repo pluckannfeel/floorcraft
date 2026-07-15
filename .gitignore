@@ -23,3 +23,9 @@ staticfiles/
 .DS_Store
 .vscode/
 .idea/
+
+# claude ce docs
+docs/
+
+# jotted down issues personal
+issues.txt
