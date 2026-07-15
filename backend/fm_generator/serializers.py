@@ -13,12 +13,6 @@ CURVED_LINE_TYPES = {
     Objects.ObjectType.LINE_S_CURVE,
 }
 
-SHAPE_TYPES = {
-    Objects.ObjectType.SHAPE_RECTANGLE,
-    Objects.ObjectType.SHAPE_SQUARE,
-    Objects.ObjectType.SHAPE_CIRCLE,
-}
-
 
 class ObjectSerializer(serializers.ModelSerializer):
     class Meta:

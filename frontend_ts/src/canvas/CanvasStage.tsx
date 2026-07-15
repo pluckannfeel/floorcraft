@@ -3,7 +3,7 @@ import type Konva from 'konva'
 import { Layer, Line, Rect, Stage } from 'react-konva'
 import { AlignmentGuideLines, NO_GUIDES } from './AlignmentGuides'
 import type { GuideLines } from './AlignmentGuides'
-import { computePinchZoom, computeWheelZoom, screenToStagePoint, shouldHandleDeleteKey } from './coordinates'
+import { clientToContainerPoint, computePinchZoom, computeWheelZoom, screenToStagePoint, shouldHandleDeleteKey } from './coordinates'
 import type { ZoomPanState } from './coordinates'
 import { LineAnchorHandles } from './LineAnchorHandles'
 import { isLineTool, LinePreview, parseLinePoints, useLineTool } from './LineTool'
@@ -203,8 +203,8 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         lineTool.finishDraw()
         return
       }
-      const activeElementTag = document.activeElement?.tagName
-      if (shouldHandleDeleteKey(event.key, selectedItemId, activeElementTag)) {
+      const activeElement = document.activeElement as HTMLElement | null
+      if (shouldHandleDeleteKey(event.key, selectedItemId, activeElement?.tagName, activeElement?.isContentEditable)) {
         onDeleteSelected?.()
       }
     }
@@ -283,12 +283,8 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         event.evt.preventDefault()
         const stage = event.target.getStage()
         if (!stage) return
-        const container = stage.container()
-        const rect = container.getBoundingClientRect()
-        const toContainerPoint = (touch: Touch): Point => ({
-          x: touch.clientX - rect.left,
-          y: touch.clientY - rect.top,
-        })
+        const toContainerPoint = (touch: Touch): Point =>
+          clientToContainerPoint(stage, touch.clientX, touch.clientY)
         const p1 = toContainerPoint(touches[0])
         const p2 = toContainerPoint(touches[1])
         const center: Point = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }

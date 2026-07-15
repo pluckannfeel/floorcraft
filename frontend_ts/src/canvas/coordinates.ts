@@ -11,14 +11,17 @@ import type { Point } from './types'
  * to the stage container's bounding rect since the transform assumes
  * container-relative input.
  */
-export function screenToStagePoint(stage: Konva.Stage, clientX: number, clientY: number): Point {
-  const container = stage.container()
-  const rect = container.getBoundingClientRect()
-  const containerRelative: Point = {
-    x: clientX - rect.left,
-    y: clientY - rect.top,
-  }
+/** Converts a client (viewport) point into a point relative to the Stage's
+ * container element — the first step both `screenToStagePoint` and any
+ * multi-touch gesture math (e.g. pinch-zoom) need before doing anything
+ * transform-aware. */
+export function clientToContainerPoint(stage: Konva.Stage, clientX: number, clientY: number): Point {
+  const rect = stage.container().getBoundingClientRect()
+  return { x: clientX - rect.left, y: clientY - rect.top }
+}
 
+export function screenToStagePoint(stage: Konva.Stage, clientX: number, clientY: number): Point {
+  const containerRelative = clientToContainerPoint(stage, clientX, clientY)
   const transform = stage.getAbsoluteTransform().copy().invert()
   return transform.point(containerRelative)
 }
@@ -230,14 +233,24 @@ export function constrainTransformBox(
  * (U8), but this guard is cheap now and forward-safe for U10's Property
  * Panel inputs, which will share the same window-level listener.
  */
+/** True when the given element tag/contentEditable state means keyboard
+ * shortcuts should be suppressed because the user is typing into a field —
+ * shared by every keyboard-shortcut guard (Delete/Backspace here,
+ * undo/redo in `useCanvasShortcuts.ts`) so the definition of "typing" can't
+ * drift between them. */
+export function isEditableTarget(activeElementTag: string | undefined, isContentEditable: boolean): boolean {
+  const tag = activeElementTag?.toUpperCase()
+  return tag === 'INPUT' || tag === 'TEXTAREA' || isContentEditable
+}
+
 export function shouldHandleDeleteKey(
   key: string,
   selectedItemId: unknown,
   activeElementTag: string | undefined,
+  isContentEditable = false,
 ): boolean {
   if (selectedItemId == null) return false
   if (key !== 'Delete' && key !== 'Backspace') return false
-  const tag = activeElementTag?.toUpperCase()
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return false
+  if (isEditableTarget(activeElementTag, isContentEditable)) return false
   return true
 }

@@ -175,54 +175,25 @@ export function CanvasEditorPage() {
 
   const getStage = useCallback(() => stageRef.current, []);
 
-  const handleDrop = useCallback(
-    (type: CatalogType, point: Point) => {
-      const floorPlan = floorPlanQuery.data;
-      if (!floorPlan) return;
-
+  // Shared by handleDrop/handleCreateShape/handleCreateLine below: every
+  // newly-created Object needs a locally-created client-side id (until U13's
+  // persistence swaps it for the server-assigned one), a top-of-stack
+  // z_index, and the same fixed set of defaulted fields — only the type,
+  // geometry, and properties actually differ per creation path.
+  const buildLocalObject = useCallback(
+    (
+      floorPlanId: number,
+      type: CanvasObject["type"],
+      geometry: { x: number; y: number; width: number; height: number },
+      properties: CanvasObject["properties"] = {},
+    ): CanvasObject => {
       const maxZIndex = items.reduce(
         (max, item) => Math.max(max, item.z_index),
         -1,
       );
-      const newItem: CanvasObject = {
-        // Locally-created items get a client-side id until U13 wires real
-        // persistence (POST) and swaps it for the server-assigned id.
+      return {
         id: `local-${crypto.randomUUID()}`,
-        floor_plan: floorPlan.id,
-        type,
-        name: "",
-        x: point.x,
-        y: point.y,
-        width: 40,
-        height: 40,
-        rotation: 0,
-        z_index: maxZIndex + 1,
-        properties: {},
-      };
-      createItemLocal(newItem);
-      persistence.createObject(newItem);
-    },
-    [floorPlanQuery.data, items, createItemLocal, persistence],
-  );
-
-  // U15: commits a click-drag-sized Shape. Same locally-created-id pattern
-  // as `handleDrop` above (U13 later swaps in the server-assigned id) — the
-  // only difference is the source of x/y/width/height (drag geometry vs.
-  // sidebar's fixed DEFAULT_ITEM_SIZE) and the object `type` (a ShapeType,
-  // not a CatalogType). Resets `activeTool` back to `'select'` per the
-  // plan, so drawing one Shape doesn't leave the tool "stuck" active.
-  const handleCreateShape = useCallback(
-    (type: ShapeType, geometry: ShapeGeometry) => {
-      const floorPlan = floorPlanQuery.data;
-      if (!floorPlan) return;
-
-      const maxZIndex = items.reduce(
-        (max, item) => Math.max(max, item.z_index),
-        -1,
-      );
-      const newItem: CanvasObject = {
-        id: `local-${crypto.randomUUID()}`,
-        floor_plan: floorPlan.id,
+        floor_plan: floorPlanId,
         type,
         name: "",
         x: geometry.x,
@@ -231,17 +202,46 @@ export function CanvasEditorPage() {
         height: geometry.height,
         rotation: 0,
         z_index: maxZIndex + 1,
-        properties: {},
+        properties,
       };
+    },
+    [items],
+  );
+
+  const handleDrop = useCallback(
+    (type: CatalogType, point: Point) => {
+      const floorPlan = floorPlanQuery.data;
+      if (!floorPlan) return;
+
+      const newItem = buildLocalObject(floorPlan.id, type, {
+        x: point.x,
+        y: point.y,
+        width: 40,
+        height: 40,
+      });
+      createItemLocal(newItem);
+      persistence.createObject(newItem);
+    },
+    [floorPlanQuery.data, buildLocalObject, createItemLocal, persistence],
+  );
+
+  // U15: commits a click-drag-sized Shape. Resets `activeTool` back to
+  // 'select' per the plan, so drawing one Shape doesn't leave the tool
+  // "stuck" active.
+  const handleCreateShape = useCallback(
+    (type: ShapeType, geometry: ShapeGeometry) => {
+      const floorPlan = floorPlanQuery.data;
+      if (!floorPlan) return;
+
+      const newItem = buildLocalObject(floorPlan.id, type, geometry);
       createItemLocal(newItem);
       persistence.createObject(newItem);
       setActiveTool("select");
     },
-    [floorPlanQuery.data, items, createItemLocal, setActiveTool, persistence],
+    [floorPlanQuery.data, buildLocalObject, createItemLocal, setActiveTool, persistence],
   );
 
-  // U16: commits a finished (>= 2 points) click-per-point Line. Same
-  // locally-created-id pattern as `handleDrop`/`handleCreateShape` above.
+  // U16: commits a finished (>= 2 points) click-per-point Line.
   // `x`/`y`/`width`/`height` are the points' bounding box — descriptive
   // metadata only (per LineTool.tsx's `computeLineBoundingBox` doc), since
   // `properties.points` remains the actual rendering/editing source of
@@ -254,29 +254,16 @@ export function CanvasEditorPage() {
       const floorPlan = floorPlanQuery.data;
       if (!floorPlan) return;
 
-      const maxZIndex = items.reduce(
-        (max, item) => Math.max(max, item.z_index),
-        -1,
-      );
       const bbox = computeLineBoundingBox(points);
-      const newItem: CanvasObject = {
-        id: `local-${crypto.randomUUID()}`,
-        floor_plan: floorPlan.id,
-        type,
-        name: "",
-        x: bbox.x,
-        y: bbox.y,
-        width: bbox.width,
-        height: bbox.height,
-        rotation: 0,
-        z_index: maxZIndex + 1,
-        properties: { points, curve_style: curveStyleForType(type) },
-      };
+      const newItem = buildLocalObject(floorPlan.id, type, bbox, {
+        points,
+        curve_style: curveStyleForType(type),
+      });
       createItemLocal(newItem);
       persistence.createObject(newItem);
       setActiveTool("select");
     },
-    [floorPlanQuery.data, items, createItemLocal, setActiveTool, persistence],
+    [floorPlanQuery.data, buildLocalObject, createItemLocal, setActiveTool, persistence],
   );
 
   if (floorPlanQuery.isLoading || objectsQuery.isLoading) {

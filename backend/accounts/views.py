@@ -18,7 +18,7 @@ from .emails import (
     send_password_reset_email,
     send_verification_email,
 )
-from .models import User
+from .models import User, normalize_email
 from .serializers import (
     LoginSerializer,
     MeSerializer,
@@ -60,24 +60,35 @@ INVALID_LOGIN_RESPONSE = {'detail': 'Unable to log in with the provided credenti
 # authenticating (register, resend-verification, password-reset*),
 # `enforce_csrf()` never fires, so those requests would otherwise sail
 # through with NO CSRF protection at all despite `CsrfViewMiddleware`
-# being installed. The views below explicitly re-enable Django's CSRF
-# check via `@method_decorator(csrf_protect, name='dispatch')`, which
-# invokes `CsrfViewMiddleware`'s check directly rather than relying on
-# the (here, defeated) exemption flag. Do not remove this decorator from
-# any AllowAny state-changing view, and do not "fix" a CSRF failure
-# encountered during development by adding `@csrf_exempt`.
+# being installed. `CsrfProtectedAllowAnyView` below explicitly
+# re-enables Django's CSRF check via `@method_decorator(csrf_protect,
+# name='dispatch')`, which invokes `CsrfViewMiddleware`'s check directly
+# rather than relying on the (here, defeated) exemption flag. Every
+# AllowAny state-changing view must subclass it rather than `APIView`
+# directly — do not "fix" a CSRF failure encountered during development
+# by adding `@csrf_exempt`.
 
 
 @method_decorator(csrf_protect, name='dispatch')
-class RegisterView(APIView):
+class CsrfProtectedAllowAnyView(APIView):
+    """Base for anonymous-accessible views that mutate state.
+
+    Centralizes the `csrf_protect` re-enablement (see the module-level
+    CSRF note above) and the `AllowAny` permission both of these views
+    need, so a future view can't add itself to this category and forget
+    one or the other.
+    """
+
+    permission_classes = [AllowAny]
+
+
+class RegisterView(CsrfProtectedAllowAnyView):
     """POST /api/auth/register/
 
     Open to anonymous callers from the start (see U2 plan Approach: this
     must already be `AllowAny` before U4 flips the project-wide DRF
     default to `IsAuthenticated`).
     """
-
-    permission_classes = [AllowAny]
 
     def post(self, request):
         serializer = RegistrationSerializer(data=request.data)
@@ -111,9 +122,8 @@ class RegisterView(APIView):
                 contact_number=data.get('contact_number', ''),
                 country=data.get('country', ''),
                 job_title=data.get('job_title', ''),
+                is_active=False,
             )
-            user.is_active = False
-            user.save(update_fields=['is_active'])
 
         send_verification_email(user)
 
@@ -165,8 +175,7 @@ class VerifyEmailView(APIView):
         return Response({'detail': 'Your email has been verified. You can now log in.'})
 
 
-@method_decorator(csrf_protect, name='dispatch')
-class ResendVerificationView(APIView):
+class ResendVerificationView(CsrfProtectedAllowAnyView):
     """POST /api/auth/resend-verification/
 
     Responds identically whether or not the email exists or is already
@@ -179,11 +188,8 @@ class ResendVerificationView(APIView):
     control (deferred rate limiting is the primary mitigation).
     """
 
-    permission_classes = [AllowAny]
-
     def post(self, request):
-        email = (request.data.get('email') or '').strip().lower()
-        email = User.objects.normalize_email(email) if email else email
+        email = normalize_email(request.data.get('email') or '')
 
         user = User.objects.filter(email=email).first() if email else None
 
@@ -216,8 +222,7 @@ class CsrfView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-@method_decorator(csrf_protect, name='dispatch')
-class LoginView(APIView):
+class LoginView(CsrfProtectedAllowAnyView):
     """POST /api/auth/login/
 
     Open to anonymous callers from the start (same rationale as
@@ -228,8 +233,6 @@ class LoginView(APIView):
     timing/enumeration side channel that lets a caller distinguish
     "wrong password" from "unverified account" (see U3 plan Approach).
     """
-
-    permission_classes = [AllowAny]
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
@@ -288,8 +291,7 @@ def _invalidate_all_sessions_for_user(user):
             session.delete()
 
 
-@method_decorator(csrf_protect, name='dispatch')
-class PasswordResetRequestView(APIView):
+class PasswordResetRequestView(CsrfProtectedAllowAnyView):
     """POST /api/auth/password-reset/
 
     Same non-enumeration response shape as `ResendVerificationView` (same
@@ -297,12 +299,10 @@ class PasswordResetRequestView(APIView):
     Approach.
     """
 
-    permission_classes = [AllowAny]
-
     def post(self, request):
         serializer = PasswordResetRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        email = User.objects.normalize_email(serializer.validated_data['email'].strip().lower())
+        email = normalize_email(serializer.validated_data['email'])
 
         user = User.objects.filter(email=email, is_active=True).first()
 
@@ -318,8 +318,7 @@ class PasswordResetRequestView(APIView):
         return Response(PASSWORD_RESET_REQUEST_RESPONSE)
 
 
-@method_decorator(csrf_protect, name='dispatch')
-class PasswordResetConfirmView(APIView):
+class PasswordResetConfirmView(CsrfProtectedAllowAnyView):
     """POST /api/auth/password-reset-confirm/
 
     Validates the `PasswordResetTokenGenerator` token, calls
@@ -327,8 +326,6 @@ class PasswordResetConfirmView(APIView):
     instance (same pattern as registration — see U2), sets the new
     password, and invalidates the user's other active sessions.
     """
-
-    permission_classes = [AllowAny]
 
     def post(self, request):
         uid = request.data.get('uid')

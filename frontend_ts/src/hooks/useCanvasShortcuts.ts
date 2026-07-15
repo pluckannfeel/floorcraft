@@ -1,12 +1,15 @@
 import { useEffect } from "react";
 import { undo, redo } from "../state/canvasStore";
+import { isEditableTarget } from "../canvas/coordinates";
 
 export type UndoRedoAction = "undo" | "redo" | null;
 
 /**
  * Pure guard/dispatch logic for the undo/redo keyboard shortcuts, kept
- * separate from the DOM listener so it can be unit-tested directly —
- * mirrors `shouldHandleDeleteKey` in `canvas/coordinates.ts`.
+ * separate from the DOM listener so it can be unit-tested directly.
+ * Shares its "is the user typing" guard with `shouldHandleDeleteKey` via
+ * `isEditableTarget` (`canvas/coordinates.ts`) so the two shortcuts can't
+ * drift on what counts as an editable field.
  */
 export function resolveUndoRedoAction(
   key: string,
@@ -16,9 +19,7 @@ export function resolveUndoRedoAction(
   isContentEditable: boolean,
 ): UndoRedoAction {
   if (!modKey) return null;
-
-  const tag = activeElementTag?.toUpperCase();
-  if (tag === "INPUT" || tag === "TEXTAREA" || isContentEditable) return null;
+  if (isEditableTarget(activeElementTag, isContentEditable)) return null;
 
   const normalizedKey = key.toLowerCase();
   if (normalizedKey === "z") return shiftKey ? "redo" : "undo";

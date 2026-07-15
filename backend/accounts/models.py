@@ -26,3 +26,15 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.email
+
+
+def normalize_email(raw_email):
+    """Trim, lowercase, and apply Django's domain-part normalization.
+
+    Shared by every place that looks up or stores an email address for
+    lookup purposes (registration, resend-verification,
+    password-reset-request) so the normalization rule can't drift between
+    them.
+    """
+    email = (raw_email or '').strip().lower()
+    return User.objects.normalize_email(email) if email else email

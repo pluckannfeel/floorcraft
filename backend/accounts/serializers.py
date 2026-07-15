@@ -1,7 +1,7 @@
 from django.contrib.auth import password_validation
 from rest_framework import serializers
 
-from .models import User
+from .models import User, normalize_email
 
 
 class RegistrationSerializer(serializers.ModelSerializer):
@@ -34,7 +34,7 @@ class RegistrationSerializer(serializers.ModelSerializer):
         ]
 
     def validate_email(self, value):
-        return User.objects.normalize_email(value).strip().lower()
+        return normalize_email(value)
 
     def validate(self, attrs):
         password = attrs.get('password')
