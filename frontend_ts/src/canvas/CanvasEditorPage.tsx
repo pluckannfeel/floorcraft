@@ -6,9 +6,10 @@ import { useAuth } from '../auth/AuthContext'
 import { useObjects } from '../hooks/useObjects'
 import { useCanvasStore } from '../state/canvasStore'
 import { CanvasStage } from './CanvasStage'
+import type { ShapeGeometry } from './ShapeTool'
 import { Sidebar } from './Sidebar'
 import { Toolbar } from './Toolbar'
-import type { CanvasObject, CatalogType, FloorPlan, Point } from './types'
+import type { CanvasObject, CatalogType, FloorPlan, Point, ShapeType } from './types'
 import { DEFAULT_FLOOR_PLAN_ID } from './types'
 
 /**
@@ -37,11 +38,13 @@ export function CanvasEditorPage() {
 
   const items = useCanvasStore((state) => state.items)
   const selectedItemId = useCanvasStore((state) => state.selectedItemId)
+  const activeTool = useCanvasStore((state) => state.activeTool)
   const setItems = useCanvasStore((state) => state.setItems)
   const createItemLocal = useCanvasStore((state) => state.createItemLocal)
   const selectItem = useCanvasStore((state) => state.selectItem)
   const updateItemGeometry = useCanvasStore((state) => state.updateItemGeometry)
   const deleteItem = useCanvasStore((state) => state.deleteItem)
+  const setActiveTool = useCanvasStore((state) => state.setActiveTool)
 
   const handleDeleteSelected = useCallback(() => {
     if (selectedItemId != null) deleteItem(selectedItemId)
@@ -82,6 +85,37 @@ export function CanvasEditorPage() {
       createItemLocal(newItem)
     },
     [floorPlanQuery.data, items, createItemLocal],
+  )
+
+  // U15: commits a click-drag-sized Shape. Same locally-created-id pattern
+  // as `handleDrop` above (U13 later swaps in the server-assigned id) — the
+  // only difference is the source of x/y/width/height (drag geometry vs.
+  // sidebar's fixed DEFAULT_ITEM_SIZE) and the object `type` (a ShapeType,
+  // not a CatalogType). Resets `activeTool` back to `'select'` per the
+  // plan, so drawing one Shape doesn't leave the tool "stuck" active.
+  const handleCreateShape = useCallback(
+    (type: ShapeType, geometry: ShapeGeometry) => {
+      const floorPlan = floorPlanQuery.data
+      if (!floorPlan) return
+
+      const maxZIndex = items.reduce((max, item) => Math.max(max, item.z_index), -1)
+      const newItem: CanvasObject = {
+        id: `local-${crypto.randomUUID()}`,
+        floor_plan: floorPlan.id,
+        type,
+        name: '',
+        x: geometry.x,
+        y: geometry.y,
+        width: geometry.width,
+        height: geometry.height,
+        rotation: 0,
+        z_index: maxZIndex + 1,
+        properties: {},
+      }
+      createItemLocal(newItem)
+      setActiveTool('select')
+    },
+    [floorPlanQuery.data, items, createItemLocal, setActiveTool],
   )
 
   if (floorPlanQuery.isLoading || objectsQuery.isLoading) {
@@ -132,6 +166,8 @@ export function CanvasEditorPage() {
             onSelectObject={selectItem}
             onGeometryChange={updateItemGeometry}
             onDeleteSelected={handleDeleteSelected}
+            activeTool={activeTool}
+            onCreateShape={handleCreateShape}
           />
         </div>
       </div>
