@@ -187,7 +187,7 @@ export function CanvasEditorPage() {
         </button>
       </header>
 
-      <Toolbar />
+      <Toolbar getStage={getStage} />
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <Sidebar

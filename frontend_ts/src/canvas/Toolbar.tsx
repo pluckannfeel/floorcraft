@@ -1,5 +1,7 @@
+import type Konva from 'konva'
 import { useStore } from 'zustand'
 import { redo, undo, useCanvasStore } from '../state/canvasStore'
+import { exportStageToPng } from './export'
 import type { LineType, ShapeType } from './types'
 
 /** U15's three shape-drawing tools, with their toolbar labels. */
@@ -18,16 +20,25 @@ const LINE_TOOLS: { type: LineType; label: string }[] = [
 
 /**
  * Canvas editor toolbar (U9: undo/redo; U15: shape drawing tools; U16: line
- * drawing tools). Later units append more controls to this same component —
- * zoom (U11/U12), export (U18), z-order (U18/U19) — per the plan's Output
- * Structure, rather than each unit creating a separate toolbar.
+ * drawing tools; U12: PNG export). Later units append more controls to this
+ * same component — z-order (U18/U19) — per the plan's Output Structure,
+ * rather than each unit creating a separate toolbar.
  *
  * Undo/redo availability comes from zundo's temporal store
  * (`useCanvasStore.temporal`), a separate vanilla store from the main
  * `useCanvasStore` — subscribed here via zustand's `useStore` so the
  * buttons re-render as `pastStates`/`futureStates` change.
  */
-export function Toolbar() {
+interface ToolbarProps {
+  /** Returns the live Konva.Stage instance for U12's export button. Passed
+   * in as a prop rather than Toolbar owning a ref itself, since the Stage
+   * instance is created (and its ref held) by `CanvasEditorPage` — the same
+   * getStage-as-prop pattern `Sidebar.tsx` already uses for its
+   * drop-coordinate conversion. */
+  getStage: () => Konva.Stage | null
+}
+
+export function Toolbar({ getStage }: ToolbarProps) {
   const canUndo = useStore(useCanvasStore.temporal, (state) => state.pastStates.length > 0)
   const canRedo = useStore(useCanvasStore.temporal, (state) => state.futureStates.length > 0)
   const activeTool = useCanvasStore((state) => state.activeTool)
@@ -36,6 +47,18 @@ export function Toolbar() {
   const zoomIn = useCanvasStore((state) => state.zoomIn)
   const zoomOut = useCanvasStore((state) => state.zoomOut)
   const resetZoom = useCanvasStore((state) => state.resetZoom)
+  const selectedItemId = useCanvasStore((state) => state.selectedItemId)
+  const selectItem = useCanvasStore((state) => state.selectItem)
+
+  // U12: clears selection (detaching Transformer/anchor handles), waits for
+  // that to actually redraw, then downloads a PNG snapshot — see
+  // `export.ts`'s doc comment for why the clear-then-wait sequencing is
+  // needed instead of exporting immediately.
+  const handleExport = () => {
+    const stage = getStage()
+    if (!stage) return
+    exportStageToPng(stage, selectedItemId, selectItem)
+  }
 
   return (
     <div
@@ -118,6 +141,13 @@ export function Toolbar() {
       </button>
       <button type="button" onClick={() => resetZoom()} aria-label="Reset zoom">
         Reset
+      </button>
+
+      <div style={{ width: 1, backgroundColor: '#e5e7eb', margin: '0 4px' }} aria-hidden="true" />
+
+      {/* U12: exports the current floor plan as a PNG download. */}
+      <button type="button" onClick={handleExport}>
+        Export PNG
       </button>
     </div>
   )
