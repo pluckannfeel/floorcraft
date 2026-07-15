@@ -2,13 +2,14 @@ import { forwardRef, useEffect, useRef } from 'react'
 import type Konva from 'konva'
 import { Layer, Line, Rect, Stage } from 'react-konva'
 import { screenToStagePoint, shouldHandleDeleteKey } from './coordinates'
+import { isLineTool, LinePreview, useLineTool } from './LineTool'
 import { ObjectShape } from './ObjectShape'
 import { SelectionTransformer } from './SelectionTransformer'
 import type { TransformGeometryPatch } from './SelectionTransformer'
 import { isShapeTool, ShapePreview, useShapeTool } from './ShapeTool'
 import type { ShapeGeometry } from './ShapeTool'
 import type { ActiveTool } from '../state/canvasStore'
-import type { CanvasObject, ShapeType } from './types'
+import type { CanvasObject, LineType, Point, ShapeType } from './types'
 
 interface CanvasStageProps {
   width: number
@@ -35,6 +36,10 @@ interface CanvasStageProps {
    * matching how `onGeometryChange`/`onDeleteSelected` delegate their store
    * writes to the caller). */
   onCreateShape?: (type: ShapeType, geometry: ShapeGeometry) => void
+  /** Commits a finished (>= 2 points) click-per-point Line (U16). The caller
+   * is responsible for both creating the item AND resetting `activeTool`
+   * back to `'select'`, same delegation as `onCreateShape`. */
+  onCreateLine?: (type: LineType, points: Point[]) => void
 }
 
 /** Builds the static grid line coordinates for a `width` x `height` canvas
@@ -76,11 +81,13 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onDeleteSelected,
     activeTool = 'select',
     onCreateShape,
+    onCreateLine,
   },
   ref,
 ) {
   const gridLines = buildGridLines(width, height, gridSize)
   const drawingShape = isShapeTool(activeTool)
+  const drawingLine = isLineTool(activeTool)
 
   // Map<id, Konva.Node> resolving the selected item's live node for
   // SelectionTransformer's `.nodes([ref])` attach — populated/cleared by
@@ -97,11 +104,28 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onCommit: (type, geometry) => onCreateShape?.(type, geometry),
   })
 
-  // U8: Delete/Backspace removes the selected item. A window-level listener
-  // (not a Stage keydown handler) since Konva Stages aren't natively
-  // focusable/don't receive keyboard events by default.
+  // U16: click-per-point Line drawing. `onCommit` fires on finish (double-
+  // click or Escape) only when >= 2 points were placed; the caller both
+  // creates the item and resets `activeTool` back to `'select'`.
+  const lineTool = useLineTool({
+    gridSize,
+    canvasWidth: width,
+    canvasHeight: height,
+    onCommit: (type, points) => onCreateLine?.(type, points),
+  })
+
+  // U8: Delete/Backspace removes the selected item. U16: Escape finishes
+  // (commits-if-valid, else discards) an in-progress Line draw — takes
+  // priority over Delete/Backspace's own handling since they're unrelated
+  // keys; both live on the same window-level listener (not a Stage keydown
+  // handler) since Konva Stages aren't natively focusable/don't receive
+  // keyboard events by default.
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape' && drawingLine) {
+        lineTool.finishDraw()
+        return
+      }
       const activeElementTag = document.activeElement?.tagName
       if (shouldHandleDeleteKey(event.key, selectedItemId, activeElementTag)) {
         onDeleteSelected?.()
@@ -109,7 +133,13 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedItemId, onDeleteSelected])
+    // `lineTool.finishDraw` is the only piece of `lineTool` this effect
+    // calls; `useLineTool` doesn't memoize the object it returns, so
+    // depending on the whole `lineTool` value would re-subscribe this
+    // listener every render for no behavioral difference (same rationale as
+    // the `shapeTool` window-pointerup effect below).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedItemId, onDeleteSelected, drawingLine, lineTool.finishDraw])
 
   // U15 safety net: Konva's Stage pointer events only fire while the
   // pointer is over the canvas element, so a drag released outside the
@@ -147,6 +177,13 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           shapeTool.startDraw(activeTool, point)
           return
         }
+        // U16: a line tool is active — point placement/finishing is driven
+        // entirely by `onClick`/`onDblClick`/Escape below, not `pointerdown`;
+        // just suppress the normal click-to-clear-selection behavior below
+        // so an in-progress draw's clicks don't also clear selection.
+        if (drawingLine) {
+          return
+        }
         // Clicking empty stage space clears selection.
         if (event.target === event.target.getStage()) {
           onSelectObject(null)
@@ -163,6 +200,22 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         if (!drawingShape || !shapeTool.isDrawing) return
         shapeTool.endDraw()
       }}
+      onClick={(event) => {
+        if (!drawingLine) return
+        // The browser fires `click` twice (detail 1, then detail 2) before
+        // firing a single `dblclick` — without this guard, the second click
+        // of a double-click-to-finish gesture would append a spurious extra
+        // point immediately before `onDblClick` below finishes the draw.
+        if (event.evt.detail >= 2) return
+        const stage = event.target.getStage()
+        if (!stage) return
+        const point = screenToStagePoint(stage, event.evt.clientX, event.evt.clientY)
+        lineTool.addPoint(activeTool as LineType, point)
+      }}
+      onDblClick={() => {
+        if (!drawingLine) return
+        lineTool.finishDraw()
+      }}
     >
       {/* Grid/background layer: static, non-interactive. */}
       <Layer listening={false}>
@@ -172,12 +225,12 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         ))}
       </Layer>
 
-      {/* Interactive Objects layer. Non-listening while a shape tool is
-          active (U15): the user is drawing, not selecting/dragging existing
-          items, so clicks/drags should fall through to the Stage's own
-          drawing handlers above rather than selecting or repositioning an
-          existing Object underneath the drag. */}
-      <Layer listening={!drawingShape}>
+      {/* Interactive Objects layer. Non-listening while a shape or line tool
+          is active (U15/U16): the user is drawing, not selecting/dragging
+          existing items, so clicks/drags should fall through to the Stage's
+          own drawing handlers above rather than selecting or repositioning
+          an existing Object underneath the drag/click. */}
+      <Layer listening={!drawingShape && !drawingLine}>
         {objects.map((object) => (
           <ObjectShape
             key={object.id}
@@ -200,7 +253,8 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
       </Layer>
 
       {/* UI overlay layer: SelectionTransformer (U8), Shape draw preview
-          (U15); alignment guides land here in a later unit. Must remain
+          (U15), Line draw preview (U16); alignment guides land here in a
+          later unit. Must remain
           listening (not `listening={false}` like the grid layer) since the
           Transformer's handles are interactive. */}
       <Layer>
@@ -214,6 +268,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         {shapeTool.isDrawing && shapeTool.drawType && shapeTool.previewGeometry && (
           <ShapePreview type={shapeTool.drawType} geometry={shapeTool.previewGeometry} />
         )}
+        {lineTool.isDrawing && <LinePreview points={lineTool.points} />}
       </Layer>
     </Stage>
   )

@@ -1,6 +1,7 @@
 import type Konva from 'konva'
-import { Group, Rect, Text } from 'react-konva'
+import { Group, Line, Rect, Text } from 'react-konva'
 import { clampToBounds, snapToGrid } from './coordinates'
+import { flattenPoints, getEffectiveTension, isLineTool, parseLinePoints } from './LineTool'
 import type { CanvasObject, ObjectType, Point } from './types'
 
 /**
@@ -65,12 +66,10 @@ interface ObjectShapeProps {
  * item interaction. Resize/rotate is handled externally by U8's
  * `SelectionTransformer`, attached via the `shapeRef`-registered node.
  *
- * Type-specific rendering (Shapes/Lines) is a later unit (U15/U16) — for
- * now every type, including Shape/Line kinds, renders the same generic
- * rect so the canvas doesn't crash once those types start existing. Lines
- * will eventually get a distinct point-based editing model (U17) instead
- * of drag/Transformer, but no Line-typed items exist yet, so no type
- * branching is needed here yet.
+ * Catalog Objects and Shapes render this generic Rect+label. Line-typed
+ * Objects (U16) are structurally different — they have no meaningful
+ * width/height "box," they're defined by `properties.points` — so they
+ * branch to a dedicated `Konva.Line` render below instead.
  *
  * The Group is given an explicit `width`/`height` (matching the Rect's)
  * rather than leaving Konva to infer 0 — `SelectionTransformer` reads
@@ -88,6 +87,33 @@ export function ObjectShape({
   onGeometryChange,
 }: ObjectShapeProps) {
   const fill = colorForType(object.type)
+
+  // U16: Lines are defined by `properties.points`, not x/y/width/height —
+  // rendered as a raw/tensioned Konva.Line, not the generic Rect+label
+  // below. Not draggable as a whole Group (unlike catalog Objects/Shapes):
+  // its points are absolute canvas coordinates rendered with the Group at
+  // its natural origin, so a whole-node drag would desync the Group's
+  // x/y from the points it renders. Per Key Technical Decisions, Lines get
+  // their own point-based editing model (U17's `LineAnchorHandles`) instead
+  // of the Transformer/whole-node-drag pattern every other type uses.
+  if (isLineTool(object.type)) {
+    const points = parseLinePoints(object.properties)
+    const tension = getEffectiveTension(object.type, points.length)
+    return (
+      <Line
+        ref={shapeRef}
+        points={flattenPoints(points)}
+        stroke={fill}
+        strokeWidth={isSelected ? 3 : 2}
+        tension={tension}
+        lineCap="round"
+        lineJoin="round"
+        hitStrokeWidth={12}
+        onClick={() => onSelect?.(object.id)}
+        onTap={() => onSelect?.(object.id)}
+      />
+    )
+  }
 
   const dragBoundFunc = function dragBoundFunc(this: Konva.Node, pos: Point): Point {
     if (gridSize == null || canvasWidth == null || canvasHeight == null) return pos

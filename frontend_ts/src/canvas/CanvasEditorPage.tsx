@@ -6,10 +6,11 @@ import { useAuth } from '../auth/AuthContext'
 import { useObjects } from '../hooks/useObjects'
 import { useCanvasStore } from '../state/canvasStore'
 import { CanvasStage } from './CanvasStage'
+import { computeLineBoundingBox, curveStyleForType } from './LineTool'
 import type { ShapeGeometry } from './ShapeTool'
 import { Sidebar } from './Sidebar'
 import { Toolbar } from './Toolbar'
-import type { CanvasObject, CatalogType, FloorPlan, Point, ShapeType } from './types'
+import type { CanvasObject, CatalogType, FloorPlan, LineType, Point, ShapeType } from './types'
 import { DEFAULT_FLOOR_PLAN_ID } from './types'
 
 /**
@@ -118,6 +119,41 @@ export function CanvasEditorPage() {
     [floorPlanQuery.data, items, createItemLocal, setActiveTool],
   )
 
+  // U16: commits a finished (>= 2 points) click-per-point Line. Same
+  // locally-created-id pattern as `handleDrop`/`handleCreateShape` above.
+  // `x`/`y`/`width`/`height` are the points' bounding box — descriptive
+  // metadata only (per LineTool.tsx's `computeLineBoundingBox` doc), since
+  // `properties.points` remains the actual rendering/editing source of
+  // truth. `curve_style` is included in `properties` for every Line type
+  // (not just curved ones) even though the backend serializer only requires
+  // it for `line_curved`/`line_s_curve` — keeping it uniformly present
+  // avoids a "some Lines have curve_style, some don't" special case.
+  const handleCreateLine = useCallback(
+    (type: LineType, points: Point[]) => {
+      const floorPlan = floorPlanQuery.data
+      if (!floorPlan) return
+
+      const maxZIndex = items.reduce((max, item) => Math.max(max, item.z_index), -1)
+      const bbox = computeLineBoundingBox(points)
+      const newItem: CanvasObject = {
+        id: `local-${crypto.randomUUID()}`,
+        floor_plan: floorPlan.id,
+        type,
+        name: '',
+        x: bbox.x,
+        y: bbox.y,
+        width: bbox.width,
+        height: bbox.height,
+        rotation: 0,
+        z_index: maxZIndex + 1,
+        properties: { points, curve_style: curveStyleForType(type) },
+      }
+      createItemLocal(newItem)
+      setActiveTool('select')
+    },
+    [floorPlanQuery.data, items, createItemLocal, setActiveTool],
+  )
+
   if (floorPlanQuery.isLoading || objectsQuery.isLoading) {
     return <div role="status">Loading floor plan…</div>
   }
@@ -168,6 +204,7 @@ export function CanvasEditorPage() {
             onDeleteSelected={handleDeleteSelected}
             activeTool={activeTool}
             onCreateShape={handleCreateShape}
+            onCreateLine={handleCreateLine}
           />
         </div>
       </div>
