@@ -1,6 +1,8 @@
 import type Konva from 'konva'
 import { Group, Line, Rect, Text } from 'react-konva'
-import { clampToBounds, snapToGrid } from './coordinates'
+import { NO_GUIDES, snapDragPosition } from './AlignmentGuides'
+import type { GuideLines } from './AlignmentGuides'
+import { clampToBounds } from './coordinates'
 import { flattenPoints, getEffectiveTension, isLineTool, parseLinePoints } from './LineTool'
 import type { CanvasObject, ObjectType, Point } from './types'
 
@@ -58,6 +60,22 @@ interface ObjectShapeProps {
    * on `dragend` (U8's R13 "drag", distinct from U7's sidebar-to-canvas
    * creation drag). */
   onGeometryChange?: (id: CanvasObject['id'], patch: Partial<Pick<CanvasObject, 'x' | 'y'>>) => void
+  /** U19: every Object currently on the floor plan (including this one —
+   * `snapDragPosition` excludes `object.id` internally), used to compute
+   * alignment-guide "stops" from every OTHER Object's bbox edges/center.
+   * Optional so tests/callers that don't exercise alignment guides can omit
+   * it, in which case no alignment-snap is attempted (grid-snap only, same
+   * as before this unit). */
+  allObjects?: CanvasObject[]
+  /** U11's current Stage zoom — needed to convert U19's 5px screen-space
+   * snap threshold into model-space units. Defaults to 1 (matches
+   * `CanvasStage`'s own zoom default) so callers that don't exercise zoom
+   * still get correct alignment-snap behavior. */
+  zoom?: number
+  /** U19: reports the currently-matched guide lines (or `NO_GUIDES`) up to
+   * `CanvasStage` for rendering on the UI overlay layer, and to clear them
+   * on `dragend`. */
+  onAlignmentGuidesChange?: (guides: GuideLines) => void
 }
 
 /**
@@ -85,6 +103,9 @@ export function ObjectShape({
   canvasWidth,
   canvasHeight,
   onGeometryChange,
+  allObjects,
+  zoom = 1,
+  onAlignmentGuidesChange,
 }: ObjectShapeProps) {
   const fill = colorForType(object.type)
 
@@ -115,9 +136,27 @@ export function ObjectShape({
     )
   }
 
+  // U19: computed on every dragmove frame (Konva calls `dragBoundFunc` on
+  // each move, not just at dragend). Alignment-snap (preferred) or
+  // grid-snap (fallback per axis, see `AlignmentGuides.tsx`'s module doc for
+  // the precedence rationale) runs first, then the existing bounds-clamp
+  // always runs last — snap-then-clamp order is unchanged from U8. The
+  // matched guides (if any) are reported up to `CanvasStage` as a side
+  // effect so they render for this same frame; Konva already re-invokes this
+  // function every dragmove frame regardless, so this doesn't add extra
+  // render passes beyond what dragging already causes.
   const dragBoundFunc = function dragBoundFunc(this: Konva.Node, pos: Point): Point {
     if (gridSize == null || canvasWidth == null || canvasHeight == null) return pos
-    const snapped = snapToGrid(pos, gridSize)
+    const { point: snapped, guides } = snapDragPosition(
+      pos,
+      object.width,
+      object.height,
+      allObjects ?? [],
+      object.id,
+      zoom,
+      gridSize,
+    )
+    onAlignmentGuidesChange?.(guides)
     return clampToBounds(snapped, object.width, object.height, canvasWidth, canvasHeight)
   }
 
@@ -136,6 +175,9 @@ export function ObjectShape({
       onDragEnd={(event) => {
         const node = event.target
         onGeometryChange?.(object.id, { x: node.x(), y: node.y() })
+        // U19: destroy the temporary guide lines once the drag interaction
+        // ends (Approach: guides are removed on dragend/transformend).
+        onAlignmentGuidesChange?.(NO_GUIDES)
       }}
     >
       <Rect

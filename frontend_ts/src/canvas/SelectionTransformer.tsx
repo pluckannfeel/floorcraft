@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react'
 import type Konva from 'konva'
 import { Transformer } from 'react-konva'
+import { NO_GUIDES, snapResizeBox } from './AlignmentGuides'
+import type { GuideLines } from './AlignmentGuides'
 import { constrainTransformBox, MIN_ITEM_SIZE } from './coordinates'
 import type { CanvasObject } from './types'
 
@@ -78,6 +80,18 @@ interface SelectionTransformerProps {
   canvasWidth: number
   canvasHeight: number
   onTransformEnd: (id: CanvasObject['id'], patch: TransformGeometryPatch) => void
+  /** U19: every Object currently on the floor plan, used to compute
+   * alignment-guide "stops" during resize. Optional so tests/callers that
+   * don't exercise alignment guides can omit it (no alignment-snap
+   * attempted in that case, `boundBoxFunc` behaves exactly as before this
+   * unit). */
+  allObjects?: CanvasObject[]
+  /** U11's current Stage zoom — converts U19's 5px screen-space snap
+   * threshold into model-space units. Defaults to 1. */
+  zoom?: number
+  /** U19: reports the currently-matched guide lines (or `NO_GUIDES`) up to
+   * `CanvasStage` for rendering, and to clear them on `transformend`. */
+  onAlignmentGuidesChange?: (guides: GuideLines) => void
 }
 
 /**
@@ -99,6 +113,9 @@ export function SelectionTransformer({
   canvasWidth,
   canvasHeight,
   onTransformEnd,
+  allObjects,
+  zoom = 1,
+  onAlignmentGuidesChange,
 }: SelectionTransformerProps) {
   const transformerRef = useRef<Konva.Transformer>(null)
 
@@ -113,8 +130,23 @@ export function SelectionTransformer({
   return (
     <Transformer
       ref={transformerRef}
-      boundBoxFunc={(oldBox, newBox) => constrainTransformBox(oldBox, newBox, canvasWidth, canvasHeight)}
+      // U19: alignment-snap runs first (adjusting newBox's x/y/width/height
+      // per whichever edge matched — see `AlignmentGuides.tsx`'s
+      // `snapResizeBox`/`applyAxisSnapToEdge`), then the existing
+      // `constrainTransformBox` bounds/min-size clamp always runs last on
+      // the (possibly snapped) box — same snap-then-clamp order U8's drag
+      // path already established, applied here to resize too.
+      boundBoxFunc={(oldBox, newBox) => {
+        if (selectedItemId == null) return constrainTransformBox(oldBox, newBox, canvasWidth, canvasHeight)
+        const { box: snapped, guides } = snapResizeBox(newBox, allObjects ?? [], selectedItemId, zoom)
+        onAlignmentGuidesChange?.(guides)
+        return constrainTransformBox(oldBox, { ...newBox, ...snapped }, canvasWidth, canvasHeight)
+      }}
       onTransformEnd={(event) => {
+        // U19: destroy the temporary guide lines once the resize
+        // interaction ends (Approach: guides are removed on
+        // dragend/transformend).
+        onAlignmentGuidesChange?.(NO_GUIDES)
         if (selectedItemId == null) return
         const node = event.target
 

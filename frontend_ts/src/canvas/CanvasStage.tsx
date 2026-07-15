@@ -1,6 +1,8 @@
-import { forwardRef, useEffect, useRef } from 'react'
+import { forwardRef, useEffect, useRef, useState } from 'react'
 import type Konva from 'konva'
 import { Layer, Line, Rect, Stage } from 'react-konva'
+import { AlignmentGuideLines, NO_GUIDES } from './AlignmentGuides'
+import type { GuideLines } from './AlignmentGuides'
 import { computePinchZoom, computeWheelZoom, screenToStagePoint, shouldHandleDeleteKey } from './coordinates'
 import type { ZoomPanState } from './coordinates'
 import { LineAnchorHandles } from './LineAnchorHandles'
@@ -107,8 +109,8 @@ export function sortObjectsByZIndex(objects: CanvasObject[]): CanvasObject[] {
  * to hold (e.g. "outlines" is just another catalog type living alongside
  * everything else in the interactive layer), so it's dropped.
  *
- * The UI overlay layer is currently empty — Transformer (U8) and alignment
- * guides (U9/U28) render into it in later units.
+ * The UI overlay layer holds the Transformer (U8) and, as of this unit,
+ * alignment guides (U19).
  */
 export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function CanvasStage(
   {
@@ -160,6 +162,14 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // SelectionTransformer's `.nodes([ref])` attach — populated/cleared by
   // each ObjectShape's `shapeRef` callback as items mount/unmount.
   const shapeNodesRef = useRef(new Map<CanvasObject['id'], Konva.Node>())
+
+  // U19: the currently-matched alignment guide(s), reported up by whichever
+  // ObjectShape is being dragged or by SelectionTransformer during a resize,
+  // on every dragmove/transform frame; reset to `NO_GUIDES` on
+  // dragend/transformend. Plain `useState` (not a ref) since this drives
+  // what `AlignmentGuideLines` renders below — re-rendering every drag frame
+  // is the accepted, unthrottled cost the plan flags (Risks & Dependencies).
+  const [guides, setGuides] = useState<GuideLines>(NO_GUIDES)
 
   // U15: click-drag-to-size Shape drawing. `onCommit` fires on pointerup
   // with the finished (snapped/clamped) geometry; the caller (CanvasEditorPage)
@@ -381,6 +391,9 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             canvasWidth={width}
             canvasHeight={height}
             onGeometryChange={onGeometryChange}
+            allObjects={objects}
+            zoom={zoom}
+            onAlignmentGuidesChange={setGuides}
             shapeRef={(node) => {
               if (node) {
                 shapeNodesRef.current.set(object.id, node)
@@ -393,8 +406,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
       </Layer>
 
       {/* UI overlay layer: SelectionTransformer (U8), Shape draw preview
-          (U15), Line draw preview (U16); alignment guides land here in a
-          later unit. Must remain
+          (U15), Line draw preview (U16), alignment guides (U19). Must remain
           listening (not `listening={false}` like the grid layer) since the
           Transformer's handles are interactive. */}
       <Layer>
@@ -415,12 +427,19 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             canvasWidth={width}
             canvasHeight={height}
             onTransformEnd={(id, patch: TransformGeometryPatch) => onGeometryChange?.(id, patch)}
+            allObjects={objects}
+            zoom={zoom}
+            onAlignmentGuidesChange={setGuides}
           />
         )}
         {shapeTool.isDrawing && shapeTool.drawType && shapeTool.previewGeometry && (
           <ShapePreview type={shapeTool.drawType} geometry={shapeTool.previewGeometry} />
         )}
         {lineTool.isDrawing && <LinePreview points={lineTool.points} />}
+        {/* U19: temporary dashed guide lines, matched during a drag/resize
+            and destroyed on dragend/transformend (see the `guides` state
+            above). */}
+        <AlignmentGuideLines guides={guides} width={width} height={height} />
       </Layer>
     </Stage>
   )
