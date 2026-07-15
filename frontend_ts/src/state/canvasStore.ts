@@ -1,6 +1,12 @@
 import { create } from 'zustand'
 import { temporal } from 'zundo'
+import { clampZoom } from '../canvas/coordinates'
 import type { CanvasObject, LineType, Point, ShapeType } from '../canvas/types'
+
+/** U11's default zoom step for the Toolbar's zoom in/out buttons (a gentler
+ * per-click step than a single wheel "tick" would feel like, since a click
+ * is a more deliberate action than a scroll). */
+const TOOLBAR_ZOOM_STEP = 1.2
 
 /**
  * Drawing-tool mode for the (not-yet-built, U15/U16) shape/line creation
@@ -110,6 +116,18 @@ export interface CanvasState {
   selectedItemId: CanvasObject['id'] | null
   /** Drawing-tool mode for U15/U16's shape/line creation flows. */
   activeTool: ActiveTool
+  /** U11: current Stage scale (mirrors Konva's `scaleX`/`scaleY`, kept
+   * equal on both axes). View state, not document state — deliberately NOT
+   * part of `partialize` below, so zooming/panning never creates undo
+   * history (same "only set() items and it's tracked" mechanism the class
+   * doc above already relies on for `selectedItemId`/`activeTool`: this
+   * store's `equality` only compares `items` by reference, and neither
+   * `setZoom`/`setStagePosition`/etc. below ever touch `items`, so no
+   * history entry is ever pushed for them). */
+  zoom: number
+  /** U11: current Stage `x`/`y` (pan offset). Same untracked-by-undo
+   * reasoning as `zoom` above. */
+  stagePosition: Point
 
   /** Replaces the full items list (e.g. after the initial fetch resolves). */
   setItems: (items: CanvasObject[]) => void
@@ -181,6 +199,25 @@ export interface CanvasState {
 
   /** Sets the active drawing tool (U15/U16 scaffolding). Untracked by undo. */
   setActiveTool: (tool: ActiveTool) => void
+
+  /** U11: sets the Stage's zoom AND position together in one call — the
+   * shape `coordinates.ts`'s `computeWheelZoom`/`computePinchZoom` return,
+   * since a zoom-to-point/pinch changes both at once (repositioning is what
+   * keeps the point under the cursor/fingers fixed). Clamped defensively
+   * even though callers already clamp, so a stray direct call can't push
+   * `zoom` outside `[MIN_ZOOM, MAX_ZOOM]`. */
+  setZoomAndPosition: (zoom: number, position: Point) => void
+  /** U11: commits the Stage's final `x`/`y` after a drag-to-pan gesture
+   * (`dragend`) — mirrors `updateItemGeometry`'s "commit on release, not
+   * every intermediate move" convention. */
+  setStagePosition: (position: Point) => void
+  /** U11 Toolbar button: zooms in by a fixed step, anchored at the current
+   * pan position (no cursor to anchor to for a button click). */
+  zoomIn: () => void
+  /** U11 Toolbar button: zooms out by the same fixed step as `zoomIn`. */
+  zoomOut: () => void
+  /** U11 Toolbar button: resets zoom to 1x and pan to the origin. */
+  resetZoom: () => void
 }
 
 export const useCanvasStore = create<CanvasState>()(
@@ -189,6 +226,8 @@ export const useCanvasStore = create<CanvasState>()(
       items: [],
       selectedItemId: null,
       activeTool: 'select',
+      zoom: 1,
+      stagePosition: { x: 0, y: 0 },
 
       setItems: (items) => set({ items }),
 
@@ -250,6 +289,18 @@ export const useCanvasStore = create<CanvasState>()(
       },
 
       setActiveTool: (tool) => set({ activeTool: tool }),
+
+      setZoomAndPosition: (zoom, position) => set({ zoom: clampZoom(zoom), stagePosition: position }),
+
+      setStagePosition: (position) => set({ stagePosition: position }),
+
+      zoomIn: () =>
+        set((state) => ({ zoom: clampZoom(state.zoom * TOOLBAR_ZOOM_STEP) })),
+
+      zoomOut: () =>
+        set((state) => ({ zoom: clampZoom(state.zoom / TOOLBAR_ZOOM_STEP) })),
+
+      resetZoom: () => set({ zoom: 1, stagePosition: { x: 0, y: 0 } }),
     }),
     {
       // Only `items` is part of the tracked/restorable snapshot — undo()/

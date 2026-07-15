@@ -32,6 +32,10 @@ export function Toolbar() {
   const canRedo = useStore(useCanvasStore.temporal, (state) => state.futureStates.length > 0)
   const activeTool = useCanvasStore((state) => state.activeTool)
   const setActiveTool = useCanvasStore((state) => state.setActiveTool)
+  const zoom = useCanvasStore((state) => state.zoom)
+  const zoomIn = useCanvasStore((state) => state.zoomIn)
+  const zoomOut = useCanvasStore((state) => state.zoomOut)
+  const resetZoom = useCanvasStore((state) => state.resetZoom)
 
   return (
     <div
@@ -98,6 +102,23 @@ export function Toolbar() {
           </button>
         )
       })}
+
+      <div style={{ width: 1, backgroundColor: '#e5e7eb', margin: '0 4px' }} aria-hidden="true" />
+
+      {/* U11: zoom in/out/reset — the button-driven alternative to wheel
+          scroll/pinch. Anchored at the current pan position (no cursor
+          position exists for a button click, unlike wheel/pinch's
+          zoom-to-point behavior); Reset returns to 1x at the origin. */}
+      <button type="button" onClick={() => zoomOut()} aria-label="Zoom out">
+        −
+      </button>
+      <span style={{ minWidth: 48, textAlign: 'center', alignSelf: 'center' }}>{Math.round(zoom * 100)}%</span>
+      <button type="button" onClick={() => zoomIn()} aria-label="Zoom in">
+        +
+      </button>
+      <button type="button" onClick={() => resetZoom()} aria-label="Reset zoom">
+        Reset
+      </button>
     </div>
   )
 }

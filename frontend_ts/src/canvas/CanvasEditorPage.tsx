@@ -41,6 +41,8 @@ export function CanvasEditorPage() {
   const items = useCanvasStore((state) => state.items)
   const selectedItemId = useCanvasStore((state) => state.selectedItemId)
   const activeTool = useCanvasStore((state) => state.activeTool)
+  const zoom = useCanvasStore((state) => state.zoom)
+  const stagePosition = useCanvasStore((state) => state.stagePosition)
   const setItems = useCanvasStore((state) => state.setItems)
   const createItemLocal = useCanvasStore((state) => state.createItemLocal)
   const selectItem = useCanvasStore((state) => state.selectItem)
@@ -48,6 +50,8 @@ export function CanvasEditorPage() {
   const updateLinePoints = useCanvasStore((state) => state.updateLinePoints)
   const deleteItem = useCanvasStore((state) => state.deleteItem)
   const setActiveTool = useCanvasStore((state) => state.setActiveTool)
+  const setZoomAndPosition = useCanvasStore((state) => state.setZoomAndPosition)
+  const setStagePosition = useCanvasStore((state) => state.setStagePosition)
 
   const handleDeleteSelected = useCallback(() => {
     if (selectedItemId != null) deleteItem(selectedItemId)
@@ -208,6 +212,10 @@ export function CanvasEditorPage() {
             onCreateShape={handleCreateShape}
             onCreateLine={handleCreateLine}
             onLinePointDragEnd={updateLinePoints}
+            zoom={zoom}
+            stagePosition={stagePosition}
+            onZoomChange={setZoomAndPosition}
+            onPanEnd={setStagePosition}
           />
         </div>
         <PropertyPanel />

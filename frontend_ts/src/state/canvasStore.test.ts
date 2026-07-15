@@ -406,3 +406,83 @@ describe('canvasStore updateLinePoints (U17)', () => {
     ])
   })
 })
+
+// U11: zoom/pan is view state, not document state — these actions must
+// never push undo history (R15/U9's "only items is tracked" scope), and
+// zoomIn/zoomOut/resetZoom/setZoomAndPosition must all keep `zoom` inside
+// [MIN_ZOOM, MAX_ZOOM].
+describe('canvasStore zoom/pan actions (U11)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({ items: [], selectedItemId: null, activeTool: 'select', zoom: 1, stagePosition: { x: 0, y: 0 } })
+    useCanvasStore.temporal.getState().clear()
+  })
+
+  it('setZoomAndPosition updates both fields together', () => {
+    useCanvasStore.getState().setZoomAndPosition(2, { x: -30, y: 15 })
+    expect(useCanvasStore.getState().zoom).toBe(2)
+    expect(useCanvasStore.getState().stagePosition).toEqual({ x: -30, y: 15 })
+  })
+
+  it('setZoomAndPosition clamps zoom defensively even if called with an out-of-range value', () => {
+    useCanvasStore.getState().setZoomAndPosition(100, { x: 0, y: 0 })
+    expect(useCanvasStore.getState().zoom).toBe(4)
+
+    useCanvasStore.getState().setZoomAndPosition(0.001, { x: 0, y: 0 })
+    expect(useCanvasStore.getState().zoom).toBe(0.25)
+  })
+
+  it('setStagePosition updates only stagePosition, leaving zoom untouched', () => {
+    useCanvasStore.setState({ zoom: 2 })
+    useCanvasStore.getState().setStagePosition({ x: 100, y: -50 })
+    expect(useCanvasStore.getState().stagePosition).toEqual({ x: 100, y: -50 })
+    expect(useCanvasStore.getState().zoom).toBe(2)
+  })
+
+  it('zoomIn increases zoom, zoomOut decreases it back', () => {
+    useCanvasStore.getState().zoomIn()
+    const zoomedIn = useCanvasStore.getState().zoom
+    expect(zoomedIn).toBeGreaterThan(1)
+
+    useCanvasStore.getState().zoomOut()
+    expect(useCanvasStore.getState().zoom).toBeCloseTo(1)
+  })
+
+  it('zoomIn never exceeds MAX_ZOOM across repeated clicks', () => {
+    for (let i = 0; i < 50; i += 1) useCanvasStore.getState().zoomIn()
+    expect(useCanvasStore.getState().zoom).toBe(4)
+  })
+
+  it('zoomOut never goes below MIN_ZOOM across repeated clicks', () => {
+    for (let i = 0; i < 50; i += 1) useCanvasStore.getState().zoomOut()
+    expect(useCanvasStore.getState().zoom).toBe(0.25)
+  })
+
+  it('resetZoom returns to 1x at the origin', () => {
+    useCanvasStore.setState({ zoom: 3, stagePosition: { x: 500, y: -200 } })
+    useCanvasStore.getState().resetZoom()
+    expect(useCanvasStore.getState().zoom).toBe(1)
+    expect(useCanvasStore.getState().stagePosition).toEqual({ x: 0, y: 0 })
+  })
+
+  it('none of the zoom/pan actions create undo history entries', () => {
+    useCanvasStore.getState().setZoomAndPosition(2, { x: 10, y: 10 })
+    useCanvasStore.getState().setStagePosition({ x: 20, y: 20 })
+    useCanvasStore.getState().zoomIn()
+    useCanvasStore.getState().zoomOut()
+    useCanvasStore.getState().resetZoom()
+
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('zoom/pan changes do not affect items, and undo/redo never touch zoom/pan', () => {
+    useCanvasStore.getState().createItemLocal(makeItem())
+    useCanvasStore.getState().setZoomAndPosition(2, { x: 40, y: 40 })
+
+    undo()
+    // The only history entry is the create; undoing it removes the item but
+    // leaves zoom/pan exactly as they were set.
+    expect(useCanvasStore.getState().items).toEqual([])
+    expect(useCanvasStore.getState().zoom).toBe(2)
+    expect(useCanvasStore.getState().stagePosition).toEqual({ x: 40, y: 40 })
+  })
+})

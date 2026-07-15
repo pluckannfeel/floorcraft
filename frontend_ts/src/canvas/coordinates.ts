@@ -59,6 +59,79 @@ export function clampToBounds(
  * Key Technical Decisions. */
 export const MIN_ITEM_SIZE = 10
 
+/** U11's zoom range — a "sane min/max" per the plan's Approach, chosen to
+ * keep the smallest zoom still legible and the largest still performant. */
+export const MIN_ZOOM = 0.25
+export const MAX_ZOOM = 4
+
+/** Clamps a raw scale factor into `[MIN_ZOOM, MAX_ZOOM]`. */
+export function clampZoom(zoom: number): number {
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom))
+}
+
+/** A Stage's current zoom/pan as far as this module's pure math cares:
+ * `zoom` mirrors Konva's `scaleX`/`scaleY` (kept equal — no independent
+ * axis scaling anywhere in this app), `position` mirrors `x`/`y`. */
+export interface ZoomPanState {
+  zoom: number
+  position: Point
+}
+
+/**
+ * The standard Konva zoom-to-point recipe (see Konva's documented
+ * "Zooming on scroll/wheel" sandbox): converts `pointer` (a container-
+ * relative screen point, e.g. from `stage.getPointerPosition()`) into
+ * stage-space under the CURRENT transform, clamps `rawNewScale` into the
+ * allowed zoom range, then repositions the stage so that same stage-space
+ * point is still under `pointer` after the new scale is applied.
+ *
+ * Pure/Konva-independent (like every other helper in this module) so it's
+ * unit-testable without a real Stage, and reusable by both wheel-zoom and
+ * pinch-zoom (U11) without either driving the other's event plumbing.
+ */
+export function computeZoomAtPoint(current: ZoomPanState, pointer: Point, rawNewScale: number): ZoomPanState {
+  const oldScale = current.zoom
+  const pointerStagePoint: Point = {
+    x: (pointer.x - current.position.x) / oldScale,
+    y: (pointer.y - current.position.y) / oldScale,
+  }
+  const newScale = clampZoom(rawNewScale)
+  return {
+    zoom: newScale,
+    position: {
+      x: pointer.x - pointerStagePoint.x * newScale,
+      y: pointer.y - pointerStagePoint.y * newScale,
+    },
+  }
+}
+
+/**
+ * Mouse-wheel zoom: each wheel "tick" scales by `scaleBy` (default 1.05,
+ * a gentle per-tick step), zooming in when `deltaY < 0` (scrolling up/away
+ * from the user — the browser convention) and out when `deltaY > 0`.
+ * Delegates the actual point-anchored math to `computeZoomAtPoint`.
+ */
+export function computeWheelZoom(
+  current: ZoomPanState,
+  pointer: Point,
+  deltaY: number,
+  scaleBy: number = 1.05,
+): ZoomPanState {
+  const rawNewScale = deltaY < 0 ? current.zoom * scaleBy : current.zoom / scaleBy
+  return computeZoomAtPoint(current, pointer, rawNewScale)
+}
+
+/**
+ * Two-finger pinch zoom: `distanceRatio` is `newTouchDistance / oldTouchDistance`
+ * between the two touch points, and `center` is their midpoint
+ * (container-relative). Scales the current zoom by that ratio directly
+ * (unlike wheel-zoom's fixed per-tick step, a pinch's ratio already encodes
+ * "how much" the fingers moved apart/together since the last sampled frame).
+ */
+export function computePinchZoom(current: ZoomPanState, center: Point, distanceRatio: number): ZoomPanState {
+  return computeZoomAtPoint(current, center, current.zoom * distanceRatio)
+}
+
 export interface BoundingBox {
   x: number
   y: number
