@@ -222,3 +222,138 @@ describe('canvasStore undo/redo (U9)', () => {
     expect(useCanvasStore.getState().items).toHaveLength(0)
   })
 })
+
+// U17: `updateLinePoints` commits an anchor-handle drag's final point into
+// the selected Line's `properties.points` array. Per the "U17 decision" doc
+// comment on `canvasStore.ts`, this is undo-tracked (like
+// `updateItemGeometry`) rather than untracked (like `updateItemProperties`)
+// — these tests prove both the point-patch semantics and that tracking.
+describe('canvasStore updateLinePoints (U17)', () => {
+  function makeLineItem(points: { x: number; y: number }[], overrides: Partial<CanvasObject> = {}): CanvasObject {
+    return makeItem({
+      id: 'line-1',
+      type: 'line_straight',
+      properties: { points, curve_style: 'straight' },
+      ...overrides,
+    })
+  }
+
+  beforeEach(() => {
+    useCanvasStore.setState({ items: [], selectedItemId: null, itemProperties: {}, activeTool: 'select' })
+    useCanvasStore.temporal.getState().clear()
+  })
+
+  it('updates only the point at the given index, leaving the rest of the points array unchanged', () => {
+    const points = [
+      { x: 0, y: 0 },
+      { x: 50, y: 50 },
+      { x: 100, y: 0 },
+    ]
+    useCanvasStore.setState({ items: [makeLineItem(points)] })
+
+    useCanvasStore.getState().updateLinePoints('line-1', 1, { x: 999, y: 999 })
+
+    const item = useCanvasStore.getState().items[0]
+    expect(item.properties.points).toEqual([
+      { x: 0, y: 0 },
+      { x: 999, y: 999 },
+      { x: 100, y: 0 },
+    ])
+  })
+
+  it('dragging an endpoint updates only that endpoint, not the other points', () => {
+    const points = [
+      { x: 0, y: 0 },
+      { x: 50, y: 50 },
+      { x: 100, y: 0 },
+    ]
+    useCanvasStore.setState({ items: [makeLineItem(points)] })
+
+    useCanvasStore.getState().updateLinePoints('line-1', 0, { x: -30, y: 10 })
+
+    const item = useCanvasStore.getState().items[0]
+    expect(item.properties.points).toEqual([
+      { x: -30, y: 10 },
+      { x: 50, y: 50 },
+      { x: 100, y: 0 },
+    ])
+  })
+
+  it('leaves other items (and their properties) untouched', () => {
+    const points = [
+      { x: 0, y: 0 },
+      { x: 20, y: 20 },
+    ]
+    useCanvasStore.setState({
+      items: [makeLineItem(points), makeItem({ id: 'item-2', x: 500 })],
+    })
+
+    useCanvasStore.getState().updateLinePoints('line-1', 0, { x: 7, y: 7 })
+
+    const other = useCanvasStore.getState().items.find((item) => item.id === 'item-2')
+    expect(other?.x).toBe(500)
+  })
+
+  it('is a no-op when the id does not match any item', () => {
+    const points = [
+      { x: 0, y: 0 },
+      { x: 20, y: 20 },
+    ]
+    const original = [makeLineItem(points)]
+    useCanvasStore.setState({ items: original })
+
+    useCanvasStore.getState().updateLinePoints('missing-id', 0, { x: 1, y: 1 })
+
+    expect(useCanvasStore.getState().items).toEqual(original)
+  })
+
+  it('is a no-op when pointIndex is out of range', () => {
+    const points = [
+      { x: 0, y: 0 },
+      { x: 20, y: 20 },
+    ]
+    const original = [makeLineItem(points)]
+    useCanvasStore.setState({ items: original })
+
+    useCanvasStore.getState().updateLinePoints('line-1', 5, { x: 1, y: 1 })
+
+    expect(useCanvasStore.getState().items).toEqual(original)
+  })
+
+  it('persists at the store level: an anchor-handle drag commit survives as the new points array', () => {
+    const points = [
+      { x: 0, y: 0 },
+      { x: 40, y: 40 },
+    ]
+    useCanvasStore.getState().createItemLocal(makeLineItem(points))
+    useCanvasStore.temporal.getState().clear()
+
+    useCanvasStore.getState().updateLinePoints('line-1', 1, { x: 200, y: 200 })
+
+    expect(useCanvasStore.getState().items[0].properties.points).toEqual([
+      { x: 0, y: 0 },
+      { x: 200, y: 200 },
+    ])
+  })
+
+  it('is undo-tracked: a point drag commit produces exactly one history entry, and undo reverts it', () => {
+    const points = [
+      { x: 0, y: 0 },
+      { x: 40, y: 40 },
+    ]
+    useCanvasStore.getState().createItemLocal(makeLineItem(points))
+    useCanvasStore.temporal.getState().clear()
+
+    useCanvasStore.getState().updateLinePoints('line-1', 1, { x: 200, y: 200 })
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+
+    undo()
+    expect(useCanvasStore.getState().items[0].properties.points).toEqual(points)
+
+    redo()
+    expect(useCanvasStore.getState().items[0].properties.points).toEqual([
+      { x: 0, y: 0 },
+      { x: 200, y: 200 },
+    ])
+  })
+})

@@ -44,6 +44,7 @@ export function CanvasEditorPage() {
   const createItemLocal = useCanvasStore((state) => state.createItemLocal)
   const selectItem = useCanvasStore((state) => state.selectItem)
   const updateItemGeometry = useCanvasStore((state) => state.updateItemGeometry)
+  const updateLinePoints = useCanvasStore((state) => state.updateLinePoints)
   const deleteItem = useCanvasStore((state) => state.deleteItem)
   const setActiveTool = useCanvasStore((state) => state.setActiveTool)
 
@@ -205,6 +206,7 @@ export function CanvasEditorPage() {
             activeTool={activeTool}
             onCreateShape={handleCreateShape}
             onCreateLine={handleCreateLine}
+            onLinePointDragEnd={updateLinePoints}
           />
         </div>
       </div>

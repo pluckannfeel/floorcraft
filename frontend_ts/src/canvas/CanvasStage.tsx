@@ -2,7 +2,8 @@ import { forwardRef, useEffect, useRef } from 'react'
 import type Konva from 'konva'
 import { Layer, Line, Rect, Stage } from 'react-konva'
 import { screenToStagePoint, shouldHandleDeleteKey } from './coordinates'
-import { isLineTool, LinePreview, useLineTool } from './LineTool'
+import { LineAnchorHandles } from './LineAnchorHandles'
+import { isLineTool, LinePreview, parseLinePoints, useLineTool } from './LineTool'
 import { ObjectShape } from './ObjectShape'
 import { SelectionTransformer } from './SelectionTransformer'
 import type { TransformGeometryPatch } from './SelectionTransformer'
@@ -40,6 +41,10 @@ interface CanvasStageProps {
    * is responsible for both creating the item AND resetting `activeTool`
    * back to `'select'`, same delegation as `onCreateShape`. */
   onCreateLine?: (type: LineType, points: Point[]) => void
+  /** Commits a single anchor-handle drag's final point (U17), called on
+   * that handle's `dragend`. Optional so callers/tests that don't exercise
+   * Line point editing can omit it. */
+  onLinePointDragEnd?: (id: CanvasObject['id'], pointIndex: number, point: Point) => void
 }
 
 /** Builds the static grid line coordinates for a `width` x `height` canvas
@@ -82,12 +87,23 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     activeTool = 'select',
     onCreateShape,
     onCreateLine,
+    onLinePointDragEnd,
   },
   ref,
 ) {
   const gridLines = buildGridLines(width, height, gridSize)
   const drawingShape = isShapeTool(activeTool)
   const drawingLine = isLineTool(activeTool)
+
+  // U17: the selected item, when it's a Line, gets `LineAnchorHandles`
+  // instead of `SelectionTransformer` — Lines have no box to resize (see
+  // `ObjectShape.tsx`'s Line branch). This is the "which selection UI to
+  // show" branch point the plan calls out; it lives here (not inside
+  // `ObjectShape`) because `SelectionTransformer` itself is already only
+  // ever rendered once, at this Stage level, resolving the selected node
+  // from the same `shapeNodesRef` Map `ObjectShape`'s `shapeRef` populates.
+  const selectedObject = objects.find((object) => object.id === selectedItemId) ?? null
+  const selectedIsLine = selectedObject != null && isLineTool(selectedObject.type)
 
   // Map<id, Konva.Node> resolving the selected item's live node for
   // SelectionTransformer's `.nodes([ref])` attach — populated/cleared by
@@ -258,13 +274,25 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           listening (not `listening={false}` like the grid layer) since the
           Transformer's handles are interactive. */}
       <Layer>
-        <SelectionTransformer
-          selectedItemId={selectedItemId}
-          getNode={(id) => shapeNodesRef.current.get(id)}
-          canvasWidth={width}
-          canvasHeight={height}
-          onTransformEnd={(id, patch: TransformGeometryPatch) => onGeometryChange?.(id, patch)}
-        />
+        {selectedIsLine && selectedObject ? (
+          <LineAnchorHandles
+            object={selectedObject}
+            points={parseLinePoints(selectedObject.properties)}
+            gridSize={gridSize}
+            canvasWidth={width}
+            canvasHeight={height}
+            onPointDragEnd={(id, pointIndex, point) => onLinePointDragEnd?.(id, pointIndex, point)}
+            getLineNode={() => shapeNodesRef.current.get(selectedObject.id) as Konva.Line | undefined}
+          />
+        ) : (
+          <SelectionTransformer
+            selectedItemId={selectedItemId}
+            getNode={(id) => shapeNodesRef.current.get(id)}
+            canvasWidth={width}
+            canvasHeight={height}
+            onTransformEnd={(id, patch: TransformGeometryPatch) => onGeometryChange?.(id, patch)}
+          />
+        )}
         {shapeTool.isDrawing && shapeTool.drawType && shapeTool.previewGeometry && (
           <ShapePreview type={shapeTool.drawType} geometry={shapeTool.previewGeometry} />
         )}

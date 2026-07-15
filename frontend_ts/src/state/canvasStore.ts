@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { temporal } from 'zundo'
-import type { CanvasObject, LineType, ShapeType } from '../canvas/types'
+import type { CanvasObject, LineType, Point, ShapeType } from '../canvas/types'
 
 /**
  * Drawing-tool mode for the (not-yet-built, U15/U16) shape/line creation
@@ -60,6 +60,31 @@ export type ActiveTool = 'select' | ShapeType | LineType
  *   and swap the id U13 then plugs into this store. That id-swap has no
  *   work to do yet here, since this unit has no persistence calls to
  *   re-issue.
+ *
+ * U17 decision: is a Line-point drag (`updateLinePoints`, below) undo-
+ * tracked like `updateItemGeometry`, or untracked like `updateItemProperties`?
+ * The plan's prose is genuinely ambiguous — U17's Key Technical Decisions
+ * describe `properties.points` as living in "properties JSON" (which reads
+ * like the untracked slice), but U9's own "Approach" section explicitly
+ * lists "line-anchor-drag-end" alongside dragend/transformend/create/delete
+ * as one of the history-coalescing commit points, i.e. as a geometry-class
+ * action. Two things settle it in favor of undo-tracked:
+ *   1. R15 defines the undoable set as "create, move, resize, rotate,
+ *      delete" — a Line's points ARE its shape, so repositioning one is a
+ *      "move" of that Line's geometry, not a cosmetic/property change like
+ *      color or name.
+ *   2. This codebase's `itemProperties` map is genuinely disconnected from
+ *      rendering: `ObjectShape.tsx` reads `object.properties.points`
+ *      directly off `items[i]`, never from `itemProperties`. Routing point
+ *      edits through `updateItemProperties` (the untracked map) would not
+ *      even be visible on next render without also duplicating the write
+ *      into `items` — so `items` is already the de facto source of truth
+ *      for `properties.points`, undo-tracked slice or not.
+ * `updateLinePoints` therefore patches `items[i].properties.points` (like
+ * `updateItemGeometry` patches `items[i].x/y/...`), producing a new `items`
+ * array reference and thus a coalesced history entry on each anchor-handle
+ * `dragend` — consistent with every other "commit final drag position"
+ * action in this store.
  */
 export interface CanvasState {
   items: CanvasObject[]
@@ -104,6 +129,19 @@ export interface CanvasState {
   deleteItem: (id: CanvasObject['id']) => void
 
   /**
+   * Patches a single point (by index) in a Line-typed item's
+   * `properties.points` array — the mutation point for U17's anchor-handle
+   * drag commits (`dragend`). Deliberately mirrors `updateItemGeometry`
+   * (replaces `items` with a new array reference, so it participates in
+   * undo history) rather than `updateItemProperties` — see the class doc
+   * above ("U17 decision") for the full reasoning. Only the point at
+   * `pointIndex` changes; every other point, and every other field on the
+   * item, is left untouched. A no-op if `id` doesn't match any item or
+   * `pointIndex` is out of range for that item's current points array.
+   */
+  updateLinePoints: (id: CanvasObject['id'], pointIndex: number, point: Point) => void
+
+  /**
    * Patches an item's `properties` JSON (U10's property panel writes).
    * Intentionally NOT undoable (R15's confirmed scope decision) — see the
    * class doc for how this stays out of undo history.
@@ -141,6 +179,23 @@ export const useCanvasStore = create<CanvasState>()(
           items: state.items.filter((item) => item.id !== id),
           selectedItemId: state.selectedItemId === id ? null : state.selectedItemId,
         })),
+
+      updateLinePoints: (id, pointIndex, point) =>
+        set((state) => {
+          const item = state.items.find((candidate) => candidate.id === id)
+          const rawPoints = item?.properties.points
+          if (!item || !Array.isArray(rawPoints) || pointIndex < 0 || pointIndex >= rawPoints.length) {
+            return {}
+          }
+          const nextPoints = rawPoints.map((existing, index) => (index === pointIndex ? point : existing))
+          return {
+            items: state.items.map((candidate) =>
+              candidate.id === id
+                ? { ...candidate, properties: { ...candidate.properties, points: nextPoints } }
+                : candidate,
+            ),
+          }
+        }),
 
       updateItemProperties: (id, patch) =>
         set((state) => {
