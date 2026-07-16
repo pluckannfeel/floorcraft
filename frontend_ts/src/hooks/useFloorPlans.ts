@@ -92,9 +92,8 @@ export function useRenameFloorPlan(floorPlanId: number) {
       return data
     },
     onSuccess: (updated) => {
-      // Merge rather than replace: the cached GET payload can carry fields
-      // (e.g. nested `items`) beyond the `FloorPlan` type this PATCH
-      // response is typed as — don't clobber them.
+      // Merge rather than replace, so any extra fields a cached GET payload
+      // carries beyond the `FloorPlan` type survive the PATCH response.
       queryClient.setQueryData<FloorPlan>(['floorPlan', floorPlanId], (current) =>
         current ? { ...current, ...updated } : updated,
       )

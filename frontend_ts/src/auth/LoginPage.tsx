@@ -8,10 +8,10 @@ import { useAuth } from './AuthContext'
 import { AuthCard, AuthFormError, AuthLink } from './AuthCard'
 import { flattenApiErrors } from './apiErrors'
 
-// Canvas route: "/" for now (U7 hasn't landed yet). If U7 ends up mounting
-// the canvas editor at a different path, update this constant and
-// routes.tsx's placeholder route together.
-const CANVAS_ROUTE = '/'
+// Post-login landing page: the floor-plan dashboard (R4). Navigating there
+// directly avoids the redirect hop through "/" (which only exists as a
+// Navigate to this same route).
+const POST_LOGIN_ROUTE = '/floor-plans'
 
 interface LocationState {
   from?: { pathname: string }
@@ -35,7 +35,7 @@ export function LoginPage() {
     mutationFn: () => login(email, password),
     onSuccess: () => {
       const state = location.state as LocationState | null
-      const redirectTo = state?.from?.pathname ?? CANVAS_ROUTE
+      const redirectTo = state?.from?.pathname ?? POST_LOGIN_ROUTE
       navigate(redirectTo, { replace: true })
     },
   })

@@ -267,6 +267,29 @@ class CrossUserOwnershipScopingTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
 
+    def test_object_create_with_nonexistent_floor_plan_returns_404_not_400(self):
+        """Anti-enumeration guard (R14): a NONEXISTENT floor_plan reference
+        must fail identically to a FOREIGN-owned one (404). With DRF's
+        default unscoped PrimaryKeyRelatedField it would fail earlier with
+        400 "Invalid pk", and the 400-vs-404 split becomes an oracle that
+        enumerates which floor-plan IDs exist (see OwnedFloorPlanField).
+        """
+        self.login_as('user-b@example.com')
+
+        response = self.client.post(
+            '/api/objects/',
+            {
+                'floor_plan': 999999,
+                'type': Objects.ObjectType.OUTLINES,
+                'name': 'Probe',
+                'x': 0,
+                'y': 0,
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 404)
+
 
 class AccountsEndpointsRemainAnonymouslyAccessibleTests(TestCase):
     """Regression guard: flipping the global DRF default to IsAuthenticated

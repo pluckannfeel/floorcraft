@@ -197,11 +197,18 @@ export function CanvasEditorPage() {
   // U5: the zustand canvasStore — including its zundo undo/redo history —
   // is module-global, while this editor renders one floor plan at a time.
   // `items` themselves are replaced by the resync effect below once the new
-  // plan's objects load (untracked via temporal.pause/resume), but zundo's
-  // past/future stacks would otherwise survive a plan switch, letting plan
-  // A's undo history apply onto plan B's canvas. Clearing keyed on the
-  // route's floorPlanId guarantees each plan starts with a fresh history.
+  // plan's objects load (untracked via temporal.pause/resume), but
+  // everything else would survive a plan switch: zundo's past/future stacks
+  // (plan A's undo history applying onto plan B's canvas), the selection
+  // (a stale plan-A id enabling z-order buttons and making Delete push a
+  // junk undo entry on plan B), the previous plan's items (rendered as
+  // plan B's if B's objects fetch errors before ever resyncing), and the
+  // zoom/pan. Reset all of it keyed on the route's floorPlanId.
   useEffect(() => {
+    const store = useCanvasStore.getState();
+    store.setItems([]); // pauses/resumes zundo internally
+    store.selectItem(null); // untracked (partialize covers items only)
+    store.resetZoom(); // untracked
     useCanvasStore.temporal.getState().clear();
   }, [floorPlanId]);
 
@@ -333,7 +340,12 @@ export function CanvasEditorPage() {
     return <div role="status">Loading floor plan…</div>;
   }
 
-  if (floorPlanQuery.isError || !floorPlanQuery.data) {
+  // `objectsQuery.isError` matters as much as the floor-plan errors: without
+  // it, a failed objects fetch would fall through and render the editor with
+  // whatever the module-global store still holds (possibly a previously
+  // opened plan's items) — and edits would then persist against THAT plan's
+  // object ids under this plan's header.
+  if (floorPlanQuery.isError || !floorPlanQuery.data || objectsQuery.isError) {
     return (
       <div role="alert">
         <p>Unable to load the floor plan.</p>

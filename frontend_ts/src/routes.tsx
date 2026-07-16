@@ -6,7 +6,7 @@ import { LoginPage } from "./auth/LoginPage";
 import { ForgotPasswordPage } from "./auth/ForgotPasswordPage";
 import { ResetPasswordPage } from "./auth/ResetPasswordPage";
 import { FloorPlanDashboard } from "./pages/FloorPlanDashboard";
-import Home from "./pages/Home";
+import { CanvasEditorPage } from "./canvas/CanvasEditorPage";
 
 export function AppRoutes() {
   return (
@@ -28,13 +28,13 @@ export function AppRoutes() {
           </RequireAuth>
         }
       />
-      {/* U4/R7: per-plan editor route. Home still renders the hardcoded
-          editor for now — U5 wires :floorPlanId into it. */}
+      {/* R7: per-plan editor route — CanvasEditorPage reads :floorPlanId
+          itself (U5), so it mounts directly with no wrapper. */}
       <Route
         path="/floor-plans/:floorPlanId"
         element={
           <RequireAuth>
-            <Home />
+            <CanvasEditorPage />
           </RequireAuth>
         }
       />
