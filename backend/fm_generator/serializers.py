@@ -1,3 +1,4 @@
+from django.http import Http404
 from rest_framework import serializers
 
 from .models import FloorPlan, Objects
@@ -30,6 +31,8 @@ class ObjectSerializer(serializers.ModelSerializer):
         beyond the shared width/height/rotation fields, with no additional
         required keys enforced here.
         """
+        self._validate_floor_plan_ownership(attrs)
+
         obj_type = attrs.get('type', getattr(self.instance, 'type', None))
         properties = attrs.get('properties', getattr(self.instance, 'properties', None))
         if properties is None:
@@ -39,6 +42,40 @@ class ObjectSerializer(serializers.ModelSerializer):
             self._validate_line_properties(obj_type, properties)
 
         return attrs
+
+    def _validate_floor_plan_ownership(self, attrs):
+        """Reject any create/update payload that references a `floor_plan`
+        the requesting user doesn't own (R2).
+
+        `floor_plan` is a plain writable PrimaryKeyRelatedField, so this
+        must run on both create AND update — otherwise a user could PATCH
+        an object they already own to reassign its `floor_plan` to another
+        user's plan (an IDOR via the update path, not just create).
+
+        Raising Http404 (rather than a normal ValidationError, which would
+        surface as 400) is deliberate: R14 requires ownership failures to
+        look like "not found," not "bad request" or "forbidden," so the
+        frontend's global 401/403 session-expiry interceptor never misfires
+        on a foreign-object write attempt.
+
+        Skipped entirely when no `request` is in context: `ObjectViewSet`
+        (the only writable production call site) always supplies one via
+        DRF's default `get_serializer_context()`, so this only affects
+        serializer-level unit tests that instantiate `ObjectSerializer`
+        directly without a request -- those aren't exercising the
+        HTTP-level ownership boundary this check enforces.
+        """
+        if 'floor_plan' not in attrs:
+            return
+
+        request = self.context.get('request')
+        if request is None:
+            return
+
+        floor_plan = attrs['floor_plan']
+        user = getattr(request, 'user', None)
+        if floor_plan is None or user is None or floor_plan.owner_id != user.id:
+            raise Http404
 
     def _validate_line_properties(self, obj_type, properties):
         if not isinstance(properties, dict):
