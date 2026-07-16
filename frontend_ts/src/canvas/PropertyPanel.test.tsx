@@ -202,4 +202,43 @@ describe('PropertyPanel (U10)', () => {
       expect(screen.getByLabelText('Name')).toHaveValue('Renamed')
     })
   })
+
+  it('does not revert a Line\'s points if they change externally (e.g. via LineAnchorHandles) while a generic field is edited', async () => {
+    const originalPoints = [{ x: 0, y: 0 }, { x: 10, y: 10 }]
+    resetStore(
+      [
+        makeItem({
+          type: 'line_straight',
+          properties: { points: originalPoints, curve_style: 'straight', label: 'wall a' },
+        }),
+      ],
+      'item-1',
+    )
+    render(<PropertyPanel />)
+    const user = userEvent.setup()
+
+    // Simulate `LineAnchorHandles` reshaping the line via a direct store
+    // write — same mechanism U17 uses, and does NOT remount this form
+    // (same item.id key), so `PropertyPanel`'s internal refs are never
+    // reset by this.
+    const reshapedPoints = [{ x: 5, y: 5 }, { x: 20, y: 20 }]
+    useCanvasStore.setState((state) => ({
+      items: state.items.map((item) =>
+        item.id === 'item-1' ? { ...item, properties: { ...item.properties, points: reshapedPoints } } : item,
+      ),
+    }))
+
+    // Now edit an unrelated, generic property field and blur.
+    const labelInput = screen.getByLabelText('Property value for label')
+    await user.clear(labelInput)
+    await user.type(labelInput, 'wall b')
+    await user.tab()
+
+    await waitFor(() => {
+      expect(useCanvasStore.getState().items[0].properties.label).toBe('wall b')
+    })
+    // The reshape must survive the unrelated commit, not revert to the
+    // points captured when this form first mounted.
+    expect(useCanvasStore.getState().items[0].properties.points).toEqual(reshapedPoints)
+  })
 })

@@ -151,8 +151,16 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
     const currentEditable = rowsToProperties(nextRows)
     const committedEditable = rowsToProperties(rowsFromProperties(committedRef.current.properties, excludedKeys))
     if (!shallowEqualStringRecords(currentEditable, committedEditable)) {
+      // Preserve excluded (structural) keys from the item's LIVE properties
+      // (the `item` prop, always fresh on each render), not the possibly-
+      // stale `committedRef` snapshot. An external writer — e.g.
+      // `LineAnchorHandles` reshaping a Line — updates `properties.points`
+      // directly in the store without remounting this form (same
+      // `item.id` key), so reading `committedRef` here would silently
+      // revert that external change the next time any editable field is
+      // committed.
       const nextProperties: Record<string, unknown> = {}
-      for (const [key, value] of Object.entries(committedRef.current.properties)) {
+      for (const [key, value] of Object.entries(item.properties)) {
         if (excludedKeys.has(key)) nextProperties[key] = value
       }
       Object.assign(nextProperties, currentEditable)
