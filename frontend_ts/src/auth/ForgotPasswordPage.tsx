@@ -1,7 +1,10 @@
 import { useState, type FormEvent } from 'react'
-import { Link } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { apiClient } from '../api/client'
+import { AuthCard, AuthLink } from './AuthCard'
 
 const CONFIRMATION_MESSAGE = 'If an account with that email exists, a password reset email has been sent.'
 
@@ -27,36 +30,36 @@ export function ForgotPasswordPage() {
 
   if (submitted) {
     return (
-      <section>
-        <h1>Check your email</h1>
-        <p>{CONFIRMATION_MESSAGE}</p>
-        <p>
-          <Link to="/login">Back to login</Link>
+      <AuthCard title="Check your email">
+        <p className="text-sm text-muted-foreground">{CONFIRMATION_MESSAGE}</p>
+        <p className="text-sm">
+          <AuthLink to="/login">Back to login</AuthLink>
         </p>
-      </section>
+      </AuthCard>
     )
   }
 
   return (
-    <section>
-      <h1>Forgot your password?</h1>
-      <form onSubmit={handleSubmit}>
-        <label htmlFor="email">Email</label>
-        <input
-          id="email"
-          name="email"
-          type="email"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          required
-        />
-        <button type="submit" disabled={mutation.isPending}>
+    <AuthCard title="Forgot your password?">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="email">Email</Label>
+          <Input
+            id="email"
+            name="email"
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            required
+          />
+        </div>
+        <Button type="submit" disabled={mutation.isPending} className="w-full">
           {mutation.isPending ? 'Sending…' : 'Send reset link'}
-        </button>
+        </Button>
       </form>
-      <p>
-        <Link to="/login">Back to login</Link>
+      <p className="text-sm">
+        <AuthLink to="/login">Back to login</AuthLink>
       </p>
-    </section>
+    </AuthCard>
   )
 }

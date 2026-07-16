@@ -1,7 +1,11 @@
 import { useState, type FormEvent } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { useAuth } from './AuthContext'
+import { AuthCard, AuthFormError, AuthLink } from './AuthCard'
 import { flattenApiErrors } from './apiErrors'
 
 // Canvas route: "/" for now (U7 hasn't landed yet). If U7 ends up mounting
@@ -46,47 +50,44 @@ export function LoginPage() {
     : []
 
   return (
-    <section>
-      <h1>Log in</h1>
-      <form onSubmit={handleSubmit}>
-        {errors.length > 0 && (
-          <div role="alert">
-            {errors.map((message) => (
-              <p key={message}>{message}</p>
-            ))}
-          </div>
-        )}
+    <AuthCard title="Log in">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <AuthFormError messages={errors} />
 
-        <label htmlFor="email">Email</label>
-        <input
-          id="email"
-          name="email"
-          type="email"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          required
-        />
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="email">Email</Label>
+          <Input
+            id="email"
+            name="email"
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            required
+          />
+        </div>
 
-        <label htmlFor="password">Password</label>
-        <input
-          id="password"
-          name="password"
-          type="password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-          required
-        />
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="password">Password</Label>
+          <Input
+            id="password"
+            name="password"
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            required
+          />
+        </div>
 
-        <button type="submit" disabled={mutation.isPending}>
+        <Button type="submit" disabled={mutation.isPending} className="w-full">
           {mutation.isPending ? 'Logging in…' : 'Log in'}
-        </button>
+        </Button>
       </form>
-      <p>
-        <Link to="/forgot-password">Forgot your password?</Link>
+      <p className="text-sm">
+        <AuthLink to="/forgot-password">Forgot your password?</AuthLink>
       </p>
-      <p>
-        Don&apos;t have an account? <Link to="/register">Register</Link>
+      <p className="text-sm text-muted-foreground">
+        Don&apos;t have an account? <AuthLink to="/register">Register</AuthLink>
       </p>
-    </section>
+    </AuthCard>
   )
 }
