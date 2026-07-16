@@ -9,6 +9,7 @@ import { useIsObjectsMutating, useObjectPersistence, useObjects } from "../hooks
 import { useCanvasStore } from "../state/canvasStore";
 import { useCanvasShortcuts } from "../hooks/useCanvasShortcuts";
 import { CanvasStage } from "./CanvasStage";
+import { FloorPlanNameEditor } from "./FloorPlanNameEditor";
 import { computeLineBoundingBox, curveStyleForType } from "./LineTool";
 import { PropertyPanel } from "./PropertyPanel";
 import type { ShapeGeometry } from "./ShapeTool";
@@ -353,9 +354,9 @@ export function CanvasEditorPage() {
           borderBottom: "1px solid #e5e7eb",
         }}
       >
-        <h1 style={{ fontSize: 16, margin: 0 }}>
-          {floorPlan.name || "Floor plan"}
-        </h1>
+        {/* U6/R13: the name label is inline-editable (click it, or the
+            pencil button) — see FloorPlanNameEditor.tsx. */}
+        <FloorPlanNameEditor floorPlanId={floorPlan.id} name={floorPlan.name} />
         <button type="button" onClick={() => logout()}>
           Log out
         </button>

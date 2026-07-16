@@ -70,3 +70,40 @@ export function useCreateFloorPlan() {
     },
   })
 }
+
+/**
+ * U6/R13: `PATCH /api/floor-plans/<id>/` with `{ name }` — backs the
+ * editor's inline rename (`FloorPlanNameEditor`). Nothing is written
+ * optimistically: on success the `['floorPlan', id]` cache is updated in
+ * place (so the editor's label reflects the new name immediately, no
+ * refetch) and the `['floorPlans']` dashboard list is invalidated so it
+ * shows the new name too; on failure the cache was never touched, so the
+ * label naturally reverts to the previous name, plus the standard error
+ * toast (401/403 excepted — the global interceptor owns those, same
+ * convention as useCreateFloorPlan above).
+ */
+export function useRenameFloorPlan(floorPlanId: number) {
+  const queryClient = useQueryClient()
+  const { showError } = useToast()
+
+  return useMutation({
+    mutationFn: async ({ name }: { name: string }) => {
+      const { data } = await apiClient.patch<FloorPlan>(`/floor-plans/${floorPlanId}/`, { name })
+      return data
+    },
+    onSuccess: (updated) => {
+      // Merge rather than replace: the cached GET payload can carry fields
+      // (e.g. nested `items`) beyond the `FloorPlan` type this PATCH
+      // response is typed as — don't clobber them.
+      queryClient.setQueryData<FloorPlan>(['floorPlan', floorPlanId], (current) =>
+        current ? { ...current, ...updated } : updated,
+      )
+      queryClient.invalidateQueries({ queryKey: ['floorPlans'] })
+    },
+    onError: (error) => {
+      if (!isAuthError(error)) {
+        showError("Couldn't rename the floor plan. The previous name was kept.")
+      }
+    },
+  })
+}
