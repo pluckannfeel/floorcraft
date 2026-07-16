@@ -1,5 +1,6 @@
 import { Link, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
+import { useAuth } from '../auth/AuthContext'
 import type { FloorPlan } from '../canvas/types'
 import { useCreateFloorPlan, useFloorPlans } from '../hooks/useFloorPlans'
 
@@ -52,6 +53,7 @@ function FloorPlanCard({ plan }: { plan: FloorPlan }) {
 
 export function FloorPlanDashboard() {
   const navigate = useNavigate()
+  const { logout } = useAuth()
   const floorPlansQuery = useFloorPlans()
   const createFloorPlan = useCreateFloorPlan()
 
@@ -72,6 +74,13 @@ export function FloorPlanDashboard() {
       {createFloorPlan.isPending ? 'Creating…' : 'Create new'}
     </Button>
   )
+
+  // When the empty state is showing it carries its own Create CTA — hiding
+  // the header's copy avoids two identical "Create new" buttons on screen.
+  const isEmpty =
+    !floorPlansQuery.isPending &&
+    !floorPlansQuery.isError &&
+    floorPlansQuery.data.length === 0
 
   let content
   if (floorPlansQuery.isPending) {
@@ -125,7 +134,12 @@ export function FloorPlanDashboard() {
     <main className="mx-auto w-full max-w-5xl px-6 py-10">
       <header className="mb-8 flex items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold">Your floor plans</h1>
-        {createButton}
+        <div className="flex items-center gap-2">
+          {!isEmpty && createButton}
+          <Button type="button" variant="outline" onClick={() => logout()}>
+            Log out
+          </Button>
+        </div>
       </header>
       {content}
     </main>

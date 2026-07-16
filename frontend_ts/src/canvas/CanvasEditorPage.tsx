@@ -223,11 +223,20 @@ export function CanvasEditorPage() {
   // that item's optimistic change. Deferring until nothing is mutating
   // means the resync that does land always reflects every optimistic
   // change already having a settled (success or rolled-back) outcome.
+  //
+  // ALSO gated on `!isFetching` (undo/redo jitter fix): when a mutation
+  // settles, `isMutating` drops to 0 and the invalidation's refetch starts
+  // — but `objectsQuery.data` is still the PRE-mutation cache until that
+  // refetch returns. Without this gate the effect re-fires on the
+  // isMutating flip and briefly resyncs the store to the stale snapshot
+  // (objects visibly jump back to their pre-undo positions), then jumps
+  // forward again when the refetch lands. Waiting out the fetch means the
+  // one resync that runs carries the post-mutation server state.
   useEffect(() => {
-    if (objectsQuery.data && !isMutating) {
+    if (objectsQuery.data && !isMutating && !objectsQuery.isFetching) {
       setItems(objectsQuery.data);
     }
-  }, [objectsQuery.data, isMutating, setItems]);
+  }, [objectsQuery.data, isMutating, objectsQuery.isFetching, setItems]);
 
   const getStage = useCallback(() => stageRef.current, []);
 
@@ -359,9 +368,22 @@ export function CanvasEditorPage() {
   return (
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b px-4 py-2">
-        {/* U6/R13: the name label is inline-editable (click it, or the
-            pencil button) — see FloorPlanNameEditor.tsx. */}
-        <FloorPlanNameEditor floorPlanId={floorPlan.id} name={floorPlan.name} />
+        <div className="flex items-center gap-3">
+          {/* U6/R13: the name label is inline-editable (click it, or the
+              pencil button) — see FloorPlanNameEditor.tsx. */}
+          <FloorPlanNameEditor floorPlanId={floorPlan.id} name={floorPlan.name} />
+          <span aria-hidden="true" className="h-4 w-px bg-border" />
+          {/* Page navigation: "Home" is the floor-plan dashboard ("/" just
+              redirects there, so link to it directly). */}
+          <nav aria-label="Page navigation">
+            <Link
+              to="/floor-plans"
+              className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Home
+            </Link>
+          </nav>
+        </div>
         <Button type="button" variant="outline" size="sm" onClick={() => logout()}>
           Log out
         </Button>

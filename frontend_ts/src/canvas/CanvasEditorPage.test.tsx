@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { apiClient } from '../api/client'
 import * as AuthContextModule from '../auth/AuthContext'
 import * as ToastContextModule from '../notifications/ToastContext'
-import { useCanvasStore } from '../state/canvasStore'
+import { undo, useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject, FloorPlan } from './types'
 import { CanvasEditorPage } from './CanvasEditorPage'
 
@@ -117,7 +117,7 @@ function renderEditor(initialPath: string) {
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   })
 
-  return render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[initialPath]}>
         <CaptureNavigate />
@@ -128,6 +128,8 @@ function renderEditor(initialPath: string) {
       </MemoryRouter>
     </QueryClientProvider>,
   )
+
+  return { ...result, queryClient }
 }
 
 const logout = vi.fn()
@@ -267,5 +269,84 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
     // floorPlanId-keyed effect cleared zundo's history on the switch.
     expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
     expect(useCanvasStore.temporal.getState().futureStates).toHaveLength(0)
+  })
+
+  it('undo does not bounce through the stale cache while its refetch is in flight (jitter regression)', async () => {
+    // Reproduces the visual "shake" on undo: the store shows the undone
+    // state instantly, the undo's PATCH settles (isMutating drops to 0)
+    // and invalidates — but the query cache still holds the PRE-undo
+    // snapshot until the refetch returns. An isMutating-only gate lets the
+    // resync effect fire in that window and briefly snap objects back to
+    // their pre-undo positions before the fresh data lands. The fix also
+    // gates on isFetching.
+    const initialObjects = [makeObject({ id: 701, floor_plan: 7, x: 200 })]
+    const movedObjects = [makeObject({ id: 701, floor_plan: 7, x: 300 })]
+    let releaseRefetch: ((value: { data: CanvasObject[] }) => void) | null = null
+
+    let objectsCall = 0
+    vi.spyOn(apiClient, 'get').mockImplementation(((url: string) => {
+      if (url === '/floor-plans/7/') {
+        return Promise.resolve({ data: makePlan({ id: 7, name: 'Jitter Plan' }) })
+      }
+      if (url === '/objects/') {
+        objectsCall += 1
+        if (objectsCall === 1) return Promise.resolve({ data: initialObjects })
+        if (objectsCall === 2) return Promise.resolve({ data: movedObjects })
+        // Third call: the post-undo refetch — held pending so the test can
+        // assert the store's state inside the stale-cache window.
+        return new Promise((resolve) => {
+          releaseRefetch = resolve
+        })
+      }
+      return Promise.reject(new Error(`Unexpected GET ${url}`))
+    }) as never)
+    const patchSpy = vi.spyOn(apiClient, 'patch').mockResolvedValue({
+      data: makeObject({ id: 701, floor_plan: 7, x: 200 }),
+    } as never)
+
+    const { queryClient } = renderEditor('/floor-plans/7')
+
+    expect(await screen.findByText('Jitter Plan')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 200 })),
+    )
+
+    // A tracked move (x: 200 → 300), then a resync that refreshes the
+    // cache to the moved state — mirroring the real flow where the move's
+    // own PATCH already invalidated and refetched.
+    act(() => {
+      useCanvasStore.getState().updateItemGeometry(701, { x: 300 })
+    })
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['objects', 7] })
+    })
+    await waitFor(() =>
+      expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 300 })),
+    )
+
+    // Undo: the store snaps back to x=200 immediately and dispatches the
+    // PATCH persisting it.
+    act(() => {
+      undo()
+    })
+    expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 200 }))
+
+    // Wait until the PATCH settled and its invalidation kicked off the
+    // (held-pending) refetch — this is exactly the stale-cache window.
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    await waitFor(() => expect(releaseRefetch).not.toBeNull())
+    await act(async () => {})
+
+    // THE regression assertion: inside the window the store must still
+    // show the undone position, not the cache's stale pre-undo x=300.
+    expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 200 }))
+
+    // Releasing the refetch lands the fresh post-undo server state.
+    act(() => {
+      releaseRefetch!({ data: [makeObject({ id: 701, floor_plan: 7, x: 200 })] })
+    })
+    await waitFor(() =>
+      expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 200 })),
+    )
   })
 })

@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { apiClient } from '../api/client'
+import * as AuthContextModule from '../auth/AuthContext'
 import * as ToastContextModule from '../notifications/ToastContext'
 import type { FloorPlan } from '../canvas/types'
 import { DEFAULT_FLOOR_PLAN_NAME } from '../hooks/useFloorPlans'
@@ -52,9 +53,18 @@ function renderDashboard() {
 }
 
 const showError = vi.fn()
+const logout = vi.fn()
 
 beforeEach(() => {
   showError.mockClear()
+  logout.mockClear()
+  vi.spyOn(AuthContextModule, 'useAuth').mockReturnValue({
+    user: { id: 1, email: 'ada@example.com' },
+    isAuthenticated: true,
+    isLoading: false,
+    login: vi.fn(),
+    logout,
+  })
   vi.spyOn(ToastContextModule, 'useToast').mockReturnValue({
     toasts: [],
     showError,
@@ -126,8 +136,24 @@ describe('FloorPlanDashboard', () => {
     expect(screen.queryByText(/couldn't load your floor plans/i)).not.toBeInTheDocument()
     // ...no plan was auto-created...
     expect(postSpy).not.toHaveBeenCalled()
-    // ...and the Create action is still available.
-    expect(screen.getAllByRole('button', { name: /create new/i }).length).toBeGreaterThan(0)
+    // ...and the Create action is still available — but only ONCE (the
+    // header's copy hides while the empty state shows its own CTA;
+    // regression: two identical "Create new" buttons used to render here).
+    expect(screen.getAllByRole('button', { name: /create new/i })).toHaveLength(1)
+  })
+
+  it('offers a logout button', async () => {
+    vi.spyOn(apiClient, 'get').mockResolvedValueOnce({
+      data: [makePlan({ id: 1 })],
+    } as never)
+
+    const user = userEvent.setup()
+    renderDashboard()
+    await screen.findByText('Office layout')
+
+    await user.click(screen.getByRole('button', { name: /log out/i }))
+
+    expect(logout).toHaveBeenCalledTimes(1)
   })
 
   it('double-clicking "Create new" fires only one POST (button disabled while pending)', async () => {
