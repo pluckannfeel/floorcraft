@@ -1,9 +1,16 @@
+import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+  },
   envDir: "../", // Read the shared .env at the repo root instead of frontend_ts/
   server: {
     host: true, // Needed for Docker container port mapping (listens on 0.0.0.0)
