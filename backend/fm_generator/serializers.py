@@ -68,6 +68,9 @@ class FloorPlanSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = FloorPlan
+        # `owner` is deliberately omitted: it's not client-writable and the
+        # frontend never needs to display it. It's set server-side via
+        # perform_create() in FloorPlanViewSet.
         fields = [
             'id', 'name', 'grid_size', 'canvas_width', 'canvas_height',
             'items', 'created_at', 'updated_at',

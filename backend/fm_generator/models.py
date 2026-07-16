@@ -1,7 +1,9 @@
+from django.conf import settings
 from django.db import models
 
 
 class FloorPlan(models.Model):
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='floor_plans')
     name = models.CharField(max_length=255)
     grid_size = models.PositiveIntegerField(default=20)
     canvas_width = models.PositiveIntegerField(default=1600)

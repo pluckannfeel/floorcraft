@@ -21,7 +21,11 @@ class FloorPlanPermissionTests(TestCase):
     """
 
     def setUp(self):
-        self.floor_plan = FloorPlan.objects.create(name='Test Floor Plan')
+        # Distinct email from the per-test `make_verified_user()` calls
+        # below (which use the default email to log in), so creating this
+        # fixture's owner doesn't collide with those.
+        owner = make_verified_user(email='floorplan-owner@example.com')
+        self.floor_plan = FloorPlan.objects.create(name='Test Floor Plan', owner=owner)
         Objects.objects.create(
             floor_plan=self.floor_plan,
             type=Objects.ObjectType.OUTLINES,
