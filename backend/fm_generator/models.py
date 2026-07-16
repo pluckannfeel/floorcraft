@@ -13,16 +13,28 @@ class FloorPlan(models.Model):
         return self.name
 
 
-class FloorPlanItem(models.Model):
-    class ItemType(models.TextChoices):
-        DESK = 'desk', 'Desk'
-        WALL = 'wall', 'Wall'
-        AC_UNIT = 'ac_unit', 'AC Unit'
-        LIGHT = 'light', 'Lighting Node'
+class Objects(models.Model):
+    class ObjectType(models.TextChoices):
+        # Catalog types
+        OUTLINES = 'outlines', 'Outlines'
+        TABLES = 'tables', 'Tables'
+        DOORS = 'doors', 'Doors'
+        CHAIRS = 'chairs', 'Chairs'
+        FURNITURES = 'furnitures', 'Furnitures'
+        APPLIANCES = 'appliances', 'Appliances'
+        LIGHTING = 'lighting', 'Lighting'
+        # Shape types
+        SHAPE_RECTANGLE = 'shape_rectangle', 'Shape: Rectangle'
+        SHAPE_SQUARE = 'shape_square', 'Shape: Square'
+        SHAPE_CIRCLE = 'shape_circle', 'Shape: Circle'
+        # Line types
+        LINE_STRAIGHT = 'line_straight', 'Line: Straight'
+        LINE_CURVED = 'line_curved', 'Line: Curved'
+        LINE_S_CURVE = 'line_s_curve', 'Line: S-Curve'
 
     floor_plan = models.ForeignKey(FloorPlan, on_delete=models.CASCADE, related_name='items')
-    type = models.CharField(max_length=20, choices=ItemType.choices)
-    label = models.CharField(max_length=255, blank=True)
+    type = models.CharField(max_length=20, choices=ObjectType.choices)
+    name = models.CharField(max_length=255, blank=True)
 
     # Grid-snapped canvas position and geometry
     x = models.FloatField()
@@ -30,8 +42,10 @@ class FloorPlanItem(models.Model):
     width = models.FloatField(default=40)
     height = models.FloatField(default=40)
     rotation = models.FloatField(default=0)
+    z_index = models.IntegerField(default=0, db_index=True)
 
-    # Type-specific data (e.g. wall thickness, desk seat count, AC unit BTU)
+    # Type-specific data (e.g. wall thickness, desk seat count, AC unit BTU,
+    # Line points/curve_style, Shape kind-specific sizing)
     properties = models.JSONField(default=dict, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)

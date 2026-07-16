@@ -47,8 +47,11 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'accounts',
     'fm_generator',
 ]
+
+AUTH_USER_MODEL = 'accounts.User'
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -128,3 +131,58 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# Email
+# https://docs.djangoproject.com/en/5.2/topics/email/
+# Console backend for local dev — prints outgoing mail to stdout instead of
+# actually sending it. Swap via env var once a real SMTP/provider backend
+# is wired up for a non-local environment.
+
+EMAIL_BACKEND = os.environ.get(
+    'EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend'
+)
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@floorcraft.local')
+
+# Used to build absolute links (e.g. email verification URLs) outside of a
+# request/response cycle.
+SITE_URL = os.environ.get('SITE_URL', 'http://localhost:8000')
+
+
+# Session / CSRF cookie hardening (U3)
+# https://docs.djangoproject.com/en/5.2/ref/settings/#session-cookie-samesite
+#
+# Safe given the stack is genuinely same-origin via Nginx in both dev and
+# prod (see plan's Key Technical Decisions) — "Strict" would otherwise
+# break any legitimate cross-site navigation into an authenticated page.
+SESSION_COOKIE_SAMESITE = 'Strict'
+CSRF_COOKIE_SAMESITE = 'Strict'
+
+# The session cookie is never read by JS — httpOnly is a pure win.
+SESSION_COOKIE_HTTPONLY = True
+
+# The CSRF cookie MUST stay JS-readable: axios's `xsrfCookieName`/
+# `xsrfHeaderName` config reads this cookie client-side and echoes it back
+# as a request header (the "double submit cookie" pattern) — flipping this
+# to `True` would silently break every unsafe (POST/PATCH/DELETE) request.
+CSRF_COOKIE_HTTPONLY = False
+
+# No cost given `SECURE_PROXY_SSL_HEADER` is already wired for the
+# Nginx-TLS-termination topology above — prevents cookies from ever being
+# sent over a plaintext channel if TLS termination is ever misconfigured.
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+
+
+# Django REST Framework (U4)
+# Session-authenticated and locked down by default; individual views opt
+# into anonymous access explicitly (see accounts.views) rather than the
+# other way around.
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+}
