@@ -106,13 +106,30 @@ export function CanvasEditorPage() {
   );
   const setStagePosition = useCanvasStore((state) => state.setStagePosition);
 
+  // Airtight in-flight guard (a render-closure `isSaving` isn't: two rapid
+  // Ctrl+S presses can both land before the re-registered listener sees the
+  // pending state, firing two overlapping full-replace PUTs). The ref flips
+  // synchronously at dispatch, so the second press is a guaranteed no-op.
+  const saveInFlightRef = useRef(false);
   const handleSave = useCallback(() => {
+    // Commit any in-progress field edit first: the Property Panel commits
+    // drafts on blur, so Ctrl+S mid-typing would otherwise save WITHOUT
+    // the text on screen (and then show "Saved"). Blur fires the commit
+    // synchronously into the store before the dirty check below runs.
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
     // Read `dirty` off the store directly so the guard is always current —
     // this callback is also Ctrl+S's target (via `useCanvasShortcuts`
     // below), which can fire between renders.
-    if (!useCanvasStore.getState().dirty || isSaving) return;
-    saveObjects();
-  }, [saveObjects, isSaving]);
+    if (!useCanvasStore.getState().dirty || saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
+    saveObjects(undefined, {
+      onSettled: () => {
+        saveInFlightRef.current = false;
+      },
+    });
+  }, [saveObjects]);
 
   // Keyboard shortcuts: undo/redo (R15) plus Ctrl/Cmd+S -> explicit save —
   // see `useCanvasShortcuts.ts`.
@@ -135,12 +152,18 @@ export function CanvasEditorPage() {
   // zoom/pan. Reset all of it keyed on the route's floorPlanId. `setItems`
   // also clears `dirty`, so a stale unsaved-changes flag can't leak onto
   // the next plan either.
+  const seededForPlanRef = useRef<number | null>(null);
   useEffect(() => {
     const store = useCanvasStore.getState();
     store.setItems([]); // pauses/resumes zundo internally; clears dirty
     store.selectItem(null); // untracked (partialize covers items only)
     store.resetZoom(); // untracked
     useCanvasStore.temporal.getState().clear();
+    // Forget which plan was seeded, too: without this, a same-mount
+    // A -> B -> A param sequence where B's fetch never resolved would find
+    // the ref still equal to A and leave plan A permanently empty (and a
+    // save from that state would wipe A's objects server-side).
+    seededForPlanRef.current = null;
   }, [floorPlanId]);
 
   // Seed the store from the fetched Objects ONCE per floor plan (reseeding
@@ -153,7 +176,6 @@ export function CanvasEditorPage() {
   // unsaved local edits, and the post-save `setQueryData` must not trigger
   // a re-baseline either (setItems would reset `serverIdMap` and swap item
   // ids out from under the undo history, breaking undo/redo after a save).
-  const seededForPlanRef = useRef<number | null>(null);
   useEffect(() => {
     if (
       objectsQuery.data &&
@@ -298,15 +320,33 @@ export function CanvasEditorPage() {
   }
 
   // `objectsQuery.isError` matters as much as the floor-plan errors: without
-  // it, a failed objects fetch would fall through and render the editor with
-  // whatever the module-global store still holds (possibly a previously
-  // opened plan's items) — and a save would then send THAT plan's objects
-  // under this plan's header.
-  if (floorPlanQuery.isError || !floorPlanQuery.data || objectsQuery.isError) {
+  // it, a failed INITIAL objects fetch would fall through and render the
+  // editor over an empty (plan-switch-reset) store, misrepresenting a
+  // populated plan as empty. But only when there's no data at all —
+  // `isError` also flips on a failed BACKGROUND refetch (e.g. window-focus
+  // with the backend blipping), and replacing the editor then would strand
+  // unsaved dirty edits behind an error page with no Save button. With
+  // cached data present the editor keeps rendering; the store (already
+  // seeded) is the source of truth either way.
+  if (
+    floorPlanQuery.isError ||
+    !floorPlanQuery.data ||
+    (objectsQuery.isError && !objectsQuery.data)
+  ) {
     return (
       <div role="alert">
         <p>Unable to load the floor plan.</p>
-        <Link to="/floor-plans">Back to dashboard</Link>
+        {/* Guarded like every other in-app exit: if the store somehow
+            holds unsaved work (e.g. a floor-plan refetch failed after
+            editing began), leaving still asks first. */}
+        <Link
+          to="/floor-plans"
+          onClick={(event) => {
+            if (!confirmLeaveWithUnsavedChanges()) event.preventDefault();
+          }}
+        >
+          Back to dashboard
+        </Link>
       </div>
     );
   }

@@ -642,3 +642,39 @@ describe('canvasStore zoom/pan actions (U11)', () => {
     expect(useCanvasStore.getState().stagePosition).toEqual({ x: 40, y: 40 })
   })
 })
+
+describe('canvasStore serverIdMap (explicit save)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({ items: [], dirty: false, serverIdMap: {} })
+  })
+
+  it('merges a save response id_map', () => {
+    useCanvasStore.getState().mergeServerIdMap({ 'local-a': 10 })
+    useCanvasStore.getState().mergeServerIdMap({ 'local-b': 20 })
+
+    expect(useCanvasStore.getState().serverIdMap).toEqual({
+      'local-a': 10,
+      'local-b': 20,
+    })
+  })
+
+  it('repairs chained entries when a mapped row is recreated (delete -> save -> undo -> save)', () => {
+    // Save #1 created row 10 for local-a.
+    useCanvasStore.getState().mergeServerIdMap({ 'local-a': 10 })
+    // Row 10 was deleted by a later save; a redo resurrected the item and
+    // the next save recreated it as row 11, reported as {"10": 11}.
+    useCanvasStore.getState().mergeServerIdMap({ '10': 11 })
+
+    // Without chain repair, local-a would still point at dead row 10 and
+    // every subsequent save would delete-and-recreate the object forever.
+    expect(useCanvasStore.getState().serverIdMap['local-a']).toBe(11)
+  })
+
+  it('setItems resets the map (identity re-baselined from the server)', () => {
+    useCanvasStore.getState().mergeServerIdMap({ 'local-a': 10 })
+
+    useCanvasStore.getState().setItems([])
+
+    expect(useCanvasStore.getState().serverIdMap).toEqual({})
+  })
+})

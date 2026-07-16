@@ -325,6 +325,46 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
     expect(screen.getByRole('button', { name: /save changes/i })).toHaveTextContent('Save')
   })
 
+  it('a failed BACKGROUND refetch does not strand unsaved edits behind the error page', async () => {
+    // isError flips on refetch failures too (e.g. window-focus refetch
+    // while the backend blips) — with cached data present the editor must
+    // keep rendering so dirty work stays reachable and savable.
+    let objectsCalls = 0
+    vi.spyOn(apiClient, 'get').mockImplementation(((url: string) => {
+      if (url === '/floor-plans/7/') {
+        return Promise.resolve({ data: makePlan({ id: 7, name: 'Resilient Plan' }) })
+      }
+      if (url === '/objects/') {
+        objectsCalls += 1
+        if (objectsCalls === 1) {
+          return Promise.resolve({ data: [makeObject({ id: 701, floor_plan: 7 })] })
+        }
+        return Promise.reject({ isAxiosError: true, response: { status: 500, data: {} } })
+      }
+      return Promise.reject(new Error(`Unexpected GET ${url}`))
+    }) as never)
+
+    const { queryClient } = renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Resilient Plan')).toBeInTheDocument()
+
+    // Unsaved edit, then a background refetch that fails.
+    act(() => {
+      useCanvasStore.getState().updateItemGeometry(701, { x: 999 })
+    })
+    await act(async () => {
+      await queryClient
+        .refetchQueries({ queryKey: ['objects', 7] })
+        .catch(() => {})
+    })
+
+    // Editor still standing: no error page, edits intact, Save reachable.
+    expect(screen.queryByText(/unable to load/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /save changes/i })).toHaveTextContent('Save')
+    expect(useCanvasStore.getState().items[0]).toEqual(
+      expect.objectContaining({ x: 999 }),
+    )
+  })
+
   it('guards leaving with unsaved changes, and releases the guards after a save', async () => {
     mockGetForPlans({
       7: {

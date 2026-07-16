@@ -272,7 +272,21 @@ export const useCanvasStore = create<CanvasState>()(
       serverIdMap: {},
 
       mergeServerIdMap: (idMap) =>
-        set((state) => ({ serverIdMap: { ...state.serverIdMap, ...idMap } })),
+        set((state) => {
+          // Chain repair: if an existing entry's TARGET row was itself
+          // recreated by this save (its old id appears as a key in the
+          // incoming map), re-point the entry at the new row. Without
+          // this, a delete -> save -> undo -> save cycle leaves the
+          // original client id aimed at a dead row forever, and every
+          // subsequent save would delete-and-recreate that object (id
+          // churn) instead of updating it in place.
+          const merged: Record<string, number> = { ...state.serverIdMap }
+          for (const [clientId, serverId] of Object.entries(merged)) {
+            const repointed = idMap[String(serverId)]
+            if (repointed !== undefined) merged[clientId] = repointed
+          }
+          return { serverIdMap: { ...merged, ...idMap } }
+        }),
 
       setItems: (items) => {
         // Server-driven re-baseline (see this action's doc comment on the
