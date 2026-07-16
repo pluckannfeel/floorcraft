@@ -5,6 +5,7 @@ import { VerifyEmailPage } from "./auth/VerifyEmailPage";
 import { LoginPage } from "./auth/LoginPage";
 import { ForgotPasswordPage } from "./auth/ForgotPasswordPage";
 import { ResetPasswordPage } from "./auth/ResetPasswordPage";
+import { FloorPlanDashboard } from "./pages/FloorPlanDashboard";
 import Home from "./pages/Home";
 
 export function AppRoutes() {
@@ -18,15 +19,27 @@ export function AppRoutes() {
         path="/reset-password/:uid/:token"
         element={<ResetPasswordPage />}
       />
+      {/* U4/R4: the dashboard is the post-login landing page. */}
       <Route
-        path="/"
+        path="/floor-plans"
+        element={
+          <RequireAuth>
+            <FloorPlanDashboard />
+          </RequireAuth>
+        }
+      />
+      {/* U4/R7: per-plan editor route. Home still renders the hardcoded
+          editor for now — U5 wires :floorPlanId into it. */}
+      <Route
+        path="/floor-plans/:floorPlanId"
         element={
           <RequireAuth>
             <Home />
           </RequireAuth>
         }
       />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="/" element={<Navigate to="/floor-plans" replace />} />
+      <Route path="*" element={<Navigate to="/floor-plans" replace />} />
     </Routes>
   );
 }
