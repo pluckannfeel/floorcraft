@@ -1,10 +1,21 @@
-import { forwardRef, useEffect, useRef, useState } from 'react'
-import type Konva from 'konva'
+import { forwardRef, useCallback, useEffect, useRef, useState } from 'react'
+import Konva from 'konva'
 import { Layer, Line, Rect, Stage } from 'react-konva'
-import { AlignmentGuideLines, NO_GUIDES } from './AlignmentGuides'
+import { AlignmentGuideLines, boundingBoxForObject, NO_GUIDES } from './AlignmentGuides'
 import type { GuideLines } from './AlignmentGuides'
-import { clientToContainerPoint, computePinchZoom, computeWheelZoom, screenToStagePoint, shouldHandleDeleteKey } from './coordinates'
-import type { ZoomPanState } from './coordinates'
+import {
+  clientToContainerPoint,
+  computePinchZoom,
+  computeWheelZoom,
+  containerToStagePoint,
+  isEditableTarget,
+  rectFromPoints,
+  rectsIntersect,
+  screenToStagePoint,
+  SELECTION_CHROME,
+  shouldHandleDeleteKey,
+} from './coordinates'
+import type { BoundingBox, ZoomPanState } from './coordinates'
 import { LineAnchorHandles } from './LineAnchorHandles'
 import { isLineTool, LinePreview, parseLinePoints, useLineTool } from './LineTool'
 import { ObjectShape } from './ObjectShape'
@@ -15,6 +26,19 @@ import { isShapeTool, ShapePreview, useShapeTool } from './ShapeTool'
 import type { ShapeGeometry } from './ShapeTool'
 import type { ActiveTool } from '../state/canvasStore'
 import type { CanvasObject, LineType, Point, ShapeType } from './types'
+
+// U2: left-drag on empty canvas is now the marquee, and panning moved to
+// Space+drag / middle-mouse-drag. Konva's default `dragButtons` is `[0, 1]`,
+// which would let a middle-button press natively start a drag on any
+// draggable node — including an ObjectShape Group under the cursor, which
+// would then move WITH the middle-mouse pan our own pointerdown handler
+// starts on the Stage. Restricting native drags to the left button keeps
+// object dragging exactly as it was (left-drag) while middle-mouse panning
+// stays fully imperative (`stage.startDrag()` bypasses this check, and
+// Konva ends manual drags on any pointerup regardless of button). Touch is
+// unaffected: `touchstart` events carry no `button`, so Konva skips the
+// check for them.
+Konva.dragButtons = [0]
 
 interface CanvasStageProps {
   width: number
@@ -117,6 +141,194 @@ export function sortObjectsByZIndex(objects: CanvasObject[]): CanvasObject[] {
 }
 
 /**
+ * U2: container-space (screen px) movement below which a marquee gesture is
+ * treated as a plain CLICK rather than a drag — preserving U1's
+ * click-empty-canvas-clears-selection behavior, which as of U2 commits on
+ * pointerup instead of pointerdown (a pointerdown clear would wipe the
+ * existing selection before a Shift+marquee could union with it). Measured
+ * in screen px, not model units, so the click/drag boundary feels the same
+ * at every zoom level.
+ */
+export const MARQUEE_CLICK_THRESHOLD_PX = 4
+
+/**
+ * U2's pure marquee hit-test: which object ids does `rect` (model-space)
+ * select? Intersection, NOT containment (plan's interaction defaults), and
+ * each object's bbox comes from `boundingBoxForObject` — rotated objects use
+ * their rotated AABB (`getRotatedBoundingBox`), and Lines derive their bbox
+ * from `properties.points` (the stored x/y/width/height is descriptive
+ * metadata only), reusing the exact polymorphic dispatch U19's alignment
+ * guides already established rather than reimplementing it. Returned ids
+ * keep `objects` order, making the hit set deterministic for
+ * `replaceSelection` (the store's ordered-array selection contract).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function selectIdsInRect(rect: BoundingBox, objects: CanvasObject[]): CanvasObject['id'][] {
+  return objects
+    .filter((object) => rectsIntersect(rect, boundingBoxForObject(object)))
+    .map((object) => object.id)
+}
+
+/**
+ * U2: how a finished marquee's hit set combines with the existing selection.
+ * Plain marquee REPLACES; Shift+marquee ADDS (union, stable order: the
+ * existing selection's order is preserved, then not-yet-selected hits are
+ * appended in their hit order — no duplicates).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function applyMarqueeSelection(
+  existing: CanvasObject['id'][],
+  hits: CanvasObject['id'][],
+  additive: boolean,
+): CanvasObject['id'][] {
+  if (!additive) return hits
+  const union = [...existing]
+  for (const id of hits) {
+    if (!union.includes(id)) union.push(id)
+  }
+  return union
+}
+
+/** What releasing a marquee should do to the selection — see
+ * `resolveMarqueeCommit`. */
+export type MarqueeCommitAction =
+  | { kind: 'clear' }
+  | { kind: 'keep' }
+  | { kind: 'select'; ids: CanvasObject['id'][] }
+
+export interface ResolveMarqueeCommitArgs {
+  /** Gesture endpoints in CONTAINER space (screen px, pre-zoom/pan) — the
+   * space `stage.getPointerPosition()`/`clientToContainerPoint` report in. */
+  origin: Point
+  current: Point
+  zoom: number
+  stagePosition: Point
+  objects: CanvasObject[]
+  selectedItemIds: CanvasObject['id'][]
+  /** Shift held at release → add to the existing selection. */
+  additive: boolean
+}
+
+/**
+ * U2: the complete pointerup decision for a marquee gesture, pure so the
+ * whole zoom/pan-aware pipeline is unit-testable in jsdom (no Konva).
+ *
+ * Coordinate spaces, per the plan's single-space rule: the gesture is
+ * TRACKED in container/screen space (where pointer events natively live),
+ * then converted to model space at exactly one boundary —
+ * `containerToStagePoint` on both corners — and ALL hit-testing happens in
+ * model space against `boundingBoxForObject`'s model-space bboxes. Nothing
+ * ever compares screen-space numbers against model-space numbers.
+ *
+ * Sub-threshold movement is a click, not a drag: plain click on empty
+ * canvas still clears the selection (U1 behavior, preserved), while a
+ * Shift+click on empty canvas keeps it (additive gestures never destroy
+ * the selection they're adding to).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveMarqueeCommit({
+  origin,
+  current,
+  zoom,
+  stagePosition,
+  objects,
+  selectedItemIds,
+  additive,
+}: ResolveMarqueeCommitArgs): MarqueeCommitAction {
+  const movedPx = Math.max(Math.abs(current.x - origin.x), Math.abs(current.y - origin.y))
+  if (movedPx < MARQUEE_CLICK_THRESHOLD_PX) {
+    return additive ? { kind: 'keep' } : { kind: 'clear' }
+  }
+  const rect = rectFromPoints(
+    containerToStagePoint(origin, zoom, stagePosition),
+    containerToStagePoint(current, zoom, stagePosition),
+  )
+  const hits = selectIdsInRect(rect, objects)
+  return { kind: 'select', ids: applyMarqueeSelection(selectedItemIds, hits, additive) }
+}
+
+interface UseMarqueeArgs {
+  zoom: number
+  stagePosition: Point
+  objects: CanvasObject[]
+  selectedItemIds: CanvasObject['id'][]
+  onReplaceSelection: (ids: CanvasObject['id'][]) => void
+  onClearSelection: () => void
+}
+
+/**
+ * U2: drives the marquee-select gesture (Select tool, plain left-drag on
+ * empty canvas). Mirrors `useShapeTool`/`useLineTool`'s split: this hook is
+ * the Konva-free state machine (begin → update* → commit | cancel), tested
+ * directly with `renderHook`; `CanvasStage` wires pointer/keyboard events
+ * into it. All points passed in are CONTAINER-space (screen px); the
+ * returned `rect` is MODEL-space, ready to render on a stage-transformed
+ * layer — `resolveMarqueeCommit` documents the single conversion boundary.
+ *
+ * `cancel` (Escape mid-marquee) discards the gesture WITHOUT touching the
+ * selection; `commit` (pointerup) resolves clear/keep/select per
+ * `resolveMarqueeCommit`. A Space press mid-gesture is simply never routed
+ * here (the gesture locks at pointerdown — `CanvasStage`'s pan handling
+ * only consults Space state at pointerdown time).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function useMarquee({
+  zoom,
+  stagePosition,
+  objects,
+  selectedItemIds,
+  onReplaceSelection,
+  onClearSelection,
+}: UseMarqueeArgs) {
+  const [gesture, setGesture] = useState<{ origin: Point; current: Point } | null>(null)
+
+  const begin = useCallback((containerPoint: Point) => {
+    setGesture({ origin: containerPoint, current: containerPoint })
+  }, [])
+
+  const update = useCallback((containerPoint: Point) => {
+    setGesture((active) => (active ? { ...active, current: containerPoint } : active))
+  }, [])
+
+  const cancel = useCallback(() => setGesture(null), [])
+
+  const commit = useCallback(
+    (additive: boolean) => {
+      if (!gesture) return
+      const action = resolveMarqueeCommit({
+        origin: gesture.origin,
+        current: gesture.current,
+        zoom,
+        stagePosition,
+        objects,
+        selectedItemIds,
+        additive,
+      })
+      if (action.kind === 'clear') {
+        onClearSelection()
+      } else if (action.kind === 'select') {
+        onReplaceSelection(action.ids)
+      }
+      setGesture(null)
+    },
+    [gesture, zoom, stagePosition, objects, selectedItemIds, onReplaceSelection, onClearSelection],
+  )
+
+  // Model-space rect for rendering: converted per-render from the tracked
+  // container-space endpoints, so a mid-gesture wheel-zoom keeps the drawn
+  // rect under the pointer (screen-anchored) and the commit hit-test uses
+  // the same conversion.
+  const rect = gesture
+    ? rectFromPoints(
+        containerToStagePoint(gesture.origin, zoom, stagePosition),
+        containerToStagePoint(gesture.current, zoom, stagePosition),
+      )
+    : null
+
+  return { isActive: gesture != null, rect, begin, update, commit, cancel }
+}
+
+/**
  * 3-layer Konva Stage (grid/background, interactive Objects, UI overlay) —
  * NOT the originally-discussed 4-layer grid/structural/interactive/UI split.
  * Per the plan's Key Technical Decisions: once Objects were unified into one
@@ -153,11 +365,65 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   const gridLines = buildGridLines(width, height, gridSize)
   const drawingShape = isShapeTool(activeTool)
   const drawingLine = isLineTool(activeTool)
-  // U11: drag-to-pan is only appropriate in 'select' mode — a shape/line
-  // tool being active means clicks/drags are for drawing, not navigating,
-  // same "route by activeTool" rule the shape/line pointerdown branches
-  // below already follow.
-  const panEnabled = !drawingShape && !drawingLine
+
+  // U2: plain drag on empty canvas is the marquee now; panning is
+  // pan-active-only. The Stage is natively `draggable` ONLY while Space is
+  // held (window key listeners below); middle-mouse and touch gestures
+  // enable dragging imperatively per-event inside `onPointerDown` — a React
+  // state toggle commits too late for the same pointerdown to start a Konva
+  // drag.
+  const [spaceHeld, setSpaceHeld] = useState(false)
+  // U2: whether a stage pan drag is actually in flight — drives the
+  // grab (pan available) vs grabbing (panning) cursor distinction.
+  const [panDragging, setPanDragging] = useState(false)
+
+  // U2: internal handle on the Stage, merged with the forwarded ref — the
+  // cursor effect and the marquee's window-level pointermove need
+  // `stage.container()` outside any Konva event callback.
+  const stageRef = useRef<Konva.Stage | null>(null)
+  const setStageRef = useCallback(
+    (node: Konva.Stage | null) => {
+      stageRef.current = node
+      if (typeof ref === 'function') {
+        ref(node)
+      } else if (ref) {
+        ref.current = node
+      }
+    },
+    [ref],
+  )
+
+  // U2: Space-held pan state. Window-level (Konva Stages aren't natively
+  // focusable, same rationale as the Delete/Escape listener below), guarded
+  // by `isEditableTarget` so typing a space into the property panel or the
+  // floor-plan name field never hijacks the key. `keyup` and window `blur`
+  // (e.g. Alt-Tab away mid-hold) both release, so the stage can't get stuck
+  // draggable.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.code !== 'Space') return
+      const activeElement = document.activeElement as HTMLElement | null
+      if (isEditableTarget(activeElement?.tagName, activeElement?.isContentEditable ?? false)) return
+      // Own the key: without this the page scrolls (and a focused button
+      // would activate) on every Space press over the editor.
+      event.preventDefault()
+      setSpaceHeld(true)
+    }
+    function handleKeyUp(event: KeyboardEvent) {
+      if (event.code === 'Space') setSpaceHeld(false)
+    }
+    function handleWindowBlur() {
+      setSpaceHeld(false)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+    window.addEventListener('blur', handleWindowBlur)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+      window.removeEventListener('blur', handleWindowBlur)
+    }
+  }, [])
 
   // U11: two-finger pinch-zoom state. Kept in a ref (not React state) since
   // it's write-only bookkeeping between consecutive `touchmove` events, not
@@ -192,6 +458,78 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
       onReplaceSelection([id])
     }
   }
+
+  // U2: the marquee gesture state machine (see `useMarquee`'s doc).
+  // `onPointerDown` begins it; move/release/Escape are handled by the
+  // window-level listeners below, NOT Stage handlers — Konva's Stage pointer
+  // events stop firing once the pointer leaves the canvas element (the same
+  // out-of-canvas-release problem `shapeTool`'s window pointerup solves),
+  // and a single owner avoids double-committing when the release happens
+  // over the canvas.
+  const marquee = useMarquee({
+    zoom,
+    stagePosition,
+    objects,
+    selectedItemIds,
+    onReplaceSelection,
+    onClearSelection,
+  })
+
+  // Latest-value ref so the gesture-scoped window listeners (registered
+  // once per gesture, below) always dispatch into the current render's
+  // hook callbacks instead of stale closures.
+  const marqueeRef = useRef(marquee)
+  useEffect(() => {
+    marqueeRef.current = marquee
+  })
+
+  const marqueeActive = marquee.isActive
+  useEffect(() => {
+    if (!marqueeActive) return undefined
+    function handleWindowPointerMove(event: PointerEvent) {
+      const stage = stageRef.current
+      if (!stage) return
+      marqueeRef.current.update(clientToContainerPoint(stage, event.clientX, event.clientY))
+    }
+    function handleWindowPointerUp(event: PointerEvent) {
+      // Only the primary button's release ends the gesture (releasing a
+      // middle/right button pressed mid-marquee must not commit early).
+      if (event.button !== 0) return
+      // Shift is sampled at release (same convention as U6's
+      // Alt-at-release): plain marquee replaces, Shift+marquee adds.
+      marqueeRef.current.commit(event.shiftKey)
+    }
+    function handleWindowKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      // Escape ownership (plan's documented priority order, innermost
+      // first): text overlay → context menu → crop region →
+      // marquee-in-progress → line-draw finish. This listener only exists
+      // while a marquee is in progress, and a marquee can only start with
+      // the Select tool active, so it can never race the line-draw Escape
+      // in the keydown effect below (line tools never have an active
+      // marquee).
+      event.stopPropagation()
+      marqueeRef.current.cancel()
+    }
+    window.addEventListener('pointermove', handleWindowPointerMove)
+    window.addEventListener('pointerup', handleWindowPointerUp)
+    window.addEventListener('keydown', handleWindowKeyDown)
+    return () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove)
+      window.removeEventListener('pointerup', handleWindowPointerUp)
+      window.removeEventListener('keydown', handleWindowKeyDown)
+    }
+  }, [marqueeActive])
+
+  // U2 cursor language: crosshair while a marquee is being drawn;
+  // grab/grabbing while pan is available/active (Space held or an actual
+  // pan drag, including middle-mouse); default arrow otherwise (the plan
+  // explicitly allows keeping the arrow for the idle Select tool).
+  useEffect(() => {
+    const container = stageRef.current?.container()
+    if (!container) return
+    container.style.cursor = marqueeActive ? 'crosshair' : panDragging ? 'grabbing' : spaceHeld ? 'grab' : ''
+  }, [marqueeActive, panDragging, spaceHeld])
 
   // Map<id, Konva.Node> resolving the selected item's live node for
   // SelectionTransformer's `.nodes([ref])` attach — populated/cleared by
@@ -275,24 +613,35 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
 
   return (
     <Stage
-      ref={ref}
+      ref={setStageRef}
       width={width}
       height={height}
       scaleX={zoom}
       scaleY={zoom}
       x={stagePosition.x}
       y={stagePosition.y}
-      draggable={panEnabled}
-      onDragEnd={(event) => {
-        // Only the Stage's own drag (empty-canvas pan) should reach here —
-        // an Object's drag (`ObjectShape.tsx`'s Group) stops at that Group
-        // and never bubbles a `dragend` up to the Stage, since Konva
-        // dispatches `dragend` on the node that was actually being dragged,
-        // not every ancestor. The `event.target === stage` guard below is
-        // therefore belt-and-suspenders should that assumption ever change.
-        if (!panEnabled) return
+      draggable={spaceHeld}
+      onDragStart={(event) => {
+        // Only the Stage's own drag is a pan — an Object's dragstart fires
+        // on the Object node, not the Stage (Konva dispatches drag events on
+        // the node actually being dragged), so this guard filters the
+        // bubbled ones.
         const stage = event.target.getStage()
         if (!stage || event.target !== stage) return
+        setPanDragging(true)
+      }}
+      onDragEnd={(event) => {
+        // Only the Stage's own drag (pan) should reach here — an Object's
+        // drag (`ObjectShape.tsx`'s Group) fires `dragend` on that Group.
+        // The `event.target === stage` guard filters bubbled child drags.
+        const stage = event.target.getStage()
+        if (!stage || event.target !== stage) return
+        setPanDragging(false)
+        // Restore prop-truth after the imperative per-gesture enables
+        // (middle-mouse/touch, below): react-konva only re-applies
+        // `draggable` when the PROP changes between renders, so an
+        // imperative `draggable(true)` would otherwise stick forever.
+        stage.draggable(spaceHeld)
         onPanEnd?.({ x: stage.x(), y: stage.y() })
       }}
       onWheel={(event) => {
@@ -343,26 +692,78 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         if (event.evt.touches.length < 2) pinchRef.current = null
       }}
       onPointerDown={(event) => {
+        const stage = event.target.getStage()
+        if (!stage) return
+
+        // U2: middle-mouse pan — works from any tool and over any target.
+        // The `draggable` toggle + `startDrag()` must be imperative in this
+        // same event: a React state commit lands too late for this
+        // pointerdown to start a Konva drag. `preventDefault` suppresses
+        // the browser's middle-click autoscroll. `Konva.dragButtons = [0]`
+        // (module scope, above) keeps this press from ALSO starting a
+        // native drag on a draggable Object under the cursor. Ignored
+        // mid-marquee — the marquee gesture locks at its own pointerdown.
+        if (event.evt.button === 1) {
+          event.evt.preventDefault()
+          if (!marquee.isActive) {
+            stage.draggable(true)
+            stage.startDrag()
+          }
+          return
+        }
+
+        // U2: Space-held pan owns the gesture — the Stage is already
+        // `draggable` via the prop, so Konva's own drag bookkeeping takes
+        // this pointerdown; nothing below (drawing, marquee) may start.
+        if (spaceHeld) return
+
         // U15: a shape tool is active — start (or, per Konva's docs,
-        // implicitly restart) a drag-to-size instead of the normal
-        // click-to-select-or-clear behavior below.
+        // implicitly restart) a drag-to-size instead of the marquee/pan
+        // routing below.
         if (drawingShape) {
-          const stage = event.target.getStage()
-          if (!stage) return
           const point = screenToStagePoint(stage, event.evt.clientX, event.evt.clientY)
           shapeTool.startDraw(activeTool, point)
           return
         }
         // U16: a line tool is active — point placement/finishing is driven
-        // entirely by `onClick`/`onDblClick`/Escape below, not `pointerdown`;
-        // just suppress the normal click-to-clear-selection behavior below
-        // so an in-progress draw's clicks don't also clear selection.
+        // entirely by `onClick`/`onDblClick`/Escape below, not `pointerdown`.
         if (drawingLine) {
           return
         }
-        // Clicking empty stage space clears selection (U1: the whole set).
-        if (event.target === event.target.getStage()) {
-          onClearSelection()
+
+        // U2: touch is exempt from the pan rebind (plan) — single-finger
+        // pan is preserved (the pinch handler in onTouchMove depends on the
+        // stage drag via `isDragging()`/`stopDrag()`), and the marquee is
+        // mouse-only in v1. DOM `pointerdown` fires BEFORE `touchstart`, so
+        // flipping `draggable` here is early enough for Konva's own
+        // touchstart drag bookkeeping (ready-status, drag-distance
+        // threshold, "a draggable Object under the finger wins" bubbling)
+        // to behave exactly as it did when the prop was statically true —
+        // taps still select, and dragging an Object still beats panning.
+        // `onDragEnd`/`onPointerUp` restore the prop-driven value after the
+        // gesture. Tap-on-empty-canvas keeps U1's clear-at-pointerdown
+        // behavior (no marquee commit will run for touch).
+        if (event.evt.pointerType === 'touch') {
+          stage.draggable(true)
+          if (event.target === stage) {
+            onClearSelection()
+          }
+          return
+        }
+
+        // U2: plain left-press on empty canvas (Select tool, no pan) starts
+        // the marquee. Selection is NO LONGER cleared here at pointerdown —
+        // the release decides (zero-movement click clears, a drag selects;
+        // see `resolveMarqueeCommit`), otherwise Shift+marquee could never
+        // union with the selection this pointerdown would have wiped.
+        if (event.evt.button === 0 && event.target === stage) {
+          // Belt-and-suspenders: if a stray imperative enable survived (a
+          // touch gesture that ended off-canvas), drop it now so the
+          // upcoming mousedown can't ALSO start a native stage drag under
+          // this marquee.
+          if (stage.draggable()) stage.draggable(false)
+          const pointer = stage.getPointerPosition()
+          if (pointer) marquee.begin(pointer)
         }
       }}
       onPointerMove={(event) => {
@@ -372,12 +773,24 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         const point = screenToStagePoint(stage, event.evt.clientX, event.evt.clientY)
         shapeTool.updateDraw(point)
       }}
-      onPointerUp={() => {
+      onPointerUp={(event) => {
+        // U2: end-of-gesture restore for the imperative touch enable in
+        // onPointerDown (the drag path restores in onDragEnd too — this
+        // covers taps, where no drag ever starts). Setting `draggable`
+        // false mid-drag makes Konva end that drag cleanly (dragend fires,
+        // so the pan still commits through onDragEnd above).
+        if (event.evt.pointerType === 'touch') {
+          event.target.getStage()?.draggable(spaceHeld)
+        }
         if (!drawingShape || !shapeTool.isDrawing) return
         shapeTool.endDraw()
       }}
       onClick={(event) => {
         if (!drawingLine) return
+        // U2: a zero-movement Space+click on the canvas still fires Konva's
+        // click (drags only suppress it once movement starts) — Space owns
+        // the gesture, so don't place a line point from it.
+        if (spaceHeld) return
         // The browser fires `click` twice (detail 1, then detail 2) before
         // firing a single `dblclick` — without this guard, the second click
         // of a double-click-to-finish gesture would append a spurious extra
@@ -405,8 +818,11 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           is active (U15/U16): the user is drawing, not selecting/dragging
           existing items, so clicks/drags should fall through to the Stage's
           own drawing handlers above rather than selecting or repositioning
-          an existing Object underneath the drag/click. */}
-      <Layer listening={!drawingShape && !drawingLine}>
+          an existing Object underneath the drag/click. Also non-listening
+          while Space is held (U2): pan owns the gesture, so a Space+drag
+          starting over an Object must reach the draggable Stage instead of
+          dragging that Object. */}
+      <Layer listening={!drawingShape && !drawingLine && !spaceHeld}>
         {/* U18: render order comes from `sortObjectsByZIndex` (above) —
             deliberately NOT from imperative Konva `.moveToTop()`/`.zIndex()`
             calls, which react-konva's own docs warn will fight React's own
@@ -467,6 +883,23 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           <ShapePreview type={shapeTool.drawType} geometry={shapeTool.previewGeometry} />
         )}
         {lineTool.isDrawing && <LinePreview points={lineTool.points} />}
+        {/* U2: the in-progress marquee, drawn from the shared
+            selection-chrome token (solid stroke + translucent fill; U4's
+            group outlines and U8's crop preview reuse the same token). The
+            rect is MODEL-space (this layer inherits the stage transform),
+            with the stroke divided by zoom so it stays 1px on screen. */}
+        {marquee.rect && (
+          <Rect
+            x={marquee.rect.x}
+            y={marquee.rect.y}
+            width={marquee.rect.width}
+            height={marquee.rect.height}
+            fill={SELECTION_CHROME.fill}
+            stroke={SELECTION_CHROME.stroke}
+            strokeWidth={SELECTION_CHROME.strokeWidth / zoom}
+            listening={false}
+          />
+        )}
         {/* U19: temporary dashed guide lines, matched during a drag/resize
             and destroyed on dragend/transformend (see the `guides` state
             above). */}

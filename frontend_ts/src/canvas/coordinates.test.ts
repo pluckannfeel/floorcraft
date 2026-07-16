@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   clampToBounds,
   constrainTransformBox,
+  containerToStagePoint,
   getRotatedBoundingBox,
   MIN_ITEM_SIZE,
+  rectFromPoints,
+  rectsIntersect,
   shouldHandleDeleteKey,
   snapToGrid,
 } from './coordinates'
@@ -57,6 +60,93 @@ describe('clampToBounds', () => {
     const snapped = snapToGrid({ x: 1595, y: 1195 }, 20)
     expect(snapped).toEqual({ x: 1600, y: 1200 })
     expect(clampToBounds(snapped, 40, 40, 1600, 1200)).toEqual({ x: 1560, y: 1160 })
+  })
+})
+
+describe('containerToStagePoint', () => {
+  it('is the identity at zoom 1 with no pan', () => {
+    expect(containerToStagePoint({ x: 120, y: 80 }, 1, { x: 0, y: 0 })).toEqual({ x: 120, y: 80 })
+  })
+
+  it('inverts the stage transform under zoom + pan (U2 marquee conversion)', () => {
+    // Stage at zoom 2, panned to (-100, -100): the model point (100, 100)
+    // renders at screen 100*2 - 100 = 100 — so converting screen (100, 100)
+    // back must yield model (100, 100).
+    expect(containerToStagePoint({ x: 100, y: 100 }, 2, { x: -100, y: -100 })).toEqual({
+      x: 100,
+      y: 100,
+    })
+    expect(containerToStagePoint({ x: 190, y: 40 }, 2, { x: -100, y: -100 })).toEqual({
+      x: 145,
+      y: 70,
+    })
+  })
+
+  it('round-trips: stagePoint * zoom + position = containerPoint', () => {
+    const zoom = 1.5
+    const position = { x: 37, y: -12 }
+    const container = { x: 211, y: 93 }
+    const stagePoint = containerToStagePoint(container, zoom, position)
+    expect(stagePoint.x * zoom + position.x).toBeCloseTo(container.x)
+    expect(stagePoint.y * zoom + position.y).toBeCloseTo(container.y)
+  })
+})
+
+describe('rectFromPoints', () => {
+  it('builds the rect from top-left to bottom-right corners', () => {
+    expect(rectFromPoints({ x: 10, y: 20 }, { x: 50, y: 80 })).toEqual({
+      x: 10,
+      y: 20,
+      width: 40,
+      height: 60,
+    })
+  })
+
+  it('normalizes reversed corners (dragging up-left) to non-negative width/height', () => {
+    expect(rectFromPoints({ x: 50, y: 80 }, { x: 10, y: 20 })).toEqual({
+      x: 10,
+      y: 20,
+      width: 40,
+      height: 60,
+    })
+  })
+
+  it('yields a zero-size rect when both points coincide (a click, not a drag)', () => {
+    expect(rectFromPoints({ x: 33, y: 44 }, { x: 33, y: 44 })).toEqual({
+      x: 33,
+      y: 44,
+      width: 0,
+      height: 0,
+    })
+  })
+})
+
+describe('rectsIntersect', () => {
+  const base = { x: 100, y: 100, width: 50, height: 50 }
+
+  it('detects a plain overlap', () => {
+    expect(rectsIntersect(base, { x: 120, y: 120, width: 100, height: 100 })).toBe(true)
+  })
+
+  it('detects a corner-clip overlap (intersection, not containment)', () => {
+    expect(rectsIntersect(base, { x: 140, y: 140, width: 10, height: 10 })).toBe(true)
+  })
+
+  it('detects full containment in either direction', () => {
+    expect(rectsIntersect(base, { x: 110, y: 110, width: 10, height: 10 })).toBe(true)
+    expect(rectsIntersect({ x: 110, y: 110, width: 10, height: 10 }, base)).toBe(true)
+  })
+
+  it('returns false for disjoint rects on either axis', () => {
+    expect(rectsIntersect(base, { x: 200, y: 100, width: 20, height: 20 })).toBe(false)
+    expect(rectsIntersect(base, { x: 100, y: 200, width: 20, height: 20 })).toBe(false)
+  })
+
+  it('counts touching edges as intersecting (keeps degenerate line bboxes selectable)', () => {
+    expect(rectsIntersect(base, { x: 150, y: 100, width: 20, height: 20 })).toBe(true)
+    // A perfectly horizontal line's points-derived bbox has height 0 and
+    // must still intersect a rect that spans it.
+    expect(rectsIntersect({ x: 0, y: 0, width: 200, height: 200 }, { x: 50, y: 120, width: 60, height: 0 })).toBe(true)
   })
 })
 

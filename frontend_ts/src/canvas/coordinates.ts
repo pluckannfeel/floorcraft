@@ -26,6 +26,24 @@ export function screenToStagePoint(stage: Konva.Stage, clientX: number, clientY:
   return transform.point(containerRelative)
 }
 
+/**
+ * Pure counterpart of `screenToStagePoint`'s second half: converts an
+ * already-container-relative point (e.g. `stage.getPointerPosition()`, or
+ * `clientToContainerPoint`'s output) into model/stage space given the
+ * current zoom/pan. The Stage's absolute transform is exactly
+ * `scale(zoom) . translate(position)` in this app (no independent axis
+ * scaling, no nested stage transforms), so inverting it reduces to this
+ * arithmetic — extracted Konva-free (U2) so the marquee's screen-to-model
+ * conversion is unit-testable in jsdom, where a real `Konva.Stage` can't
+ * mount.
+ */
+export function containerToStagePoint(containerPoint: Point, zoom: number, stagePosition: Point): Point {
+  return {
+    x: (containerPoint.x - stagePosition.x) / zoom,
+    y: (containerPoint.y - stagePosition.y) / zoom,
+  }
+}
+
 /** Rounds a point's coordinates to the nearest multiple of `gridSize`. */
 export function snapToGrid(point: Point, gridSize: number): Point {
   if (gridSize <= 0) return point
@@ -180,6 +198,50 @@ export function getRotatedBoundingBox(
     height: Math.max(...ys) - minY,
   }
 }
+
+/**
+ * Normalizes two corner points (any two opposite corners, in any order —
+ * e.g. a marquee's pointerdown origin and current pointer position) into a
+ * `BoundingBox` with non-negative width/height (U2).
+ */
+export function rectFromPoints(a: Point, b: Point): BoundingBox {
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    width: Math.abs(a.x - b.x),
+    height: Math.abs(a.y - b.y),
+  }
+}
+
+/**
+ * Axis-aligned rectangle intersection — INTERSECTION, not containment (U2:
+ * a marquee that merely clips an object's corner selects it, per the plan's
+ * interaction defaults). Touching edges count as intersecting (`<=`), which
+ * also keeps degenerate boxes selectable — a perfectly horizontal Line's
+ * points-derived bbox has height 0 and must still be marquee-selectable.
+ */
+export function rectsIntersect(a: BoundingBox, b: BoundingBox): boolean {
+  return (
+    a.x <= b.x + b.width &&
+    b.x <= a.x + a.width &&
+    a.y <= b.y + b.height &&
+    b.y <= a.y + a.height
+  )
+}
+
+/**
+ * U2: the shared selection-chrome token — one stroke/fill/dash language for
+ * every "this region is selection UI" visual, so they read as one system:
+ * the marquee rect (U2, solid stroke + translucent fill), U4's group
+ * outlines (dashed stroke), and U8's crop preview all draw from these
+ * values rather than minting their own colors.
+ */
+export const SELECTION_CHROME = {
+  stroke: '#2563eb',
+  fill: 'rgba(37, 99, 235, 0.08)',
+  strokeWidth: 1,
+  dash: [4, 4],
+} as const
 
 /**
  * The shape Konva's Transformer `boundBoxFunc` callback passes/expects:
