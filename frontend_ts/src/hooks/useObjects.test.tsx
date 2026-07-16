@@ -55,7 +55,7 @@ beforeEach(() => {
   })
   useCanvasStore.setState({
     items: [],
-    selectedItemId: null,
+    selectedItemIds: [],
     activeTool: 'select',
     dirty: false,
     serverIdMap: {},

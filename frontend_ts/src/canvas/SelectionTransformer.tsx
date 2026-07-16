@@ -52,10 +52,17 @@ export function computeGeometryFromTransform(
 
 /**
  * Resolves the array Konva's `Transformer.nodes()` should be called with for
- * a given selection: zero nodes when nothing is selected (or the selected
- * id has no registered node yet), exactly one otherwise. Pure and
+ * a given selection: zero nodes unless EXACTLY ONE item is selected (and
+ * its node is registered), that one node otherwise. Pure and
  * Konva-independent so the "switch selection -> attach the right node"
  * logic is testable without mounting a real `Transformer`.
+ *
+ * U1 (canvas-tools): the selection is now an id ARRAY, but this unit
+ * deliberately preserves the single-selection transform behavior — a
+ * multi-selection attaches nothing yet. U3 extends this to return every
+ * selected node (multi-node Transformer + batched `updateItemsGeometry`
+ * commit); until then attaching multiple nodes would resize them all while
+ * committing only one, so exactly-one gating is the safe contract.
  *
  * Calling `.nodes()` with the result of this function is itself both the
  * detach-from-old and attach-to-new step: Konva's `Transformer.nodes()`
@@ -64,17 +71,20 @@ export function computeGeometryFromTransform(
  */
 // eslint-disable-next-line react-refresh/only-export-components
 export function resolveTransformerNodes(
-  selectedItemId: CanvasObject['id'] | null,
+  selectedItemIds: CanvasObject['id'][],
   getNode: (id: CanvasObject['id']) => Konva.Node | undefined,
 ): Konva.Node[] {
-  if (selectedItemId == null) return []
-  const node = getNode(selectedItemId)
+  if (selectedItemIds.length !== 1) return []
+  const node = getNode(selectedItemIds[0])
   return node ? [node] : []
 }
 
 interface SelectionTransformerProps {
-  selectedItemId: CanvasObject['id'] | null
-  /** Resolves the selected item's live Konva node from the parent-owned
+  /** U1: the current selection set. This unit's Transformer only ever
+   * attaches for exactly-one selections (see `resolveTransformerNodes`);
+   * U3 turns this into a true multi-node attach. */
+  selectedItemIds: CanvasObject['id'][]
+  /** Resolves a selected item's live Konva node from the parent-owned
    * `Map<id, Konva.Node>` populated by `ObjectShape`'s `shapeRef` callback. */
   getNode: (id: CanvasObject['id']) => Konva.Node | undefined
   canvasWidth: number
@@ -97,18 +107,20 @@ interface SelectionTransformerProps {
 /**
  * Wraps Konva's `Transformer` (U8). Attaches to the selected item's node via
  * `.nodes([ref])` — NOT the deprecated `.attachTo` — in an effect keyed on
- * `selectedItemId`. Calling `.nodes()` again with a new array (or `[]`) both
- * detaches whatever was previously attached and attaches the new selection
- * in one call, so switching selection needs no separate detach step.
+ * `selectedItemIds`. Calling `.nodes()` again with a new array (or `[]`)
+ * both detaches whatever was previously attached and attaches the new
+ * selection in one call, so switching selection needs no separate detach
+ * step. U1: only exactly-one selections attach (multi-node attach +
+ * batched commit arrive in U3 — see `resolveTransformerNodes`).
  *
  * Applies uniformly to catalog Objects and Shapes (R21). Lines get a
  * distinct point-based editing model (U17, `LineAnchorHandles`) instead of
  * this Transformer — this component doesn't need to know about that split;
- * whichever caller renders it (later, type-dispatching in `ObjectShape`)
- * simply won't render it for Line-typed selections.
+ * `CanvasStage` only routes here when the exactly-one selection isn't a
+ * Line-typed item.
  */
 export function SelectionTransformer({
-  selectedItemId,
+  selectedItemIds,
   getNode,
   canvasWidth,
   canvasHeight,
@@ -119,13 +131,18 @@ export function SelectionTransformer({
 }: SelectionTransformerProps) {
   const transformerRef = useRef<Konva.Transformer>(null)
 
+  // U1: this unit's single-attach contract — the id every handler below
+  // acts on, non-null only for exactly-one selections (matching what
+  // `resolveTransformerNodes` attaches).
+  const soleSelectedId = selectedItemIds.length === 1 ? selectedItemIds[0] : null
+
   useEffect(() => {
     const transformer = transformerRef.current
     if (!transformer) return
 
-    transformer.nodes(resolveTransformerNodes(selectedItemId, getNode))
+    transformer.nodes(resolveTransformerNodes(selectedItemIds, getNode))
     transformer.getLayer()?.batchDraw()
-  }, [selectedItemId, getNode])
+  }, [selectedItemIds, getNode])
 
   return (
     <Transformer
@@ -137,8 +154,8 @@ export function SelectionTransformer({
       // the (possibly snapped) box — same snap-then-clamp order U8's drag
       // path already established, applied here to resize too.
       boundBoxFunc={(oldBox, newBox) => {
-        if (selectedItemId == null) return constrainTransformBox(oldBox, newBox, canvasWidth, canvasHeight)
-        const { box: snapped, guides } = snapResizeBox(newBox, allObjects ?? [], selectedItemId, zoom)
+        if (soleSelectedId == null) return constrainTransformBox(oldBox, newBox, canvasWidth, canvasHeight)
+        const { box: snapped, guides } = snapResizeBox(newBox, allObjects ?? [], soleSelectedId, zoom)
         onAlignmentGuidesChange?.(guides)
         return constrainTransformBox(oldBox, { ...newBox, ...snapped }, canvasWidth, canvasHeight)
       }}
@@ -147,7 +164,7 @@ export function SelectionTransformer({
         // interaction ends (Approach: guides are removed on
         // dragend/transformend).
         onAlignmentGuidesChange?.(NO_GUIDES)
-        if (selectedItemId == null) return
+        if (soleSelectedId == null) return
         const node = event.target
 
         const patch = computeGeometryFromTransform({
@@ -168,7 +185,7 @@ export function SelectionTransformer({
         node.width(patch.width)
         node.height(patch.height)
 
-        onTransformEnd(selectedItemId, patch)
+        onTransformEnd(soleSelectedId, patch)
       }}
     />
   )

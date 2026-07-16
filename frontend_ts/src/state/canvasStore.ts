@@ -29,22 +29,27 @@ export type ActiveTool = 'select' | ShapeType | LineType
  *
  * Undo/redo design notes (U9):
  * - `zundo`'s `partialize` returns only `{ items }`, so `undo()`/`redo()`
- *   read/write *only* the `items` key on this store — `selectedItemId`,
+ *   read/write *only* the `items` key on this store — `selectedItemIds`,
  *   `activeTool`, zoom/pan, and `dirty` are never touched by a history
  *   traversal, matching R15's "property edits are excluded" scope decision
  *   and the plan's Key Technical Decision that undo/redo is partitioned to
  *   `items` only. (`dirty` in particular must stay out: a traversal must
  *   never restore a stale saved/unsaved flag — `undo()`/`redo()` below mark
  *   the store dirty themselves whenever a traversal actually changes the
- *   canvas.)
+ *   canvas. `selectedItemIds` likewise: a traversal never RESTORES an old
+ *   selection, but the exported `undo()`/`redo()` wrappers do PRUNE ids
+ *   that no longer exist in the restored `items`, so e.g. undoing a create
+ *   can't leave a ghost selection pointing at a nonexistent item.)
  * - `equality` gates whether a given `set()` call pushes a new history
  *   entry at all: it compares the `items` array by *reference*. Every
- *   action below that isn't supposed to be undoable (`selectItem`,
+ *   action below that isn't supposed to be undoable (the selection actions
+ *   `replaceSelection`/`toggleInSelection`/`clearSelection`,
  *   `setActiveTool`, `markSaved`, the zoom/pan actions) only ever `set()`s
  *   keys other than `items`, so `items` keeps the same reference across
  *   those calls and no history entry is created. `createItemLocal`,
- *   `updateItemGeometry`, `deleteItem`, `reorderZIndex`, and
- *   `updateLinePoints` all replace `items` with a new array, so those calls
+ *   `updateItemGeometry`/`updateItemsGeometry`, `deleteItem`/`deleteItems`,
+ *   `reorderZIndex`/`reorderZIndexItems`, and `updateLinePoints` all
+ *   replace `items` with a new array, so those calls
  *   do produce a history entry. This is simpler and safer than a
  *   `partialize` that strips fields per-item (e.g. dropping `properties`):
  *   zundo's `undo()`/`redo()` write the partialized snapshot straight back
@@ -79,14 +84,28 @@ export type ActiveTool = 'select' | ShapeType | LineType
  */
 export interface CanvasState {
   items: CanvasObject[]
-  selectedItemId: CanvasObject['id'] | null
+  /**
+   * U1 (canvas-tools plan): the current selection, as an ORDERED array of
+   * item ids (insertion-ordered, not a Set — deterministic and
+   * JSON-friendly for tests). This is always the LITERAL operand set every
+   * consumer acts on as-is (delete, z-order, transformer, property panel):
+   * group expansion (U4) happens at selection time in the click/marquee
+   * handlers, never by derivation here, and no consumer re-expands or
+   * branches on group state. Consumers needing exactly-one semantics
+   * (PropertyPanel's form, line anchor handles) check `length === 1`.
+   * Untracked by undo (never in `partialize` — a binding invariant from
+   * docs/solutions/ui-bugs/undo-redo-broken-after-save-2026-07-16.md); the
+   * exported `undo()`/`redo()` wrappers below prune ids absent from the
+   * restored `items` after a traversal instead.
+   */
+  selectedItemIds: CanvasObject['id'][]
   /** Drawing-tool mode for U15/U16's shape/line creation flows. */
   activeTool: ActiveTool
   /** U11: current Stage scale (mirrors Konva's `scaleX`/`scaleY`, kept
    * equal on both axes). View state, not document state — deliberately NOT
    * part of `partialize` below, so zooming/panning never creates undo
    * history (same "only set() items and it's tracked" mechanism the class
-   * doc above already relies on for `selectedItemId`/`activeTool`: this
+   * doc above already relies on for `selectedItemIds`/`activeTool`: this
    * store's `equality` only compares `items` by reference, and neither
    * `setZoom`/`setStagePosition`/etc. below ever touch `items`, so no
    * history entry is ever pushed for them). */
@@ -145,8 +164,25 @@ export interface CanvasState {
    */
   createItemLocal: (item: CanvasObject) => void
 
-  /** Selects an item, or clears selection when passed `null`. */
-  selectItem: (id: CanvasObject['id'] | null) => void
+  /**
+   * U1: replaces the selection wholesale with `ids` — the plain-click
+   * contract (`replaceSelection([id])`) and, from U2 on, the marquee's full
+   * hit set. Callers pass the exact operand set (group expansion, when it
+   * arrives in U4, happens in the handlers before this call). Untracked by
+   * undo (never touches `items`).
+   */
+  replaceSelection: (ids: CanvasObject['id'][]) => void
+
+  /**
+   * U1: toggles one id's membership in the selection — the ctrl(/meta)+
+   * click contract. Removes the id if present; appends it at the END if
+   * not (the array is insertion-ordered). Untracked by undo.
+   */
+  toggleInSelection: (id: CanvasObject['id']) => void
+
+  /** U1: empties the selection (empty-canvas click, PNG export, plan
+   * switch). Untracked by undo. */
+  clearSelection: () => void
 
   /**
    * Patches an item's geometry (x/y/width/height/rotation) — the single
@@ -161,8 +197,32 @@ export interface CanvasState {
     patch: Partial<Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>>,
   ) => void
 
-  /** Removes an item and clears selection if it was the selected item. */
+  /**
+   * U1: batched multi-item variant of `updateItemGeometry` — applies every
+   * patch in ONE `set()` call, so a single gesture over a multi-selection
+   * (U3's group move/transform, U6's align/distribute) produces exactly one
+   * history entry (one `items` reference swap), never N undo steps. Later
+   * patches for the same id shallow-merge over earlier ones. A no-op (same
+   * `items` reference, so no history entry) when no patch id matches an
+   * item. The single-item action above remains for lone-object paths.
+   */
+  updateItemsGeometry: (
+    patches: Array<{
+      id: CanvasObject['id']
+      patch: Partial<Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>>
+    }>,
+  ) => void
+
+  /** Removes an item and drops its id from the selection if selected. */
   deleteItem: (id: CanvasObject['id']) => void
+
+  /**
+   * U1: batched multi-item variant of `deleteItem` — removes every listed
+   * item in ONE `set()` (one history entry for a whole-selection delete)
+   * and drops the deleted ids from the selection in the same call. A no-op
+   * when none of the ids match an item.
+   */
+  deleteItems: (ids: CanvasObject['id'][]) => void
 
   /**
    * U18: moves an item to the front (`'front'`) or back (`'back'`) of the
@@ -191,6 +251,17 @@ export interface CanvasState {
    * item (nothing to reorder relative to).
    */
   reorderZIndex: (id: CanvasObject['id'], direction: 'front' | 'back') => void
+
+  /**
+   * U1: batched multi-item variant of `reorderZIndex` — moves ALL listed
+   * items above the previous max (`'front'`) or below the previous min
+   * (`'back'`) among this store's `items`, preserving the batch's own
+   * relative z-order (current `z_index`, then `id` — the same tiebreak
+   * `CanvasStage.tsx`'s `sortObjectsByZIndex` renders by), in ONE
+   * `set()`/history entry. Same no-op conditions as the single-item
+   * action; both share the pure `applyZIndexReorder` helper below.
+   */
+  reorderZIndexItems: (ids: CanvasObject['id'][], direction: 'front' | 'back') => void
 
   /**
    * Patches a single point (by index) in a Line-typed item's
@@ -260,11 +331,48 @@ export interface CanvasState {
   resetZoom: () => void
 }
 
+/**
+ * Pure z-reorder math shared by `reorderZIndex` (single) and
+ * `reorderZIndexItems` (batched): returns the next `items` array with every
+ * matched id renumbered contiguously above the current max (`'front'`) or
+ * below the current min (`'back'`) among ALL items, preserving the batch's
+ * own relative ordering (current `z_index`, then `id`). Returns `null` when
+ * there's nothing to do (no id matches any item, or fewer than 2 items) so
+ * the calling action can no-op without replacing the `items` reference —
+ * i.e. without pushing a history entry.
+ */
+function applyZIndexReorder(
+  items: CanvasObject[],
+  ids: CanvasObject['id'][],
+  direction: 'front' | 'back',
+): CanvasObject[] | null {
+  const idSet = new Set(ids)
+  const selected = items.filter((item) => idSet.has(item.id))
+  if (selected.length === 0 || items.length < 2) return null
+
+  const orderedSelected = [...selected].sort((a, b) => {
+    if (a.z_index !== b.z_index) return a.z_index - b.z_index
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+  })
+  const zIndexes = items.map((item) => item.z_index)
+  const base =
+    direction === 'front'
+      ? Math.max(...zIndexes) + 1
+      : Math.min(...zIndexes) - orderedSelected.length
+  const nextZIndexById = new Map<CanvasObject['id'], number>()
+  orderedSelected.forEach((item, index) => nextZIndexById.set(item.id, base + index))
+
+  return items.map((item) => {
+    const nextZIndex = nextZIndexById.get(item.id)
+    return nextZIndex === undefined ? item : { ...item, z_index: nextZIndex }
+  })
+}
+
 export const useCanvasStore = create<CanvasState>()(
   temporal(
     (set) => ({
       items: [],
-      selectedItemId: null,
+      selectedItemIds: [],
       activeTool: 'select',
       zoom: 1,
       stagePosition: { x: 0, y: 0 },
@@ -305,7 +413,16 @@ export const useCanvasStore = create<CanvasState>()(
           dirty: true,
         })),
 
-      selectItem: (id) => set({ selectedItemId: id }),
+      replaceSelection: (ids) => set({ selectedItemIds: ids }),
+
+      toggleInSelection: (id) =>
+        set((state) => ({
+          selectedItemIds: state.selectedItemIds.includes(id)
+            ? state.selectedItemIds.filter((existing) => existing !== id)
+            : [...state.selectedItemIds, id],
+        })),
+
+      clearSelection: () => set({ selectedItemIds: [] }),
 
       updateItemGeometry: (id, patch) =>
         set((state) => ({
@@ -313,28 +430,56 @@ export const useCanvasStore = create<CanvasState>()(
           dirty: true,
         })),
 
+      updateItemsGeometry: (patches) =>
+        set((state) => {
+          const patchById = new Map<
+            CanvasObject['id'],
+            Partial<Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>>
+          >()
+          for (const { id, patch } of patches) {
+            patchById.set(id, { ...patchById.get(id), ...patch })
+          }
+          if (!state.items.some((item) => patchById.has(item.id))) return {}
+          return {
+            items: state.items.map((item) => {
+              const patch = patchById.get(item.id)
+              return patch ? { ...item, ...patch } : item
+            }),
+            dirty: true,
+          }
+        }),
+
       deleteItem: (id) =>
         set((state) => ({
           items: state.items.filter((item) => item.id !== id),
-          selectedItemId: state.selectedItemId === id ? null : state.selectedItemId,
+          selectedItemIds: state.selectedItemIds.includes(id)
+            ? state.selectedItemIds.filter((existing) => existing !== id)
+            : state.selectedItemIds,
           dirty: true,
         })),
 
-      reorderZIndex: (id, direction) =>
+      deleteItems: (ids) =>
         set((state) => {
-          const item = state.items.find((candidate) => candidate.id === id)
-          if (!item || state.items.length < 2) return {}
-
-          const zIndexes = state.items.map((candidate) => candidate.z_index)
-          const nextZIndex =
-            direction === 'front' ? Math.max(...zIndexes) + 1 : Math.min(...zIndexes) - 1
-
+          const idSet = new Set(ids)
+          const nextItems = state.items.filter((item) => !idSet.has(item.id))
+          if (nextItems.length === state.items.length) return {}
           return {
-            items: state.items.map((candidate) =>
-              candidate.id === id ? { ...candidate, z_index: nextZIndex } : candidate,
-            ),
+            items: nextItems,
+            selectedItemIds: state.selectedItemIds.filter((id) => !idSet.has(id)),
             dirty: true,
           }
+        }),
+
+      reorderZIndex: (id, direction) =>
+        set((state) => {
+          const nextItems = applyZIndexReorder(state.items, [id], direction)
+          return nextItems ? { items: nextItems, dirty: true } : {}
+        }),
+
+      reorderZIndexItems: (ids, direction) =>
+        set((state) => {
+          const nextItems = applyZIndexReorder(state.items, ids, direction)
+          return nextItems ? { items: nextItems, dirty: true } : {}
         }),
 
       updateLinePoints: (id, pointIndex, point) =>
@@ -396,16 +541,23 @@ export const useCanvasStore = create<CanvasState>()(
     }),
     {
       // Only `items` is part of the tracked/restorable snapshot — undo()/
-      // redo() never touch selectedItemId, activeTool, zoom/pan, or dirty.
+      // redo() never touch selectedItemIds, activeTool, zoom/pan, or dirty.
+      // (Selection stays out per the institutional invariant: a traversal
+      // must never restore a stale selection; the exported undo()/redo()
+      // wrappers below prune dead ids from it instead.)
       partialize: (state) => ({ items: state.items }),
       // Reference equality on `items` is sufficient for the actions that
-      // rely on it: selectItem/setActiveTool/markSaved and the zoom/pan
-      // actions never reassign `items`, so its reference is unchanged
-      // across those calls and no entry is created. createItemLocal,
-      // updateItemGeometry, deleteItem, reorderZIndex, and updateLinePoints
-      // always build a new `items` array, so those do produce an entry.
-      // `setItems` and `updateItemProperties` ALSO build a new `items`
-      // array reference but are kept out of history via
+      // rely on it: the selection actions (replaceSelection/
+      // toggleInSelection/clearSelection), setActiveTool, markSaved, and
+      // the zoom/pan actions never reassign `items`, so its reference is
+      // unchanged across those calls and no entry is created.
+      // createItemLocal, updateItemGeometry/updateItemsGeometry,
+      // deleteItem/deleteItems, reorderZIndex/reorderZIndexItems, and
+      // updateLinePoints always build a new `items` array, so those do
+      // produce an entry (the batched variants deliberately in ONE set()
+      // each — one history entry per gesture, however many items it
+      // touched). `setItems` and `updateItemProperties` ALSO build a new
+      // `items` array reference but are kept out of history via
       // `temporal.pause()`/`resume()` instead of relying on this equality
       // check, since reference equality alone can't distinguish "a real
       // user action" from "a server resync"/"a property edit."
@@ -425,12 +577,34 @@ export const useCanvasStore = create<CanvasState>()(
  * no-op traversal, e.g. undo with an empty history, leave `dirty` alone).
  * `dirty` lives outside `partialize`, so setting it here pushes no history
  * entry of its own (`equality` sees the same `items` reference).
+ *
+ * U1 (canvas-tools): an effective traversal also PRUNES the selection —
+ * any selected id absent from the restored `items` (e.g. undoing a create,
+ * or redoing a delete, of a selected item) is dropped, closing the
+ * stale-selection class (ghost selections enabling z-order buttons or
+ * feeding Delete a nonexistent id) before it can ship. Pruning is the only
+ * way a traversal touches `selectedItemIds`: it never restores an old
+ * selection (selection is untracked, outside `partialize`), and like
+ * `dirty` the write here pushes no history entry of its own.
  */
+function markDirtyAndPruneSelection(): void {
+  const { items, selectedItemIds } = useCanvasStore.getState()
+  const prunedSelection = selectedItemIds.filter((id) =>
+    items.some((item) => item.id === id),
+  )
+  useCanvasStore.setState({
+    dirty: true,
+    ...(prunedSelection.length !== selectedItemIds.length
+      ? { selectedItemIds: prunedSelection }
+      : {}),
+  })
+}
+
 export function undo(): void {
   const before = useCanvasStore.getState().items
   useCanvasStore.temporal.getState().undo()
   if (useCanvasStore.getState().items !== before) {
-    useCanvasStore.setState({ dirty: true })
+    markDirtyAndPruneSelection()
   }
 }
 
@@ -438,6 +612,6 @@ export function redo(): void {
   const before = useCanvasStore.getState().items
   useCanvasStore.temporal.getState().redo()
   if (useCanvasStore.getState().items !== before) {
-    useCanvasStore.setState({ dirty: true })
+    markDirtyAndPruneSelection()
   }
 }

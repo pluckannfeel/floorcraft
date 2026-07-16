@@ -121,18 +121,27 @@ describe('resolveTransformerNodes', () => {
 
   it('resolves an empty array when nothing is selected', () => {
     const getNode = () => fakeNode('a')
-    expect(resolveTransformerNodes(null, getNode)).toEqual([])
+    expect(resolveTransformerNodes([], getNode)).toEqual([])
   })
 
-  it('resolves a single-element array for the selected id', () => {
+  it('resolves a single-element array for an exactly-one selection', () => {
     const nodeA = fakeNode('a')
     const getNode = (id: string | number) => (id === 'a' ? nodeA : undefined)
-    expect(resolveTransformerNodes('a', getNode)).toEqual([nodeA])
+    expect(resolveTransformerNodes(['a'], getNode)).toEqual([nodeA])
   })
 
   it('resolves an empty array when the selected id has no registered node', () => {
     const getNode = () => undefined
-    expect(resolveTransformerNodes('missing', getNode)).toEqual([])
+    expect(resolveTransformerNodes(['missing'], getNode)).toEqual([])
+  })
+
+  it('resolves an empty array for a multi-selection (U1: transformer attaches only for exactly-one; U3 extends to multi-node)', () => {
+    const nodes = new Map<string | number, Konva.Node>([
+      ['a', fakeNode('a')],
+      ['b', fakeNode('b')],
+    ])
+    const getNode = (id: string | number) => nodes.get(id)
+    expect(resolveTransformerNodes(['a', 'b'], getNode)).toEqual([])
   })
 
   it('switching selection resolves the new node only, not the old one (detach-then-attach)', () => {
@@ -144,10 +153,10 @@ describe('resolveTransformerNodes', () => {
     ])
     const getNode = (id: string | number) => nodes.get(id)
 
-    const first = resolveTransformerNodes('a', getNode)
+    const first = resolveTransformerNodes(['a'], getNode)
     expect(first).toEqual([nodeA])
 
-    const second = resolveTransformerNodes('b', getNode)
+    const second = resolveTransformerNodes(['b'], getNode)
     expect(second).toEqual([nodeB])
     expect(second).not.toContain(nodeA)
   })

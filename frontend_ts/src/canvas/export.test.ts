@@ -9,7 +9,7 @@ import { afterNextPaint, downloadDataUrl, EXPORT_FILENAME, exportStageToPng } fr
  * `LineAnchorHandles.test.tsx`'s doc comment). Per the plan's own stated
  * bar for this unit: exact pixel output is NOT asserted here. What IS
  * tested, thoroughly:
- *   - The clear-selection-before-snapshot SEQUENCING: `selectItem(null)` is
+ *   - The clear-selection-before-snapshot SEQUENCING: `clearSelection()` is
  *     called before `stage.toDataURL()`, and `toDataURL()` isn't called
  *     until after the `afterNextPaint` wait — this is the actual bug this
  *     unit exists to avoid (a naive "clear then immediately snapshot" would
@@ -93,26 +93,26 @@ describe('exportStageToPng', () => {
     const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
 
     const stage = makeFakeStage()
-    const selectItem = vi.fn()
+    const clearSelection = vi.fn()
     const callOrder: string[] = []
-    selectItem.mockImplementation(() => callOrder.push('selectItem(null)'))
+    clearSelection.mockImplementation(() => callOrder.push('clearSelection'))
     ;(stage.toDataURL as ReturnType<typeof vi.fn>).mockImplementation(() => {
       callOrder.push('toDataURL')
       return 'data:image/png;base64,fake'
     })
 
-    exportStageToPng(stage, 'obj-1', selectItem)
+    exportStageToPng(stage, ['obj-1'], clearSelection)
 
-    expect(selectItem).toHaveBeenCalledWith(null)
+    expect(clearSelection).toHaveBeenCalledTimes(1)
     expect(stage.toDataURL).toHaveBeenCalledTimes(1)
     // The selection clear must happen strictly before the snapshot is taken.
-    expect(callOrder).toEqual(['selectItem(null)', 'toDataURL'])
+    expect(callOrder).toEqual(['clearSelection', 'toDataURL'])
 
     rafSpy.mockRestore()
     clickSpy.mockRestore()
   })
 
-  it('does not call selectItem when nothing is currently selected', () => {
+  it('does not call clearSelection when the selection is already empty', () => {
     const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
       cb(0)
       return 0
@@ -120,11 +120,11 @@ describe('exportStageToPng', () => {
     const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
 
     const stage = makeFakeStage()
-    const selectItem = vi.fn()
+    const clearSelection = vi.fn()
 
-    exportStageToPng(stage, null, selectItem)
+    exportStageToPng(stage, [], clearSelection)
 
-    expect(selectItem).not.toHaveBeenCalled()
+    expect(clearSelection).not.toHaveBeenCalled()
     expect(stage.toDataURL).toHaveBeenCalledTimes(1)
 
     rafSpy.mockRestore()
@@ -139,11 +139,11 @@ describe('exportStageToPng', () => {
     })
 
     const stage = makeFakeStage()
-    const selectItem = vi.fn()
+    const clearSelection = vi.fn()
 
-    exportStageToPng(stage, 'obj-1', selectItem)
+    exportStageToPng(stage, ['obj-1', 'obj-2'], clearSelection)
 
-    expect(selectItem).toHaveBeenCalledWith(null)
+    expect(clearSelection).toHaveBeenCalledTimes(1)
     expect(stage.toDataURL).not.toHaveBeenCalled()
 
     frames[0](0)
@@ -164,9 +164,9 @@ describe('exportStageToPng', () => {
     const appendSpy = vi.spyOn(document.body, 'appendChild')
 
     const stage = makeFakeStage('data:image/png;base64,realish-payload')
-    const selectItem = vi.fn()
+    const clearSelection = vi.fn()
 
-    exportStageToPng(stage, 'obj-1', selectItem, 'custom.png')
+    exportStageToPng(stage, ['obj-1'], clearSelection, 'custom.png')
 
     const anchor = appendSpy.mock.calls.find((call) => (call[0] as HTMLAnchorElement).tagName === 'A')?.[0] as
       | HTMLAnchorElement
@@ -191,7 +191,7 @@ describe('exportStageToPng', () => {
     const appendSpy = vi.spyOn(document.body, 'appendChild')
 
     const stage = makeFakeStage()
-    exportStageToPng(stage, null, vi.fn())
+    exportStageToPng(stage, [], vi.fn())
 
     const anchor = appendSpy.mock.calls.find((call) => (call[0] as HTMLAnchorElement).tagName === 'A')?.[0] as
       | HTMLAnchorElement

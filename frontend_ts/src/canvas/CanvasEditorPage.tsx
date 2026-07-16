@@ -86,20 +86,24 @@ export function CanvasEditorPage() {
     useSaveObjects(floorPlanId);
 
   const items = useCanvasStore((state) => state.items);
-  const selectedItemId = useCanvasStore((state) => state.selectedItemId);
+  const selectedItemIds = useCanvasStore((state) => state.selectedItemIds);
   const activeTool = useCanvasStore((state) => state.activeTool);
   const zoom = useCanvasStore((state) => state.zoom);
   const stagePosition = useCanvasStore((state) => state.stagePosition);
   const dirty = useCanvasStore((state) => state.dirty);
   const setItems = useCanvasStore((state) => state.setItems);
   const createItemLocal = useCanvasStore((state) => state.createItemLocal);
-  const selectItem = useCanvasStore((state) => state.selectItem);
+  const replaceSelection = useCanvasStore((state) => state.replaceSelection);
+  const toggleInSelection = useCanvasStore((state) => state.toggleInSelection);
+  const clearSelection = useCanvasStore((state) => state.clearSelection);
   const updateItemGeometry = useCanvasStore(
     (state) => state.updateItemGeometry,
   );
   const updateLinePoints = useCanvasStore((state) => state.updateLinePoints);
-  const deleteItem = useCanvasStore((state) => state.deleteItem);
-  const reorderZIndex = useCanvasStore((state) => state.reorderZIndex);
+  const deleteItems = useCanvasStore((state) => state.deleteItems);
+  const reorderZIndexItems = useCanvasStore(
+    (state) => state.reorderZIndexItems,
+  );
   const setActiveTool = useCanvasStore((state) => state.setActiveTool);
   const setZoomAndPosition = useCanvasStore(
     (state) => state.setZoomAndPosition,
@@ -135,10 +139,13 @@ export function CanvasEditorPage() {
   // see `useCanvasShortcuts.ts`.
   useCanvasShortcuts(handleSave);
 
+  // U1: Delete removes the WHOLE selection in one batched store action —
+  // one history entry however many items were selected (the action also
+  // drops the deleted ids from the selection itself).
   const handleDeleteSelected = useCallback(() => {
-    if (selectedItemId == null) return;
-    deleteItem(selectedItemId);
-  }, [selectedItemId, deleteItem]);
+    if (selectedItemIds.length === 0) return;
+    deleteItems(selectedItemIds);
+  }, [selectedItemIds, deleteItems]);
 
   // U5: the zustand canvasStore — including its zundo undo/redo history —
   // is module-global, while this editor renders one floor plan at a time.
@@ -146,7 +153,7 @@ export function CanvasEditorPage() {
   // plan's objects load (untracked via temporal.pause/resume), but
   // everything else would survive a plan switch: zundo's past/future stacks
   // (plan A's undo history applying onto plan B's canvas), the selection
-  // (a stale plan-A id enabling z-order buttons and making Delete push a
+  // (stale plan-A ids enabling z-order buttons and making Delete push a
   // junk undo entry on plan B), the previous plan's items (rendered as
   // plan B's if B's objects fetch errors before ever reseeding), and the
   // zoom/pan. Reset all of it keyed on the route's floorPlanId. `setItems`
@@ -156,7 +163,7 @@ export function CanvasEditorPage() {
   useEffect(() => {
     const store = useCanvasStore.getState();
     store.setItems([]); // pauses/resumes zundo internally; clears dirty
-    store.selectItem(null); // untracked (partialize covers items only)
+    store.clearSelection(); // untracked (partialize covers items only)
     store.resetZoom(); // untracked
     useCanvasStore.temporal.getState().clear();
     // Forget which plan was seeded, too: without this, a same-mount
@@ -417,8 +424,8 @@ export function CanvasEditorPage() {
 
       <Toolbar
         getStage={getStage}
-        selectedItemId={selectedItemId}
-        onReorderZIndex={reorderZIndex}
+        selectedItemIds={selectedItemIds}
+        onReorderZIndex={reorderZIndexItems}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -436,8 +443,10 @@ export function CanvasEditorPage() {
             height={floorPlan.canvas_height}
             gridSize={floorPlan.grid_size}
             objects={items}
-            selectedItemId={selectedItemId}
-            onSelectObject={selectItem}
+            selectedItemIds={selectedItemIds}
+            onReplaceSelection={replaceSelection}
+            onToggleInSelection={toggleInSelection}
+            onClearSelection={clearSelection}
             onGeometryChange={updateItemGeometry}
             onDeleteSelected={handleDeleteSelected}
             activeTool={activeTool}

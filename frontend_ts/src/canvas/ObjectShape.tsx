@@ -41,10 +41,22 @@ export function colorForType(type: ObjectType): string {
   return TYPE_COLORS[type] ?? DEFAULT_COLOR
 }
 
+/**
+ * U1 (canvas-tools): the modifier keys held during a select click/tap,
+ * reported alongside the id so `CanvasStage`'s routing can distinguish
+ * plain click (replace selection) from ctrl/meta+click (toggle membership).
+ * ObjectShape itself stays selection-policy-free — it only relays what the
+ * pointer event carried.
+ */
+export interface SelectionClickModifiers {
+  ctrlKey: boolean
+  metaKey: boolean
+}
+
 interface ObjectShapeProps {
   object: CanvasObject
   isSelected?: boolean
-  onSelect?: (id: CanvasObject['id']) => void
+  onSelect?: (id: CanvasObject['id'], modifiers?: SelectionClickModifiers) => void
   /** Registers/unregisters this node's Konva ref with a parent-owned
    * `Map<id, Konva.Node>` — used by U8's SelectionTransformer. Optional so
    * this unit doesn't need that machinery yet. */
@@ -130,8 +142,12 @@ export function ObjectShape({
         lineCap="round"
         lineJoin="round"
         hitStrokeWidth={12}
-        onClick={() => onSelect?.(object.id)}
-        onTap={() => onSelect?.(object.id)}
+        onClick={(event) =>
+          onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
+        }
+        onTap={(event) =>
+          onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
+        }
       />
     )
   }
@@ -170,8 +186,12 @@ export function ObjectShape({
       ref={shapeRef}
       draggable
       dragBoundFunc={dragBoundFunc}
-      onClick={() => onSelect?.(object.id)}
-      onTap={() => onSelect?.(object.id)}
+      onClick={(event) =>
+        onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
+      }
+      onTap={(event) =>
+        onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
+      }
       onDragEnd={(event) => {
         const node = event.target
         onGeometryChange?.(object.id, { x: node.x(), y: node.y() })

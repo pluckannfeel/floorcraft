@@ -8,6 +8,7 @@ import type { ZoomPanState } from './coordinates'
 import { LineAnchorHandles } from './LineAnchorHandles'
 import { isLineTool, LinePreview, parseLinePoints, useLineTool } from './LineTool'
 import { ObjectShape } from './ObjectShape'
+import type { SelectionClickModifiers } from './ObjectShape'
 import { SelectionTransformer } from './SelectionTransformer'
 import type { TransformGeometryPatch } from './SelectionTransformer'
 import { isShapeTool, ShapePreview, useShapeTool } from './ShapeTool'
@@ -20,8 +21,21 @@ interface CanvasStageProps {
   height: number
   gridSize: number
   objects: CanvasObject[]
-  selectedItemId: CanvasObject['id'] | null
-  onSelectObject: (id: CanvasObject['id'] | null) => void
+  /** U1: the current selection set (ordered id array — see
+   * `canvasStore.ts`'s `selectedItemIds` doc for the literal-operand-set
+   * contract). */
+  selectedItemIds: CanvasObject['id'][]
+  /** U1 click routing: a plain click on an object replaces the selection
+   * with `[id]` (and U2's marquee will pass its full hit set). Wired to the
+   * store's `replaceSelection` by the caller — same delegation as
+   * `onGeometryChange`/`onDeleteSelected`. */
+  onReplaceSelection: (ids: CanvasObject['id'][]) => void
+  /** U1 click routing: ctrl(/meta)+click toggles one id's membership in
+   * the selection. Wired to the store's `toggleInSelection`. */
+  onToggleInSelection: (id: CanvasObject['id']) => void
+  /** U1 click routing: clicking empty canvas clears the selection. Wired
+   * to the store's `clearSelection`. */
+  onClearSelection: () => void
   /** Commits a drag-reposition's or resize/rotate's final geometry to the
    * store (U8). Optional so callers/tests that don't exercise
    * select/drag/transform can omit it. */
@@ -29,7 +43,8 @@ interface CanvasStageProps {
     id: CanvasObject['id'],
     patch: Partial<Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>>,
   ) => void
-  /** Deletes the currently-selected item (U8's Delete/Backspace shortcut). */
+  /** Deletes the WHOLE current selection (U8's Delete/Backspace shortcut,
+   * batched over the selection set as of U1). */
   onDeleteSelected?: () => void
   /** U15's drawing-tool mode. Defaults to `'select'` so callers/tests that
    * don't exercise shape drawing can omit it. */
@@ -118,8 +133,10 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     height,
     gridSize,
     objects,
-    selectedItemId,
-    onSelectObject,
+    selectedItemIds,
+    onReplaceSelection,
+    onToggleInSelection,
+    onClearSelection,
     onGeometryChange,
     onDeleteSelected,
     activeTool = 'select',
@@ -148,15 +165,33 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // below for why this is a ref instead of state.
   const pinchRef = useRef<{ lastDistance: number } | null>(null)
 
-  // U17: the selected item, when it's a Line, gets `LineAnchorHandles`
-  // instead of `SelectionTransformer` — Lines have no box to resize (see
-  // `ObjectShape.tsx`'s Line branch). This is the "which selection UI to
-  // show" branch point the plan calls out; it lives here (not inside
-  // `ObjectShape`) because `SelectionTransformer` itself is already only
-  // ever rendered once, at this Stage level, resolving the selected node
-  // from the same `shapeNodesRef` Map `ObjectShape`'s `shapeRef` populates.
-  const selectedObject = objects.find((object) => object.id === selectedItemId) ?? null
+  // U17/U1: the "which selection UI to show" branch point. Anchor handles
+  // render ONLY when exactly one item is selected and it's a Line — Lines
+  // have no box to resize (see `ObjectShape.tsx`'s Line branch). Every
+  // other selection shape (exactly-one non-line, and any multi-selection)
+  // routes to `SelectionTransformer`, which in U1 attaches only for
+  // exactly-one selections (U3 adds the true multi-node transformer). The
+  // branch lives here (not inside `ObjectShape`) because
+  // `SelectionTransformer` itself is already only ever rendered once, at
+  // this Stage level, resolving selected nodes from the same
+  // `shapeNodesRef` Map `ObjectShape`'s `shapeRef` populates.
+  const soleSelectedId = selectedItemIds.length === 1 ? selectedItemIds[0] : null
+  const selectedObject =
+    soleSelectedId != null ? (objects.find((object) => object.id === soleSelectedId) ?? null) : null
   const selectedIsLine = selectedObject != null && isLineTool(selectedObject.type)
+
+  // U1: basic selection click routing (the plan's U1-owned contract —
+  // U2 layers the marquee on top; U4 later makes this group-aware via a
+  // shared expansion helper, keeping the store's selection the literal
+  // operand set). Plain click REPLACES the selection with the clicked
+  // object; ctrl(/meta, for macOS)+click TOGGLES its membership.
+  const handleObjectSelect = (id: CanvasObject['id'], modifiers?: SelectionClickModifiers) => {
+    if (modifiers?.ctrlKey || modifiers?.metaKey) {
+      onToggleInSelection(id)
+    } else {
+      onReplaceSelection([id])
+    }
+  }
 
   // Map<id, Konva.Node> resolving the selected item's live node for
   // SelectionTransformer's `.nodes([ref])` attach — populated/cleared by
@@ -204,7 +239,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         return
       }
       const activeElement = document.activeElement as HTMLElement | null
-      if (shouldHandleDeleteKey(event.key, selectedItemId, activeElement?.tagName, activeElement?.isContentEditable)) {
+      if (shouldHandleDeleteKey(event.key, selectedItemIds, activeElement?.tagName, activeElement?.isContentEditable)) {
         onDeleteSelected?.()
       }
     }
@@ -216,7 +251,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     // listener every render for no behavioral difference (same rationale as
     // the `shapeTool` window-pointerup effect below).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedItemId, onDeleteSelected, drawingLine, lineTool.finishDraw])
+  }, [selectedItemIds, onDeleteSelected, drawingLine, lineTool.finishDraw])
 
   // U15 safety net: Konva's Stage pointer events only fire while the
   // pointer is over the canvas element, so a drag released outside the
@@ -325,9 +360,9 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         if (drawingLine) {
           return
         }
-        // Clicking empty stage space clears selection.
+        // Clicking empty stage space clears selection (U1: the whole set).
         if (event.target === event.target.getStage()) {
-          onSelectObject(null)
+          onClearSelection()
         }
       }}
       onPointerMove={(event) => {
@@ -381,8 +416,8 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           <ObjectShape
             key={object.id}
             object={object}
-            isSelected={object.id === selectedItemId}
-            onSelect={onSelectObject}
+            isSelected={selectedItemIds.includes(object.id)}
+            onSelect={handleObjectSelect}
             gridSize={gridSize}
             canvasWidth={width}
             canvasHeight={height}
@@ -418,7 +453,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           />
         ) : (
           <SelectionTransformer
-            selectedItemId={selectedItemId}
+            selectedItemIds={selectedItemIds}
             getNode={(id) => shapeNodesRef.current.get(id)}
             canvasWidth={width}
             canvasHeight={height}

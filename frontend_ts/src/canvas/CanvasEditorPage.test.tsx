@@ -136,7 +136,7 @@ function renderEditor(initialPath: string) {
 const logout = vi.fn()
 
 beforeEach(() => {
-  useCanvasStore.setState({ items: [], selectedItemId: null, activeTool: 'select' })
+  useCanvasStore.setState({ items: [], selectedItemIds: [], activeTool: 'select' })
   useCanvasStore.temporal.getState().clear()
   navigateRef.current = null
   logout.mockClear()
@@ -246,11 +246,14 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
       ]),
     )
 
-    // A tracked user action on plan A pushes a real undo history entry.
+    // A tracked user action on plan A pushes a real undo history entry,
+    // and a selection (U1: a selection SET) exists on plan A.
     act(() => {
       useCanvasStore.getState().updateItemGeometry(101, { x: 500 })
+      useCanvasStore.getState().replaceSelection([101])
     })
     expect(useCanvasStore.temporal.getState().pastStates.length).toBeGreaterThan(0)
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([101])
 
     // In-app navigation to plan B: the same Route element stays mounted,
     // only the :floorPlanId param changes — the hardest variant of the
@@ -270,6 +273,9 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
     // floorPlanId-keyed effect cleared zundo's history on the switch.
     expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
     expect(useCanvasStore.temporal.getState().futureStates).toHaveLength(0)
+    // ...and plan A's selection must not leak either (stale ids would
+    // enable z-order buttons and feed Delete a nonexistent id on plan B).
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([])
   })
 
   it('save flow: edit shows Save, saving PUTs, and undo STILL works after the save', async () => {

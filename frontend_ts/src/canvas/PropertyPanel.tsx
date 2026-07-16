@@ -7,9 +7,14 @@ import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject, ObjectType } from './types'
 
 /**
- * R19/U10: a persistent side panel, visible whenever `selectedItemId` is
- * set, showing the selected Object's free-text `name` and a generic
- * key-value editor for whatever's in its `properties` JSON.
+ * R19/U10: a persistent side panel, visible whenever the selection is
+ * non-empty. With EXACTLY ONE Object selected it shows that Object's
+ * free-text `name` and a generic key-value editor for whatever's in its
+ * `properties` JSON; with 2+ selected (U1's selection set) it shows an
+ * "N objects selected" placeholder instead — the plan's exactly-one
+ * contract (multi-editing properties is out of scope; the form's
+ * remount-per-id and commit-on-unmount machinery below is inherently
+ * single-item).
  *
  * Per the Key Technical Decisions ("no fixed per-catalog-type property
  * schema in this pass"), `properties` is edited generically — whatever
@@ -270,19 +275,32 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
 
 export function PropertyPanel() {
   const items = useCanvasStore((state) => state.items)
-  const selectedItemId = useCanvasStore((state) => state.selectedItemId)
+  const selectedItemIds = useCanvasStore((state) => state.selectedItemIds)
   const updateItemProperties = useCanvasStore((state) => state.updateItemProperties)
 
-  const selectedItem = items.find((item) => item.id === selectedItemId) ?? null
+  // Resolve the selection against `items` (dropping any id without a live
+  // item) so the exactly-one/placeholder branch below can never try to
+  // render a form for a nonexistent item.
+  const selectedItems = items.filter((item) => selectedItemIds.includes(item.id))
 
-  if (!selectedItem) return null
+  if (selectedItems.length === 0) return null
 
   return (
     <aside
       aria-label="Property panel"
       className="flex w-[260px] flex-col gap-3 overflow-y-auto border-l p-4"
     >
-      <PropertyPanelForm key={selectedItem.id} item={selectedItem} onCommit={updateItemProperties} />
+      {selectedItems.length === 1 ? (
+        <PropertyPanelForm
+          key={selectedItems[0].id}
+          item={selectedItems[0]}
+          onCommit={updateItemProperties}
+        />
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          {selectedItems.length} objects selected
+        </p>
+      )}
     </aside>
   )
 }

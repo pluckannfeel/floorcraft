@@ -139,26 +139,30 @@ describe('constrainTransformBox', () => {
 
 describe('shouldHandleDeleteKey', () => {
   it('returns true for Delete when an item is selected and focus is not in a text field', () => {
-    expect(shouldHandleDeleteKey('Delete', 'item-1', 'DIV')).toBe(true)
+    expect(shouldHandleDeleteKey('Delete', ['item-1'], 'DIV')).toBe(true)
   })
 
   it('returns true for Backspace when an item is selected', () => {
-    expect(shouldHandleDeleteKey('Backspace', 'item-1', undefined)).toBe(true)
+    expect(shouldHandleDeleteKey('Backspace', ['item-1'], undefined)).toBe(true)
   })
 
-  it('returns false when no item is selected', () => {
-    expect(shouldHandleDeleteKey('Delete', null, 'DIV')).toBe(false)
+  it('returns true for a multi-selection (U1: Delete removes the whole set)', () => {
+    expect(shouldHandleDeleteKey('Delete', ['item-1', 'item-2'], 'DIV')).toBe(true)
+  })
+
+  it('returns false when the selection is empty', () => {
+    expect(shouldHandleDeleteKey('Delete', [], 'DIV')).toBe(false)
   })
 
   it('returns false for unrelated keys', () => {
-    expect(shouldHandleDeleteKey('Enter', 'item-1', 'DIV')).toBe(false)
+    expect(shouldHandleDeleteKey('Enter', ['item-1'], 'DIV')).toBe(false)
   })
 
   it('returns false while focus is in an input field', () => {
-    expect(shouldHandleDeleteKey('Delete', 'item-1', 'INPUT')).toBe(false)
+    expect(shouldHandleDeleteKey('Delete', ['item-1'], 'INPUT')).toBe(false)
   })
 
   it('returns false while focus is in a textarea field', () => {
-    expect(shouldHandleDeleteKey('Backspace', 'item-1', 'textarea')).toBe(false)
+    expect(shouldHandleDeleteKey('Backspace', ['item-1'], 'textarea')).toBe(false)
   })
 })

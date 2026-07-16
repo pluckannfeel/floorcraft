@@ -227,11 +227,11 @@ export function constrainTransformBox(
 }
 
 /**
- * Determines whether a `keydown` event should delete the currently-selected
- * item: only `Delete`/`Backspace`, only when something is selected, and not
- * while focus is in a text field. No such fields exist yet in this unit
- * (U8), but this guard is cheap now and forward-safe for U10's Property
- * Panel inputs, which will share the same window-level listener.
+ * Determines whether a `keydown` event should delete the current selection
+ * (the WHOLE selection set, U1 — the caller deletes every selected id in
+ * one batched action): only `Delete`/`Backspace`, only when the selection
+ * is non-empty, and not while focus is in a text field (U10's Property
+ * Panel inputs share the same window-level listener).
  */
 /** True when the given element tag/contentEditable state means keyboard
  * shortcuts should be suppressed because the user is typing into a field —
@@ -245,11 +245,11 @@ export function isEditableTarget(activeElementTag: string | undefined, isContent
 
 export function shouldHandleDeleteKey(
   key: string,
-  selectedItemId: unknown,
+  selectedItemIds: readonly unknown[],
   activeElementTag: string | undefined,
   isContentEditable = false,
 ): boolean {
-  if (selectedItemId == null) return false
+  if (selectedItemIds.length === 0) return false
   if (key !== 'Delete' && key !== 'Backspace') return false
   if (isEditableTarget(activeElementTag, isContentEditable)) return false
   return true

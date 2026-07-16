@@ -42,21 +42,23 @@ interface ToolbarProps {
    * getStage-as-prop pattern `Sidebar.tsx` already uses for its
    * drop-coordinate conversion. */
   getStage: () => Konva.Stage | null
-  /** U18: the currently-selected Object's id, or `null` when nothing is
-   * selected — "Bring to front"/"Send to back" are only meaningful (and
-   * only rendered enabled) when an Object is selected, same
-   * selection-gating `Toolbar.tsx` would use for a Delete button if one
-   * lived here (U8's Delete is instead a keyboard shortcut on
-   * `CanvasStage.tsx`, but the gating logic mirrors it: no-op without a
-   * selection). */
-  selectedItemId: CanvasObject['id'] | null
-  /** U18: commits a z-order change for the selected item — thin delegation
-   * to the store's `reorderZIndex` action, matching how `onGeometryChange`/
-   * `onDeleteSelected` delegate their store writes from `CanvasStage.tsx`. */
-  onReorderZIndex: (id: CanvasObject['id'], direction: 'front' | 'back') => void
+  /** U18/U1: the current selection set — "Bring to front"/"Send to back"
+   * are only meaningful (and only rendered enabled) when at least one
+   * Object is selected, same selection-gating `Toolbar.tsx` would use for
+   * a Delete button if one lived here (U8's Delete is instead a keyboard
+   * shortcut on `CanvasStage.tsx`, but the gating logic mirrors it: no-op
+   * without a selection). */
+  selectedItemIds: CanvasObject['id'][]
+  /** U18/U1: commits a z-order change for the WHOLE selection — thin
+   * delegation to the store's batched `reorderZIndexItems` action (one
+   * history entry however many items are selected; front preserves the
+   * batch's relative order above the previous max, back below the min),
+   * matching how `onGeometryChange`/`onDeleteSelected` delegate their
+   * store writes from `CanvasStage.tsx`. */
+  onReorderZIndex: (ids: CanvasObject['id'][], direction: 'front' | 'back') => void
 }
 
-export function Toolbar({ getStage, selectedItemId, onReorderZIndex }: ToolbarProps) {
+export function Toolbar({ getStage, selectedItemIds, onReorderZIndex }: ToolbarProps) {
   const canUndo = useStore(useCanvasStore.temporal, (state) => state.pastStates.length > 0)
   const canRedo = useStore(useCanvasStore.temporal, (state) => state.futureStates.length > 0)
   const activeTool = useCanvasStore((state) => state.activeTool)
@@ -65,7 +67,7 @@ export function Toolbar({ getStage, selectedItemId, onReorderZIndex }: ToolbarPr
   const zoomIn = useCanvasStore((state) => state.zoomIn)
   const zoomOut = useCanvasStore((state) => state.zoomOut)
   const resetZoom = useCanvasStore((state) => state.resetZoom)
-  const selectItem = useCanvasStore((state) => state.selectItem)
+  const clearSelection = useCanvasStore((state) => state.clearSelection)
 
   // U12: clears selection (detaching Transformer/anchor handles), waits for
   // that to actually redraw, then downloads a PNG snapshot — see
@@ -74,7 +76,7 @@ export function Toolbar({ getStage, selectedItemId, onReorderZIndex }: ToolbarPr
   const handleExport = () => {
     const stage = getStage()
     if (!stage) return
-    exportStageToPng(stage, selectedItemId, selectItem)
+    exportStageToPng(stage, selectedItemIds, clearSelection)
   }
 
   return (
@@ -157,19 +159,20 @@ export function Toolbar({ getStage, selectedItemId, onReorderZIndex }: ToolbarPr
 
       <ToolbarDivider />
 
-      {/* U18: z-order controls, gated on a selection existing — clicking
-          sets the selected Object's z_index to one past the current
-          max/min among `items` (see `canvasStore.ts`'s `reorderZIndex`).
-          Purely a local `items` state change (no backend persistence yet —
-          that's U13); render order itself comes from `CanvasStage.tsx`
-          sorting `objects` by `z_index`, not from anything these buttons do
+      {/* U18/U1: z-order controls, gated on a non-empty selection —
+          clicking renumbers EVERY selected Object past the current max/min
+          among `items`, preserving the selection's own relative order, in
+          one history entry (see `canvasStore.ts`'s `reorderZIndexItems`).
+          Purely a local `items` state change (persists on explicit Save);
+          render order itself comes from `CanvasStage.tsx` sorting
+          `objects` by `z_index`, not from anything these buttons do
           directly. */}
       <Button
         type="button"
         variant="outline"
         size="sm"
-        onClick={() => selectedItemId != null && onReorderZIndex(selectedItemId, 'front')}
-        disabled={selectedItemId == null}
+        onClick={() => selectedItemIds.length > 0 && onReorderZIndex(selectedItemIds, 'front')}
+        disabled={selectedItemIds.length === 0}
       >
         Bring to Front
       </Button>
@@ -177,8 +180,8 @@ export function Toolbar({ getStage, selectedItemId, onReorderZIndex }: ToolbarPr
         type="button"
         variant="outline"
         size="sm"
-        onClick={() => selectedItemId != null && onReorderZIndex(selectedItemId, 'back')}
-        disabled={selectedItemId == null}
+        onClick={() => selectedItemIds.length > 0 && onReorderZIndex(selectedItemIds, 'back')}
+        disabled={selectedItemIds.length === 0}
       >
         Send to Back
       </Button>

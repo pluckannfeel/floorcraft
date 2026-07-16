@@ -25,7 +25,7 @@ function makeItem(overrides: Partial<CanvasObject> = {}): CanvasObject {
 // removes the selected item and clears selection").
 describe('canvasStore geometry/delete actions (U8)', () => {
   beforeEach(() => {
-    useCanvasStore.setState({ items: [], selectedItemId: null })
+    useCanvasStore.setState({ items: [], selectedItemIds: [] })
     useCanvasStore.temporal.getState().clear()
   })
 
@@ -84,21 +84,21 @@ describe('canvasStore geometry/delete actions (U8)', () => {
       expect(useCanvasStore.getState().items).toEqual([])
     })
 
-    it('clears selection when the deleted item was selected', () => {
-      useCanvasStore.setState({ items: [makeItem()], selectedItemId: 'item-1' })
+    it('drops the deleted item from the selection when it was selected', () => {
+      useCanvasStore.setState({ items: [makeItem()], selectedItemIds: ['item-1'] })
       useCanvasStore.getState().deleteItem('item-1')
 
-      expect(useCanvasStore.getState().selectedItemId).toBeNull()
+      expect(useCanvasStore.getState().selectedItemIds).toEqual([])
     })
 
     it('leaves selection untouched when a different item is deleted', () => {
       useCanvasStore.setState({
         items: [makeItem({ id: 'item-1' }), makeItem({ id: 'item-2' })],
-        selectedItemId: 'item-2',
+        selectedItemIds: ['item-2'],
       })
       useCanvasStore.getState().deleteItem('item-1')
 
-      expect(useCanvasStore.getState().selectedItemId).toBe('item-2')
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['item-2'])
       expect(useCanvasStore.getState().items).toEqual([makeItem({ id: 'item-2' })])
     })
   })
@@ -109,7 +109,7 @@ describe('canvasStore geometry/delete actions (U8)', () => {
 // participates in history.
 describe('canvasStore undo/redo (U9)', () => {
   beforeEach(() => {
-    useCanvasStore.setState({ items: [], selectedItemId: null, activeTool: 'select' })
+    useCanvasStore.setState({ items: [], selectedItemIds: [], activeTool: 'select' })
     useCanvasStore.temporal.getState().clear()
   })
 
@@ -217,11 +217,13 @@ describe('canvasStore undo/redo (U9)', () => {
     expect(useCanvasStore.getState().items[0].name).toBe('renamed')
   })
 
-  it('selecting an item and switching the active tool do not create undo entries', () => {
+  it('selecting items and switching the active tool do not create undo entries', () => {
     useCanvasStore.getState().createItemLocal(makeItem())
     useCanvasStore.temporal.getState().clear()
 
-    useCanvasStore.getState().selectItem('item-1')
+    useCanvasStore.getState().replaceSelection(['item-1'])
+    useCanvasStore.getState().toggleInSelection('item-2')
+    useCanvasStore.getState().clearSelection()
     useCanvasStore.getState().setActiveTool('shape_rectangle')
 
     expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
@@ -331,7 +333,7 @@ describe('canvasStore undo/redo (U9)', () => {
 // store-level suite only covers the local `items` state change.
 describe('canvasStore reorderZIndex (U18)', () => {
   beforeEach(() => {
-    useCanvasStore.setState({ items: [], selectedItemId: null, activeTool: 'select' })
+    useCanvasStore.setState({ items: [], selectedItemIds: [], activeTool: 'select' })
     useCanvasStore.temporal.getState().clear()
   })
 
@@ -444,7 +446,7 @@ describe('canvasStore updateLinePoints (U17)', () => {
   }
 
   beforeEach(() => {
-    useCanvasStore.setState({ items: [], selectedItemId: null, activeTool: 'select' })
+    useCanvasStore.setState({ items: [], selectedItemIds: [], activeTool: 'select' })
     useCanvasStore.temporal.getState().clear()
   })
 
@@ -569,7 +571,7 @@ describe('canvasStore updateLinePoints (U17)', () => {
 // [MIN_ZOOM, MAX_ZOOM].
 describe('canvasStore zoom/pan actions (U11)', () => {
   beforeEach(() => {
-    useCanvasStore.setState({ items: [], selectedItemId: null, activeTool: 'select', zoom: 1, stagePosition: { x: 0, y: 0 } })
+    useCanvasStore.setState({ items: [], selectedItemIds: [], activeTool: 'select', zoom: 1, stagePosition: { x: 0, y: 0 } })
     useCanvasStore.temporal.getState().clear()
   })
 
@@ -676,5 +678,293 @@ describe('canvasStore serverIdMap (explicit save)', () => {
     useCanvasStore.getState().setItems([])
 
     expect(useCanvasStore.getState().serverIdMap).toEqual({})
+  })
+})
+
+// U1 (canvas-tools plan): the selection becomes an ordered id array with
+// replace/toggle/clear semantics, plus batched multi-item mutations
+// (updateItemsGeometry / deleteItems / reorderZIndexItems) that produce ONE
+// history entry per gesture, and undo()/redo() pruning of selection ids
+// that no longer exist in the restored `items`.
+describe('canvasStore selection set + batched mutations (U1)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({ items: [], selectedItemIds: [], activeTool: 'select', dirty: false })
+    useCanvasStore.temporal.getState().clear()
+  })
+
+  describe('selection semantics', () => {
+    it('replaceSelection replaces the whole selection, preserving the given order', () => {
+      useCanvasStore.getState().replaceSelection(['b', 'a'])
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['b', 'a'])
+
+      useCanvasStore.getState().replaceSelection(['c'])
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['c'])
+    })
+
+    it('toggleInSelection appends an unselected id at the end', () => {
+      useCanvasStore.getState().replaceSelection(['a'])
+      useCanvasStore.getState().toggleInSelection('b')
+
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['a', 'b'])
+    })
+
+    it('toggleInSelection removes an already-selected id (AE1 ctrl-click contract)', () => {
+      useCanvasStore.getState().replaceSelection(['a', 'b', 'c'])
+      useCanvasStore.getState().toggleInSelection('b')
+
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['a', 'c'])
+    })
+
+    it('clearSelection empties the selection', () => {
+      useCanvasStore.getState().replaceSelection(['a', 'b'])
+      useCanvasStore.getState().clearSelection()
+
+      expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+    })
+
+    it('selection actions never create undo history entries or set dirty', () => {
+      useCanvasStore.getState().replaceSelection(['a'])
+      useCanvasStore.getState().toggleInSelection('b')
+      useCanvasStore.getState().clearSelection()
+
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+      expect(useCanvasStore.getState().dirty).toBe(false)
+    })
+
+    it('selection is untracked: undo never restores an old selection', () => {
+      useCanvasStore.getState().createItemLocal(makeItem({ id: 'a' }))
+      useCanvasStore.getState().createItemLocal(makeItem({ id: 'b' }))
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().replaceSelection(['a'])
+      useCanvasStore.getState().updateItemGeometry('b', { x: 500 })
+      useCanvasStore.getState().replaceSelection(['b'])
+
+      undo() // reverts the move only — both items still exist
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['b'])
+    })
+  })
+
+  describe('updateItemsGeometry', () => {
+    it('moves 3 items in ONE history entry — a single undo restores all three', () => {
+      useCanvasStore.setState({
+        items: [
+          makeItem({ id: 'a', x: 10, y: 10 }),
+          makeItem({ id: 'b', x: 20, y: 20 }),
+          makeItem({ id: 'c', x: 30, y: 30 }),
+        ],
+      })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().updateItemsGeometry([
+        { id: 'a', patch: { x: 110, y: 110 } },
+        { id: 'b', patch: { x: 120, y: 120 } },
+        { id: 'c', patch: { x: 130, y: 130 } },
+      ])
+
+      const moved = useCanvasStore.getState().items
+      expect(moved.find((item) => item.id === 'a')).toMatchObject({ x: 110, y: 110 })
+      expect(moved.find((item) => item.id === 'b')).toMatchObject({ x: 120, y: 120 })
+      expect(moved.find((item) => item.id === 'c')).toMatchObject({ x: 130, y: 130 })
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+      expect(useCanvasStore.getState().dirty).toBe(true)
+
+      undo()
+      const restored = useCanvasStore.getState().items
+      expect(restored.find((item) => item.id === 'a')).toMatchObject({ x: 10, y: 10 })
+      expect(restored.find((item) => item.id === 'b')).toMatchObject({ x: 20, y: 20 })
+      expect(restored.find((item) => item.id === 'c')).toMatchObject({ x: 30, y: 30 })
+    })
+
+    it('patches only listed items, leaving the rest untouched', () => {
+      useCanvasStore.setState({
+        items: [makeItem({ id: 'a', x: 10 }), makeItem({ id: 'b', x: 20 })],
+      })
+
+      useCanvasStore.getState().updateItemsGeometry([{ id: 'a', patch: { x: 99 } }])
+
+      const items = useCanvasStore.getState().items
+      expect(items.find((item) => item.id === 'a')?.x).toBe(99)
+      expect(items.find((item) => item.id === 'b')?.x).toBe(20)
+    })
+
+    it('is a no-op (no history entry, dirty untouched) when no patch id matches', () => {
+      const original = [makeItem({ id: 'a' })]
+      useCanvasStore.setState({ items: original })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().updateItemsGeometry([{ id: 'missing', patch: { x: 1 } }])
+
+      expect(useCanvasStore.getState().items).toBe(original)
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+      expect(useCanvasStore.getState().dirty).toBe(false)
+    })
+
+    it('later patches for the same id merge over earlier ones', () => {
+      useCanvasStore.setState({ items: [makeItem({ id: 'a', x: 10, y: 10 })] })
+      useCanvasStore.temporal.getState().clear() // isolate from the seed setState
+
+      useCanvasStore.getState().updateItemsGeometry([
+        { id: 'a', patch: { x: 50 } },
+        { id: 'a', patch: { y: 60 } },
+      ])
+
+      expect(useCanvasStore.getState().items[0]).toMatchObject({ x: 50, y: 60 })
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+    })
+  })
+
+  describe('deleteItems', () => {
+    it('removes every listed item and clears them from the selection in one history entry; undo restores items with selection staying cleared (pruning contract)', () => {
+      useCanvasStore.setState({
+        items: [makeItem({ id: 'a' }), makeItem({ id: 'b' }), makeItem({ id: 'c' })],
+      })
+      useCanvasStore.temporal.getState().clear()
+      useCanvasStore.getState().replaceSelection(['a', 'b'])
+
+      useCanvasStore.getState().deleteItems(['a', 'b'])
+
+      expect(useCanvasStore.getState().items.map((item) => item.id)).toEqual(['c'])
+      expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+
+      // Undo restores the deleted ITEMS — but never the selection, which is
+      // untracked: it stays cleared rather than resurrecting as a ghost.
+      undo()
+      expect(useCanvasStore.getState().items.map((item) => item.id)).toEqual(['a', 'b', 'c'])
+      expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+    })
+
+    it('keeps unrelated ids in the selection', () => {
+      useCanvasStore.setState({
+        items: [makeItem({ id: 'a' }), makeItem({ id: 'b' })],
+        selectedItemIds: ['a', 'b'],
+      })
+
+      useCanvasStore.getState().deleteItems(['a'])
+
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['b'])
+    })
+
+    it('is a no-op (no history entry) when none of the ids match an item', () => {
+      const original = [makeItem({ id: 'a' })]
+      useCanvasStore.setState({ items: original })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().deleteItems(['missing-1', 'missing-2'])
+
+      expect(useCanvasStore.getState().items).toBe(original)
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+    })
+  })
+
+  describe('undo/redo selection pruning', () => {
+    it('undoing a create prunes the now-nonexistent id from the selection (no stale-selection ghost)', () => {
+      useCanvasStore.getState().createItemLocal(makeItem({ id: 'local-new' }))
+      useCanvasStore.getState().replaceSelection(['local-new'])
+
+      undo()
+
+      expect(useCanvasStore.getState().items).toHaveLength(0)
+      expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+    })
+
+    it('pruning keeps still-existing ids and only drops dead ones', () => {
+      useCanvasStore.getState().createItemLocal(makeItem({ id: 'a' }))
+      useCanvasStore.getState().createItemLocal(makeItem({ id: 'local-new' }))
+      useCanvasStore.getState().replaceSelection(['a', 'local-new'])
+
+      undo() // removes only 'local-new' (the latest create)
+
+      expect(useCanvasStore.getState().items.map((item) => item.id)).toEqual(['a'])
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['a'])
+    })
+
+    it('redoing a delete prunes the re-deleted id from the selection', () => {
+      useCanvasStore.getState().createItemLocal(makeItem({ id: 'a' }))
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().deleteItems(['a'])
+      undo() // item back, selection still empty (deleteItems cleared it)
+      useCanvasStore.getState().replaceSelection(['a'])
+
+      redo() // re-applies the delete while 'a' is selected
+      expect(useCanvasStore.getState().items).toHaveLength(0)
+      expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+    })
+  })
+
+  describe('reorderZIndexItems', () => {
+    it('front: moves all listed items above the previous max, preserving their relative order', () => {
+      useCanvasStore.setState({
+        items: [
+          makeItem({ id: 'a', z_index: 0 }),
+          makeItem({ id: 'b', z_index: 5 }),
+          makeItem({ id: 'c', z_index: 2 }),
+        ],
+      })
+
+      // Selection order deliberately differs from z-order: relative order
+      // comes from the CURRENT z_index, not the click order.
+      useCanvasStore.getState().reorderZIndexItems(['c', 'a'], 'front')
+
+      const items = useCanvasStore.getState().items
+      const zOf = (id: string) => items.find((item) => item.id === id)!.z_index
+      expect(zOf('a')).toBeGreaterThan(5)
+      expect(zOf('c')).toBeGreaterThan(5)
+      // 'a' (z 0) was below 'c' (z 2) before, and must stay below it.
+      expect(zOf('a')).toBeLessThan(zOf('c'))
+      expect(zOf('b')).toBe(5)
+    })
+
+    it('back: moves all listed items below the previous min, preserving their relative order', () => {
+      useCanvasStore.setState({
+        items: [
+          makeItem({ id: 'a', z_index: 0 }),
+          makeItem({ id: 'b', z_index: 5 }),
+          makeItem({ id: 'c', z_index: 2 }),
+        ],
+      })
+
+      useCanvasStore.getState().reorderZIndexItems(['b', 'c'], 'back')
+
+      const items = useCanvasStore.getState().items
+      const zOf = (id: string) => items.find((item) => item.id === id)!.z_index
+      expect(zOf('b')).toBeLessThan(0)
+      expect(zOf('c')).toBeLessThan(0)
+      // 'c' (z 2) was below 'b' (z 5) before, and must stay below it.
+      expect(zOf('c')).toBeLessThan(zOf('b'))
+      expect(zOf('a')).toBe(0)
+    })
+
+    it('a whole-selection reorder is ONE history entry, undoable back to the original z-indexes', () => {
+      useCanvasStore.setState({
+        items: [
+          makeItem({ id: 'a', z_index: 0 }),
+          makeItem({ id: 'b', z_index: 5 }),
+          makeItem({ id: 'c', z_index: 2 }),
+        ],
+      })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().reorderZIndexItems(['a', 'c'], 'front')
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+
+      undo()
+      const items = useCanvasStore.getState().items
+      expect(items.find((item) => item.id === 'a')!.z_index).toBe(0)
+      expect(items.find((item) => item.id === 'c')!.z_index).toBe(2)
+    })
+
+    it('is a no-op when no listed id matches an item', () => {
+      const original = [makeItem({ id: 'a', z_index: 0 }), makeItem({ id: 'b', z_index: 5 })]
+      useCanvasStore.setState({ items: original })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().reorderZIndexItems(['missing'], 'front')
+
+      expect(useCanvasStore.getState().items).toBe(original)
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+    })
   })
 })
