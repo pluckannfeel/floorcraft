@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { AxiosError } from "axios";
 import type Konva from "konva";
+import { Button } from "@/components/ui/button";
 import { apiClient } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { useIsObjectsMutating, useObjectPersistence, useObjects } from "../hooks/useObjects";
@@ -344,22 +345,14 @@ export function CanvasEditorPage() {
   const floorPlan = floorPlanQuery.data;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "8px 16px",
-          borderBottom: "1px solid #e5e7eb",
-        }}
-      >
+    <div className="flex h-screen flex-col">
+      <header className="flex items-center justify-between border-b px-4 py-2">
         {/* U6/R13: the name label is inline-editable (click it, or the
             pencil button) — see FloorPlanNameEditor.tsx. */}
         <FloorPlanNameEditor floorPlanId={floorPlan.id} name={floorPlan.name} />
-        <button type="button" onClick={() => logout()}>
+        <Button type="button" variant="outline" size="sm" onClick={() => logout()}>
           Log out
-        </button>
+        </Button>
       </header>
 
       <Toolbar
@@ -368,7 +361,7 @@ export function CanvasEditorPage() {
         onReorderZIndex={handleReorderZIndex}
       />
 
-      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+      <div className="flex flex-1 overflow-hidden">
         <Sidebar
           getStage={getStage}
           gridSize={floorPlan.grid_size}
@@ -376,7 +369,7 @@ export function CanvasEditorPage() {
           canvasHeight={floorPlan.canvas_height}
           onDrop={handleDrop}
         />
-        <div style={{ flex: 1, overflow: "auto", padding: 16 }}>
+        <div className="flex-1 overflow-auto p-4">
           <CanvasStage
             ref={stageRef}
             width={floorPlan.canvas_width}

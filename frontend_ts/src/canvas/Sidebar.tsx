@@ -95,9 +95,9 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
   }
 
   return (
-    <aside aria-label="Object catalog" style={{ width: 180, padding: 12, borderRight: '1px solid #e5e7eb' }}>
-      <h2 style={{ fontSize: 14, marginBottom: 8 }}>Catalog</h2>
-      <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <aside aria-label="Object catalog" className="w-[180px] border-r p-3">
+      <h2 className="mb-2 text-sm font-medium">Catalog</h2>
+      <ul className="flex flex-col gap-2">
         {CATALOG_TYPES.map((type) => (
           <li key={type}>
             <div
@@ -105,16 +105,11 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
               tabIndex={0}
               data-testid={`catalog-item-${type}`}
               onPointerDown={(event) => handlePointerDown(type, event)}
-              style={{
-                backgroundColor: colorForType(type),
-                color: '#ffffff',
-                borderRadius: 4,
-                padding: '8px 10px',
-                fontSize: 13,
-                cursor: 'grab',
-                userSelect: 'none',
-                touchAction: 'none',
-              }}
+              className="cursor-grab touch-none rounded px-2.5 py-2 text-[13px] text-white select-none"
+              // Dynamic value: each catalog entry's fill comes from
+              // `colorForType()` (the same per-type palette the Konva shapes
+              // use), so it can't be a static Tailwind class.
+              style={{ backgroundColor: colorForType(type) }}
             >
               {CATALOG_LABELS[type]}
             </div>
@@ -125,17 +120,16 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
       {drag && (
         <div
           aria-hidden="true"
+          className="pointer-events-none fixed z-50 rounded opacity-70"
+          // Dynamic values: the preview follows the live pointer position,
+          // and its size/color derive from the DEFAULT_ITEM_SIZE constant
+          // and `colorForType()` — none of these can be static classes.
           style={{
-            position: 'fixed',
             left: drag.clientX - DEFAULT_ITEM_SIZE / 2,
             top: drag.clientY - DEFAULT_ITEM_SIZE / 2,
             width: DEFAULT_ITEM_SIZE,
             height: DEFAULT_ITEM_SIZE,
             backgroundColor: colorForType(drag.type),
-            opacity: 0.7,
-            borderRadius: 4,
-            pointerEvents: 'none',
-            zIndex: 1000,
           }}
         />
       )}

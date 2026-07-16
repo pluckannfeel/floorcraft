@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { isLineTool } from './LineTool'
 import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject, ObjectType } from './types'
@@ -214,25 +217,24 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
   return (
     <>
       <div>
-        <div style={{ fontSize: 12, color: '#6b7280' }}>{item.type}</div>
-        <label htmlFor="property-panel-name" style={{ display: 'block', fontSize: 12, marginTop: 8 }}>
+        <div className="text-xs text-muted-foreground">{item.type}</div>
+        <Label htmlFor="property-panel-name" className="mt-2 mb-1">
           Name
-        </label>
-        <input
+        </Label>
+        <Input
           id="property-panel-name"
           type="text"
           value={name}
           onChange={(event) => handleNameChange(event.target.value)}
           onBlur={handleBlur}
-          style={{ width: '100%' }}
         />
       </div>
 
       <div>
-        <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>Properties</div>
+        <div className="mb-1 text-xs text-muted-foreground">Properties</div>
         {rows.map((row) => (
-          <div key={row.rowId} style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-            <input
+          <div key={row.rowId} className="mb-1 flex items-center gap-1">
+            <Input
               aria-label={row.isExisting ? `Property key ${row.key}` : 'New property key'}
               type="text"
               value={row.key}
@@ -241,9 +243,9 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
                 handleRowsChange(rows.map((r) => (r.rowId === row.rowId ? { ...r, key: event.target.value } : r)))
               }
               onBlur={handleBlur}
-              style={{ width: '45%' }}
+              className="flex-1"
             />
-            <input
+            <Input
               aria-label={`Property value for ${row.key || row.rowId}`}
               type="text"
               value={row.value}
@@ -251,16 +253,22 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
                 handleRowsChange(rows.map((r) => (r.rowId === row.rowId ? { ...r, value: event.target.value } : r)))
               }
               onBlur={handleBlur}
-              style={{ width: '45%' }}
+              className="flex-1"
             />
-            <button type="button" aria-label={`Delete property ${row.key}`} onClick={() => handleDeleteRow(row.rowId)}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Delete property ${row.key}`}
+              onClick={() => handleDeleteRow(row.rowId)}
+            >
               ×
-            </button>
+            </Button>
           </div>
         ))}
-        <button type="button" onClick={handleAddRow}>
+        <Button type="button" variant="outline" size="sm" onClick={handleAddRow}>
           + Add property
-        </button>
+        </Button>
       </div>
     </>
   )
@@ -294,15 +302,7 @@ export function PropertyPanel({ onPersist }: PropertyPanelProps = {}) {
   return (
     <aside
       aria-label="Property panel"
-      style={{
-        width: 260,
-        borderLeft: '1px solid #e5e7eb',
-        padding: 16,
-        overflowY: 'auto',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 12,
-      }}
+      className="flex w-[260px] flex-col gap-3 overflow-y-auto border-l p-4"
     >
       <PropertyPanelForm key={selectedItem.id} item={selectedItem} onCommit={handleCommit} />
     </aside>
