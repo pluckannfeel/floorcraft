@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { apiClient } from '../api/client'
@@ -348,5 +349,69 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
     await waitFor(() =>
       expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 200 })),
     )
+  })
+
+  it('warns about unsaved changes while a save is in flight, and guards leaving', async () => {
+    // A PATCH held pending keeps isMutating > 0 — the app's definition of
+    // "unsaved changes" (edits persist automatically in the background).
+    mockGetForPlans({
+      7: {
+        plan: makePlan({ id: 7, name: 'Guarded Plan' }),
+        objects: [makeObject({ id: 701, floor_plan: 7, x: 200 })],
+      },
+    })
+    let releasePatch: ((value: { data: CanvasObject }) => void) | null = null
+    vi.spyOn(apiClient, 'patch').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releasePatch = resolve
+        }) as never,
+    )
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Guarded Plan')).toBeInTheDocument()
+    expect(screen.getByText('All changes saved')).toBeInTheDocument()
+
+    // A tracked move + undo dispatches a PATCH that stays in flight.
+    act(() => {
+      useCanvasStore.getState().updateItemGeometry(701, { x: 300 })
+    })
+    act(() => {
+      undo()
+    })
+    expect(await screen.findByText('Saving…')).toBeInTheDocument()
+
+    // Browser-level exit (close/reload): beforeunload is prevented.
+    const unloadEvent = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(unloadEvent)
+    expect(unloadEvent.defaultPrevented).toBe(true)
+
+    // In-app exit via Home: declining the confirm stays on the editor.
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('link', { name: 'Home' }))
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(screen.queryByText('Dashboard Placeholder')).not.toBeInTheDocument()
+
+    // Logout is guarded the same way.
+    await user.click(screen.getByRole('button', { name: /log out/i }))
+    expect(logout).not.toHaveBeenCalled()
+
+    // Once the save settles, the warning state clears entirely...
+    act(() => {
+      releasePatch!({ data: makeObject({ id: 701, floor_plan: 7, x: 200 }) })
+    })
+    expect(await screen.findByText('All changes saved')).toBeInTheDocument()
+
+    // ...beforeunload no longer warns...
+    const quietUnload = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(quietUnload)
+    expect(quietUnload.defaultPrevented).toBe(false)
+
+    // ...and Home navigates without any confirm.
+    confirmSpy.mockClear()
+    await user.click(screen.getByRole('link', { name: 'Home' }))
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(await screen.findByText('Dashboard Placeholder')).toBeInTheDocument()
   })
 })

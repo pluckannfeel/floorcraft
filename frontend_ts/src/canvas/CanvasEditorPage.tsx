@@ -238,6 +238,33 @@ export function CanvasEditorPage() {
     }
   }, [objectsQuery.data, isMutating, objectsQuery.isFetching, setItems]);
 
+  // Unsaved-changes guard: edits persist optimistically in the background,
+  // so "unsaved" here means object mutations still in flight. Closing or
+  // reloading the tab mid-save could lose them — surface the browser's
+  // native leave-confirmation while any save is pending. (In-app exits —
+  // the Home link and Log out — get their own confirm() below, since
+  // beforeunload doesn't fire for SPA navigation.)
+  useEffect(() => {
+    if (!isMutating) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      // Chrome ignores preventDefault alone; returnValue must be set for
+      // the dialog to appear.
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [isMutating]);
+
+  const confirmLeaveWhileSaving = useCallback(
+    () =>
+      !isMutating ||
+      window.confirm(
+        "Your latest changes are still saving. Leave anyway and risk losing them?",
+      ),
+    [isMutating],
+  );
+
   const getStage = useCallback(() => stageRef.current, []);
 
   // Shared by handleDrop/handleCreateShape/handleCreateLine below: every
@@ -379,12 +406,28 @@ export function CanvasEditorPage() {
             <Link
               to="/floor-plans"
               className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+              onClick={(event) => {
+                if (!confirmLeaveWhileSaving()) event.preventDefault();
+              }}
             >
               Home
             </Link>
           </nav>
+          {/* Save-state indicator: edits persist automatically, so this is
+              the user-visible "you have unsaved changes" signal while any
+              mutation is still in flight. */}
+          <span aria-live="polite" className="text-xs text-muted-foreground">
+            {isMutating ? "Saving…" : "All changes saved"}
+          </span>
         </div>
-        <Button type="button" variant="outline" size="sm" onClick={() => logout()}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            if (confirmLeaveWhileSaving()) logout();
+          }}
+        >
           Log out
         </Button>
       </header>
