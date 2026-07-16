@@ -114,6 +114,31 @@ class RegistrationTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(User.objects.filter(email='similar@example.com').exists())
 
+    def test_concurrent_registration_for_same_new_email_returns_400_not_500(self):
+        """Regression test for a code-review finding: `RegisterView`'s
+        check-then-act flow (`filter().first()` then `create_user()`) isn't
+        atomic with itself, so two near-simultaneous registrations for the
+        same brand-new email can both pass the pre-check before either
+        commits — the second `create_user()` call then hits the `email`
+        column's `unique=True` constraint. Simulated here (rather than with
+        real threads) by patching the pre-check to report "no existing
+        user" even though one already exists, forcing the code down the
+        `create_user()` path into a real `IntegrityError`.
+        """
+        User.objects.create_user(email='racer@example.com', password=VALID_PASSWORD)
+
+        with mock.patch('accounts.views.User.objects.filter') as mocked_filter:
+            mocked_filter.return_value.first.return_value = None
+            response = self.client.post(
+                reverse('register'),
+                register_payload(email='racer@example.com'),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('email', response.json())
+        self.assertEqual(User.objects.filter(email='racer@example.com').count(), 1)
+
 
 class VerifyEmailTests(TestCase):
     def setUp(self):

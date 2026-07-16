@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { AxiosError } from 'axios'
 import { apiClient } from '../api/client'
 import { registerPersistenceDispatcher } from '../state/canvasStore'
@@ -154,6 +154,11 @@ export function useCreateObject(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID) {
   const { showError } = useToast()
 
   return useMutation({
+    // Shared prefix with useUpdateObject/useDeleteObject below — lets
+    // `useIsObjectsMutating` (bottom of this file) count "any mutation for
+    // this floor plan still in flight," regardless of which of the three
+    // it is.
+    mutationKey: ['objects', floorPlanId],
     mutationFn: async (variables: CreateObjectVariables) => {
       const { data } = await apiClient.post<CanvasObject>('/objects/', variables.payload)
       return data
@@ -191,6 +196,7 @@ export function useUpdateObject(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID) {
   const { showError } = useToast()
 
   return useMutation({
+    mutationKey: ['objects', floorPlanId],
     mutationFn: async (variables: UpdateObjectVariables) => {
       const { data } = await apiClient.patch<CanvasObject>(`/objects/${variables.id}/`, variables.patch)
       return data
@@ -219,6 +225,7 @@ export function useDeleteObject(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID) {
   const { showError } = useToast()
 
   return useMutation({
+    mutationKey: ['objects', floorPlanId],
     mutationFn: async (variables: DeleteObjectVariables) => {
       await apiClient.delete(`/objects/${variables.id}/`)
     },
@@ -282,4 +289,25 @@ export function useObjectPersistence(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID
   }, [persistence])
 
   return persistence
+}
+
+/**
+ * True while any create/update/delete mutation for this floor plan is still
+ * in flight — matches by the shared `mutationKey` prefix all three
+ * mutations above use.
+ *
+ * `CanvasEditorPage.tsx`'s `objectsQuery.data -> setItems()` resync effect
+ * gates on this (code-review finding, fixed): every mutation's `onSettled`
+ * invalidates the SAME `['objects', floorPlanId]` query key, so one
+ * mutation settling triggers a refetch whose response reflects server
+ * state for every OTHER item too — including one still mid-flight from a
+ * second, concurrent mutation. Resyncing unconditionally would transiently
+ * overwrite that second item's optimistic change with stale server data
+ * until its own mutation resolves a moment later (self-healing, but a real,
+ * visible flicker). Deferring the resync until nothing is mutating means
+ * the eventual resync always reflects a moment where every optimistic
+ * change already has a settled outcome.
+ */
+export function useIsObjectsMutating(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID): boolean {
+  return useIsMutating({ mutationKey: ['objects', floorPlanId] }) > 0
 }

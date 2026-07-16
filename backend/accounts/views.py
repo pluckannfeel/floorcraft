@@ -1,6 +1,7 @@
 from django.contrib.auth import authenticate, login as django_login, logout as django_logout
 from django.contrib.sessions.models import Session
 from django.core import signing
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode
@@ -115,15 +116,31 @@ class RegisterView(CsrfProtectedAllowAnyView):
             user.is_active = False
             user.save()
         else:
-            user = User.objects.create_user(
-                email=email,
-                password=data['password'],
-                full_name=data.get('full_name', ''),
-                contact_number=data.get('contact_number', ''),
-                country=data.get('country', ''),
-                job_title=data.get('job_title', ''),
-                is_active=False,
-            )
+            # The `filter().first()` check above and this `create_user()`
+            # call are not atomic with respect to each other — two
+            # near-simultaneous registrations for the same brand-new email
+            # can both pass the check before either commits. `email`'s
+            # `unique=True` constraint then rejects the second INSERT; catch
+            # that as the same "already exists" response rather than
+            # letting it surface as an unhandled 500. The `atomic()` block
+            # keeps the failure scoped to a savepoint so the connection
+            # stays usable for the response that follows.
+            try:
+                with transaction.atomic():
+                    user = User.objects.create_user(
+                        email=email,
+                        password=data['password'],
+                        full_name=data.get('full_name', ''),
+                        contact_number=data.get('contact_number', ''),
+                        country=data.get('country', ''),
+                        job_title=data.get('job_title', ''),
+                        is_active=False,
+                    )
+            except IntegrityError:
+                return Response(
+                    {'email': ['An account with this email already exists.']},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         send_verification_email(user)
 

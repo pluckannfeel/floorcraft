@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type Konva from "konva";
 import { apiClient } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
-import { useObjectPersistence, useObjects } from "../hooks/useObjects";
+import { useIsObjectsMutating, useObjectPersistence, useObjects } from "../hooks/useObjects";
 import { useCanvasStore } from "../state/canvasStore";
 import { useCanvasShortcuts } from "../hooks/useCanvasShortcuts";
 import { CanvasStage } from "./CanvasStage";
@@ -52,6 +52,7 @@ export function CanvasEditorPage() {
   // `canvasStore.ts`'s module-level dispatcher for undo/redo (see
   // `useObjects.ts`'s `useObjectPersistence` doc comment).
   const persistence = useObjectPersistence(DEFAULT_FLOOR_PLAN_ID);
+  const isMutating = useIsObjectsMutating(DEFAULT_FLOOR_PLAN_ID);
 
   const items = useCanvasStore((state) => state.items);
   const selectedItemId = useCanvasStore((state) => state.selectedItemId);
@@ -167,11 +168,19 @@ export function CanvasEditorPage() {
   // Seed the store from the fetched Objects once they load. Later fetches
   // (e.g. a refetch) also resync — U13 layers real mutations on top without
   // changing this initial-load behavior.
+  //
+  // Gated on `!isMutating` (code-review finding, fixed): every mutation's
+  // `onSettled` invalidates this same query key, so one mutation settling
+  // can trigger a refetch whose data is stale for a DIFFERENT, still-in-
+  // flight mutation's item — resyncing then would transiently overwrite
+  // that item's optimistic change. Deferring until nothing is mutating
+  // means the resync that does land always reflects every optimistic
+  // change already having a settled (success or rolled-back) outcome.
   useEffect(() => {
-    if (objectsQuery.data) {
+    if (objectsQuery.data && !isMutating) {
       setItems(objectsQuery.data);
     }
-  }, [objectsQuery.data, setItems]);
+  }, [objectsQuery.data, isMutating, setItems]);
 
   const getStage = useCallback(() => stageRef.current, []);
 

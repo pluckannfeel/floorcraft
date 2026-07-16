@@ -9,6 +9,7 @@ import type { CanvasObject } from '../canvas/types'
 import {
   useCreateObject,
   useDeleteObject,
+  useIsObjectsMutating,
   useObjectPersistence,
   useUpdateObject,
 } from './useObjects'
@@ -514,5 +515,78 @@ describe('canvasStore undo/redo diffing dispatches the matching persistence call
     registerPersistenceDispatcher(null)
     useCanvasStore.getState().createItemLocal(makeItem({ id: 70 }))
     expect(() => undo()).not.toThrow()
+  })
+})
+
+describe('useIsObjectsMutating', () => {
+  it('is true while a create mutation for this floor plan is in flight, false once it settles', async () => {
+    let resolvePost!: (value: { data: CanvasObject }) => void
+    vi.spyOn(apiClient, 'post').mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePost = resolve
+      }) as never,
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(
+      () => ({
+        create: useCreateObject(1),
+        isMutating: useIsObjectsMutating(1),
+      }),
+      { wrapper },
+    )
+
+    expect(result.current.isMutating).toBe(false)
+
+    result.current.create.mutate({ localId: 'local-x', payload: {} })
+
+    await waitFor(() => expect(result.current.isMutating).toBe(true))
+
+    resolvePost({ data: makeItem({ id: 99 }) })
+
+    await waitFor(() => expect(result.current.isMutating).toBe(false))
+  })
+
+  it('stays true for a second item while a first item\'s update is still pending', async () => {
+    // Regression test for a code-review finding: CanvasEditorPage's
+    // `objectsQuery.data -> setItems()` resync effect used to run
+    // unconditionally on every mutation settling, which could transiently
+    // overwrite a DIFFERENT, still-in-flight mutation's optimistic change
+    // with stale server data (both mutations share the same
+    // `['objects', floorPlanId]` query key). `useIsObjectsMutating` is what
+    // that effect now gates on — this asserts the piece it depends on:
+    // the flag stays true as long as ANY tracked mutation (not just the
+    // first one to start) is still pending.
+    let resolveFirst!: (value: { data: CanvasObject }) => void
+    const firstPending = new Promise<{ data: CanvasObject }>((resolve) => {
+      resolveFirst = resolve
+    })
+    vi.spyOn(apiClient, 'patch')
+      .mockReturnValueOnce(firstPending as never)
+      .mockResolvedValueOnce({ data: makeItem({ id: 2 }) } as never)
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(
+      () => ({
+        update: useUpdateObject(1),
+        isMutating: useIsObjectsMutating(1),
+      }),
+      { wrapper },
+    )
+
+    result.current.update.mutate({ id: 1, patch: { x: 1 }, previous: makeItem({ id: 1 }) })
+    await waitFor(() => expect(result.current.isMutating).toBe(true))
+
+    // A second, independent update starts and finishes while the first is
+    // still pending.
+    result.current.update.mutate({ id: 2, patch: { x: 2 }, previous: makeItem({ id: 2 }) })
+    await waitFor(() => expect(apiClient.patch).toHaveBeenCalledTimes(2))
+
+    // The first mutation is still unresolved — isMutating must still be
+    // true, not flip false just because the second one settled.
+    expect(result.current.isMutating).toBe(true)
+
+    resolveFirst({ data: makeItem({ id: 1 }) })
+    await waitFor(() => expect(result.current.isMutating).toBe(false))
   })
 })
