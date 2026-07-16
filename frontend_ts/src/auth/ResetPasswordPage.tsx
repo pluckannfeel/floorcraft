@@ -1,7 +1,11 @@
 import { useState, type FormEvent } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { apiClient } from '../api/client'
+import { AuthCard, AuthFormError, AuthLink } from './AuthCard'
 import { flattenApiErrors } from './apiErrors'
 
 /**
@@ -30,13 +34,14 @@ export function ResetPasswordPage() {
 
   if (mutation.isSuccess) {
     return (
-      <section>
-        <h1>Password reset</h1>
-        <p>Your password has been reset. You can now log in.</p>
-        <p>
-          <Link to="/login">Log in</Link>
+      <AuthCard title="Password reset">
+        <p className="text-sm text-muted-foreground">
+          Your password has been reset. You can now log in.
         </p>
-      </section>
+        <p className="text-sm">
+          <AuthLink to="/login">Log in</AuthLink>
+        </p>
+      </AuthCard>
     )
   }
 
@@ -45,34 +50,29 @@ export function ResetPasswordPage() {
     : []
 
   return (
-    <section>
-      <h1>Reset your password</h1>
-      <form onSubmit={handleSubmit}>
-        {errors.length > 0 && (
-          <div role="alert">
-            {errors.map((message) => (
-              <p key={message}>{message}</p>
-            ))}
-          </div>
-        )}
+    <AuthCard title="Reset your password">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <AuthFormError messages={errors} />
 
-        <label htmlFor="new_password">New password</label>
-        <input
-          id="new_password"
-          name="new_password"
-          type="password"
-          value={newPassword}
-          onChange={(event) => setNewPassword(event.target.value)}
-          required
-        />
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="new_password">New password</Label>
+          <Input
+            id="new_password"
+            name="new_password"
+            type="password"
+            value={newPassword}
+            onChange={(event) => setNewPassword(event.target.value)}
+            required
+          />
+        </div>
 
-        <button type="submit" disabled={mutation.isPending}>
+        <Button type="submit" disabled={mutation.isPending} className="w-full">
           {mutation.isPending ? 'Resetting…' : 'Reset password'}
-        </button>
+        </Button>
       </form>
-      <p>
-        <Link to="/login">Back to login</Link>
+      <p className="text-sm">
+        <AuthLink to="/login">Back to login</AuthLink>
       </p>
-    </section>
+    </AuthCard>
   )
 }

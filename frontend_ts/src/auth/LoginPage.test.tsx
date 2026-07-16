@@ -24,7 +24,7 @@ function renderLoginPage(login: (email: string, password: string) => Promise<voi
       <MemoryRouter initialEntries={['/login']}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
-          <Route path="/" element={<div>Canvas Placeholder</div>} />
+          <Route path="/floor-plans" element={<div>Canvas Placeholder</div>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,

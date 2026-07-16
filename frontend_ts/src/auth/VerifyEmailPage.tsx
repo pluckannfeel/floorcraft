@@ -1,7 +1,11 @@
 import { useState, type FormEvent } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { apiClient } from '../api/client'
+import { AuthCard, AuthFormError, AuthLink } from './AuthCard'
 import { flattenApiErrors } from './apiErrors'
 
 /**
@@ -33,22 +37,22 @@ export function VerifyEmailPage() {
 
   if (verifyQuery.isPending) {
     return (
-      <section>
-        <h1>Verifying your email…</h1>
-        <p role="status">Please wait.</p>
-      </section>
+      <AuthCard title="Verifying your email…">
+        <p role="status" className="text-sm text-muted-foreground">
+          Please wait.
+        </p>
+      </AuthCard>
     )
   }
 
   if (verifyQuery.isSuccess) {
     return (
-      <section>
-        <h1>Email verified</h1>
-        <p>{verifyQuery.data.data.detail}</p>
-        <p>
-          <Link to="/login">Log in</Link>
+      <AuthCard title="Email verified">
+        <p className="text-sm text-muted-foreground">{verifyQuery.data.data.detail}</p>
+        <p className="text-sm">
+          <AuthLink to="/login">Log in</AuthLink>
         </p>
-      </section>
+      </AuthCard>
     )
   }
 
@@ -58,36 +62,36 @@ export function VerifyEmailPage() {
   )
 
   return (
-    <section>
-      <h1>Verification failed</h1>
-      <div role="alert">
-        {errorMessages.map((message) => (
-          <p key={message}>{message}</p>
-        ))}
-      </div>
+    <AuthCard title="Verification failed">
+      <AuthFormError messages={errorMessages} />
 
-      <h2>Resend verification email</h2>
+      <h2 className="mt-2 text-base leading-none font-semibold">Resend verification email</h2>
       {resendMutation.isSuccess ? (
-        <p>If an account with that email exists and needs verification, a new verification email has been sent.</p>
+        <p className="text-sm text-muted-foreground">
+          If an account with that email exists and needs verification, a new verification email
+          has been sent.
+        </p>
       ) : (
-        <form onSubmit={handleResend}>
-          <label htmlFor="resend-email">Email</label>
-          <input
-            id="resend-email"
-            name="resend-email"
-            type="email"
-            value={resendEmail}
-            onChange={(event) => setResendEmail(event.target.value)}
-            required
-          />
-          <button type="submit" disabled={resendMutation.isPending}>
+        <form onSubmit={handleResend} className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="resend-email">Email</Label>
+            <Input
+              id="resend-email"
+              name="resend-email"
+              type="email"
+              value={resendEmail}
+              onChange={(event) => setResendEmail(event.target.value)}
+              required
+            />
+          </div>
+          <Button type="submit" disabled={resendMutation.isPending} className="w-full">
             {resendMutation.isPending ? 'Sending…' : 'Resend verification email'}
-          </button>
+          </Button>
         </form>
       )}
-      <p>
-        <Link to="/login">Back to login</Link>
+      <p className="text-sm">
+        <AuthLink to="/login">Back to login</AuthLink>
       </p>
-    </section>
+    </AuthCard>
   )
 }

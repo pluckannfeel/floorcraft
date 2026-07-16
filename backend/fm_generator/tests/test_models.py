@@ -1,3 +1,4 @@
+from django.db import IntegrityError, transaction
 from django.test import TestCase
 from rest_framework.test import APITestCase
 
@@ -10,13 +11,21 @@ LINE_TYPES = ['line_straight', 'line_curved', 'line_s_curve']
 CURVED_LINE_TYPES = ['line_curved', 'line_s_curve']
 
 
+def make_owner(email='owner@example.com', password='Correct-Horse-9427!'):
+    """Create a user suitable for use as a FloorPlan.owner in tests."""
+    user = User.objects.create_user(email=email, password=password)
+    user.is_active = True
+    user.save()
+    return user
+
+
 class ObjectsTypeTaxonomyTests(TestCase):
     """Happy path: creating an Objects row with each of the 13 type values
     succeeds and round-trips via the serializer.
     """
 
     def setUp(self):
-        self.floor_plan = FloorPlan.objects.create(name='Test Floor Plan')
+        self.floor_plan = FloorPlan.objects.create(name='Test Floor Plan', owner=make_owner())
 
     def test_all_thirteen_types_round_trip(self):
         self.assertEqual(len(ALL_TYPES), 13)
@@ -125,8 +134,19 @@ class LegacyDataMigrationTests(TestCase):
         # (not the serializer) is used to confirm no such row lingers.
         self.assertFalse(Objects.objects.filter(type='desk').exists())
 
+    def test_no_floor_plan_rows_survive_ownership_migration(self):
+        # The 0006 migration deletes every pre-existing FloorPlan row
+        # (cascading to Objects) before adding the non-nullable `owner`
+        # field, as part of the migration sequence itself. This includes
+        # the legacy hardcoded floor plan (id 1) and its objects that exist
+        # in real dev databases predating this migration -- a freshly
+        # migrated database (this test DB included) starts with zero
+        # FloorPlan rows and no orphaned Objects.
+        self.assertEqual(FloorPlan.objects.count(), 0)
+        self.assertEqual(Objects.objects.count(), 0)
+
     def test_name_field_holds_former_label_value(self):
-        floor_plan = FloorPlan.objects.create(name='Legacy Floor Plan')
+        floor_plan = FloorPlan.objects.create(name='Legacy Floor Plan', owner=make_owner())
         item = Objects.objects.create(
             floor_plan=floor_plan,
             type='tables',
@@ -153,7 +173,7 @@ class ObjectViewSetOrderingTests(APITestCase):
         user.save()
         self.client.force_authenticate(user=user)
 
-        self.floor_plan = FloorPlan.objects.create(name='Ordering Floor Plan')
+        self.floor_plan = FloorPlan.objects.create(name='Ordering Floor Plan', owner=user)
         # Deliberately create out of z_index order, with duplicate z_index
         # values to exercise the id secondary sort key.
         self.item_a = Objects.objects.create(
@@ -176,3 +196,28 @@ class ObjectViewSetOrderingTests(APITestCase):
                 if isinstance(response.data, dict) and 'results' in response.data \
                 else [row['id'] for row in response.data]
             self.assertEqual(returned_ids, expected_order)
+
+
+class FloorPlanOwnershipTests(TestCase):
+    """Covers R1: a FloorPlan is owned by exactly one user, set at creation
+    time. Verifies the non-nullable `owner` FK added by
+    0006_add_floorplan_owner.
+    """
+
+    def setUp(self):
+        self.owner = make_owner()
+
+    def test_floor_plan_with_owner_persists_and_reads_back(self):
+        floor_plan = FloorPlan.objects.create(name='Owned Floor Plan', owner=self.owner)
+
+        floor_plan.refresh_from_db()
+
+        self.assertEqual(floor_plan.owner_id, self.owner.id)
+        self.assertEqual(floor_plan.owner, self.owner)
+        self.assertEqual(floor_plan.name, 'Owned Floor Plan')
+        self.assertIn(floor_plan, self.owner.floor_plans.all())
+
+    def test_floor_plan_without_owner_cannot_be_created(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                FloorPlan.objects.create(name='No Owner')

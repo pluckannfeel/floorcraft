@@ -1,5 +1,6 @@
 import type Konva from 'konva'
 import { useStore } from 'zustand'
+import { Button } from '@/components/ui/button'
 import { redo, undo, useCanvasStore } from '../state/canvasStore'
 import { exportStageToPng } from './export'
 import type { CanvasObject, LineType, ShapeType } from './types'
@@ -17,6 +18,11 @@ const LINE_TOOLS: { type: LineType; label: string }[] = [
   { type: 'line_curved', label: 'Curved Line' },
   { type: 'line_s_curve', label: 'S-Curve Line' },
 ]
+
+/** Thin vertical rule separating the toolbar's control groups. */
+function ToolbarDivider() {
+  return <div className="mx-1 w-px self-stretch bg-border" aria-hidden="true" />
+}
 
 /**
  * Canvas editor toolbar (U9: undo/redo; U15: shape drawing tools; U16: line
@@ -72,96 +78,84 @@ export function Toolbar({ getStage, selectedItemId, onReorderZIndex }: ToolbarPr
   }
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        gap: 8,
-        padding: '8px 16px',
-        borderBottom: '1px solid #e5e7eb',
-      }}
-    >
-      <button type="button" onClick={() => undo()} disabled={!canUndo}>
+    <div className="flex gap-2 border-b px-4 py-2">
+      <Button type="button" variant="outline" size="sm" onClick={() => undo()} disabled={!canUndo}>
         Undo
-      </button>
-      <button type="button" onClick={() => redo()} disabled={!canRedo}>
+      </Button>
+      <Button type="button" variant="outline" size="sm" onClick={() => redo()} disabled={!canRedo}>
         Redo
-      </button>
+      </Button>
 
-      <div style={{ width: 1, backgroundColor: '#e5e7eb', margin: '0 4px' }} aria-hidden="true" />
+      <ToolbarDivider />
 
       {/* Selecting a shape tool sets `activeTool` (U9's field); ShapeTool
           watches it to drive the draw interaction. Clicking the
           already-active tool toggles back to `'select'` so a tool can be
-          cancelled without drawing anything. */}
+          cancelled without drawing anything. The active tool is signalled
+          via the filled `default` variant (plus `aria-pressed`). */}
       {SHAPE_TOOLS.map(({ type, label }) => {
         const isActive = activeTool === type
         return (
-          <button
+          <Button
             key={type}
             type="button"
+            variant={isActive ? 'default' : 'outline'}
+            size="sm"
             aria-pressed={isActive}
             onClick={() => setActiveTool(isActive ? 'select' : type)}
-            style={{
-              fontWeight: isActive ? 700 : 400,
-              backgroundColor: isActive ? '#dbeafe' : undefined,
-              border: isActive ? '1px solid #2563eb' : '1px solid #d1d5db',
-            }}
           >
             {label}
-          </button>
+          </Button>
         )
       })}
 
-      <div style={{ width: 1, backgroundColor: '#e5e7eb', margin: '0 4px' }} aria-hidden="true" />
+      <ToolbarDivider />
 
       {/* U16: selecting a line tool sets `activeTool` the same way shape
           tools do; LineTool/CanvasStage watch it to drive the click-per-point
-          draw interaction. Same toggle-back-to-'select' behavior as shape
-          tools above. */}
+          draw interaction. Same toggle-back-to-'select' behavior (and same
+          active-variant signalling) as shape tools above. */}
       {LINE_TOOLS.map(({ type, label }) => {
         const isActive = activeTool === type
         return (
-          <button
+          <Button
             key={type}
             type="button"
+            variant={isActive ? 'default' : 'outline'}
+            size="sm"
             aria-pressed={isActive}
             onClick={() => setActiveTool(isActive ? 'select' : type)}
-            style={{
-              fontWeight: isActive ? 700 : 400,
-              backgroundColor: isActive ? '#fee2e2' : undefined,
-              border: isActive ? '1px solid #dc2626' : '1px solid #d1d5db',
-            }}
           >
             {label}
-          </button>
+          </Button>
         )
       })}
 
-      <div style={{ width: 1, backgroundColor: '#e5e7eb', margin: '0 4px' }} aria-hidden="true" />
+      <ToolbarDivider />
 
       {/* U11: zoom in/out/reset — the button-driven alternative to wheel
           scroll/pinch. Anchored at the current pan position (no cursor
           position exists for a button click, unlike wheel/pinch's
           zoom-to-point behavior); Reset returns to 1x at the origin. */}
-      <button type="button" onClick={() => zoomOut()} aria-label="Zoom out">
+      <Button type="button" variant="outline" size="icon-sm" onClick={() => zoomOut()} aria-label="Zoom out">
         −
-      </button>
-      <span style={{ minWidth: 48, textAlign: 'center', alignSelf: 'center' }}>{Math.round(zoom * 100)}%</span>
-      <button type="button" onClick={() => zoomIn()} aria-label="Zoom in">
+      </Button>
+      <span className="min-w-12 self-center text-center text-sm tabular-nums">{Math.round(zoom * 100)}%</span>
+      <Button type="button" variant="outline" size="icon-sm" onClick={() => zoomIn()} aria-label="Zoom in">
         +
-      </button>
-      <button type="button" onClick={() => resetZoom()} aria-label="Reset zoom">
+      </Button>
+      <Button type="button" variant="outline" size="sm" onClick={() => resetZoom()} aria-label="Reset zoom">
         Reset
-      </button>
+      </Button>
 
-      <div style={{ width: 1, backgroundColor: '#e5e7eb', margin: '0 4px' }} aria-hidden="true" />
+      <ToolbarDivider />
 
       {/* U12: exports the current floor plan as a PNG download. */}
-      <button type="button" onClick={handleExport}>
+      <Button type="button" variant="outline" size="sm" onClick={handleExport}>
         Export PNG
-      </button>
+      </Button>
 
-      <div style={{ width: 1, backgroundColor: '#e5e7eb', margin: '0 4px' }} aria-hidden="true" />
+      <ToolbarDivider />
 
       {/* U18: z-order controls, gated on a selection existing — clicking
           sets the selected Object's z_index to one past the current
@@ -170,20 +164,24 @@ export function Toolbar({ getStage, selectedItemId, onReorderZIndex }: ToolbarPr
           that's U13); render order itself comes from `CanvasStage.tsx`
           sorting `objects` by `z_index`, not from anything these buttons do
           directly. */}
-      <button
+      <Button
         type="button"
+        variant="outline"
+        size="sm"
         onClick={() => selectedItemId != null && onReorderZIndex(selectedItemId, 'front')}
         disabled={selectedItemId == null}
       >
         Bring to Front
-      </button>
-      <button
+      </Button>
+      <Button
         type="button"
+        variant="outline"
+        size="sm"
         onClick={() => selectedItemId != null && onReorderZIndex(selectedItemId, 'back')}
         disabled={selectedItemId == null}
       >
         Send to Back
-      </button>
+      </Button>
     </div>
   )
 }

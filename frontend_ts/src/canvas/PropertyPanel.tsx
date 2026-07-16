@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { isLineTool } from './LineTool'
 import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject, ObjectType } from './types'
@@ -43,17 +46,11 @@ import type { CanvasObject, ObjectType } from './types'
  * cleanup effect (an unmount handler) fires and flushes any pending edit
  * before the incoming form for the new selection ever renders.
  *
- * U13 update: still commits straight to the store via `updateItemProperties`
- * (unchanged from U10 — the instant local feedback R19 asks for), but now
- * ALSO invokes an optional `onPersist(id, patch, previousItem)` callback
- * after that local commit, which `CanvasEditorPage` wires to
- * `handlePropertiesCommit` (dispatching the matching `PATCH` + rollback-on-
- * failure via `useObjects.ts`'s `useObjectPersistence`). `onPersist` is
- * optional (not a required prop replacing the store call) specifically so
- * this component's existing test suite — which renders `<PropertyPanel />`
- * directly against a manually-seeded store, with no `CanvasEditorPage`/
- * mutation machinery in play — keeps working unchanged; U13 only adds a
- * side channel, it doesn't change who owns the local write.
+ * Explicit-save model: commits go straight to the store via
+ * `updateItemProperties` (the instant local feedback R19 asks for) and
+ * nowhere else — like every other canvas edit they stay local, marking the
+ * store dirty, until the user explicitly saves (Save button / Ctrl+S in
+ * `CanvasEditorPage`).
  */
 
 const LINE_STRUCTURAL_KEYS = new Set(['points', 'curve_style'])
@@ -214,25 +211,24 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
   return (
     <>
       <div>
-        <div style={{ fontSize: 12, color: '#6b7280' }}>{item.type}</div>
-        <label htmlFor="property-panel-name" style={{ display: 'block', fontSize: 12, marginTop: 8 }}>
+        <div className="text-xs text-muted-foreground">{item.type}</div>
+        <Label htmlFor="property-panel-name" className="mt-2 mb-1">
           Name
-        </label>
-        <input
+        </Label>
+        <Input
           id="property-panel-name"
           type="text"
           value={name}
           onChange={(event) => handleNameChange(event.target.value)}
           onBlur={handleBlur}
-          style={{ width: '100%' }}
         />
       </div>
 
       <div>
-        <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>Properties</div>
+        <div className="mb-1 text-xs text-muted-foreground">Properties</div>
         {rows.map((row) => (
-          <div key={row.rowId} style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-            <input
+          <div key={row.rowId} className="mb-1 flex items-center gap-1">
+            <Input
               aria-label={row.isExisting ? `Property key ${row.key}` : 'New property key'}
               type="text"
               value={row.key}
@@ -241,9 +237,9 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
                 handleRowsChange(rows.map((r) => (r.rowId === row.rowId ? { ...r, key: event.target.value } : r)))
               }
               onBlur={handleBlur}
-              style={{ width: '45%' }}
+              className="flex-1"
             />
-            <input
+            <Input
               aria-label={`Property value for ${row.key || row.rowId}`}
               type="text"
               value={row.value}
@@ -251,60 +247,42 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
                 handleRowsChange(rows.map((r) => (r.rowId === row.rowId ? { ...r, value: event.target.value } : r)))
               }
               onBlur={handleBlur}
-              style={{ width: '45%' }}
+              className="flex-1"
             />
-            <button type="button" aria-label={`Delete property ${row.key}`} onClick={() => handleDeleteRow(row.rowId)}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Delete property ${row.key}`}
+              onClick={() => handleDeleteRow(row.rowId)}
+            >
               ×
-            </button>
+            </Button>
           </div>
         ))}
-        <button type="button" onClick={handleAddRow}>
+        <Button type="button" variant="outline" size="sm" onClick={handleAddRow}>
           + Add property
-        </button>
+        </Button>
       </div>
     </>
   )
 }
 
-interface PropertyPanelProps {
-  /** U13: called with (id, patch, previousItem) right after a commit has
-   * already been applied locally via `updateItemProperties` — lets
-   * `CanvasEditorPage` dispatch the matching persistence call without this
-   * component needing to know TanStack Query/`useObjects.ts` exist.
-   * Optional so tests/callers that only care about the local-store
-   * behavior (all of this file's existing U10 tests) can omit it. */
-  onPersist?: (id: CanvasObject['id'], patch: PropertiesPatch, previous: CanvasObject) => void
-}
-
-export function PropertyPanel({ onPersist }: PropertyPanelProps = {}) {
+export function PropertyPanel() {
   const items = useCanvasStore((state) => state.items)
   const selectedItemId = useCanvasStore((state) => state.selectedItemId)
   const updateItemProperties = useCanvasStore((state) => state.updateItemProperties)
 
   const selectedItem = items.find((item) => item.id === selectedItemId) ?? null
 
-  const handleCommit = (id: CanvasObject['id'], patch: PropertiesPatch) => {
-    const previous = items.find((item) => item.id === id)
-    updateItemProperties(id, patch)
-    if (previous) onPersist?.(id, patch, previous)
-  }
-
   if (!selectedItem) return null
 
   return (
     <aside
       aria-label="Property panel"
-      style={{
-        width: 260,
-        borderLeft: '1px solid #e5e7eb',
-        padding: 16,
-        overflowY: 'auto',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 12,
-      }}
+      className="flex w-[260px] flex-col gap-3 overflow-y-auto border-l p-4"
     >
-      <PropertyPanelForm key={selectedItem.id} item={selectedItem} onCommit={handleCommit} />
+      <PropertyPanelForm key={selectedItem.id} item={selectedItem} onCommit={updateItemProperties} />
     </aside>
   )
 }

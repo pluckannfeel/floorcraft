@@ -5,7 +5,8 @@ import { VerifyEmailPage } from "./auth/VerifyEmailPage";
 import { LoginPage } from "./auth/LoginPage";
 import { ForgotPasswordPage } from "./auth/ForgotPasswordPage";
 import { ResetPasswordPage } from "./auth/ResetPasswordPage";
-import Home from "./pages/Home";
+import { FloorPlanDashboard } from "./pages/FloorPlanDashboard";
+import { CanvasEditorPage } from "./canvas/CanvasEditorPage";
 
 export function AppRoutes() {
   return (
@@ -18,15 +19,27 @@ export function AppRoutes() {
         path="/reset-password/:uid/:token"
         element={<ResetPasswordPage />}
       />
+      {/* U4/R4: the dashboard is the post-login landing page. */}
       <Route
-        path="/"
+        path="/floor-plans"
         element={
           <RequireAuth>
-            <Home />
+            <FloorPlanDashboard />
           </RequireAuth>
         }
       />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      {/* R7: per-plan editor route — CanvasEditorPage reads :floorPlanId
+          itself (U5), so it mounts directly with no wrapper. */}
+      <Route
+        path="/floor-plans/:floorPlanId"
+        element={
+          <RequireAuth>
+            <CanvasEditorPage />
+          </RequireAuth>
+        }
+      />
+      <Route path="/" element={<Navigate to="/floor-plans" replace />} />
+      <Route path="*" element={<Navigate to="/floor-plans" replace />} />
     </Routes>
   );
 }

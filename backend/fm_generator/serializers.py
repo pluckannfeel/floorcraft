@@ -1,3 +1,4 @@
+from django.http import Http404
 from rest_framework import serializers
 
 from .models import FloorPlan, Objects
@@ -14,7 +15,48 @@ CURVED_LINE_TYPES = {
 }
 
 
+class OwnedFloorPlanField(serializers.PrimaryKeyRelatedField):
+    """`floor_plan` reference field scoped to the requesting user (R2).
+
+    Scoping the queryset (rather than checking ownership in `validate()`)
+    makes a NONEXISTENT floor-plan pk and a FOREIGN-owned one fail
+    identically — with the unscoped default queryset, a nonexistent pk
+    fails field validation with 400 "Invalid pk" while a foreign pk fails
+    the later ownership check, and that 400-vs-404 split is an existence
+    oracle over floor-plan IDs (defeating R14's deliberate
+    indistinguishability). It also inherently covers both create AND
+    update — any payload carrying `floor_plan` passes through
+    `to_internal_value` — closing the reassignment IDOR a create-only
+    check would leave open.
+
+    Failures raise Http404 (not ValidationError/400) so ownership
+    failures look like "not found" (R14) and the frontend's global
+    401/403 session-expiry interceptor can never misfire.
+
+    Falls back to the unscoped queryset when no `request` is in context:
+    `ObjectViewSet` (the only writable production call site) always
+    supplies one via DRF's default `get_serializer_context()`, so this
+    only affects serializer-level unit tests that instantiate
+    `ObjectSerializer` directly — those aren't exercising the HTTP-level
+    ownership boundary.
+    """
+
+    def get_queryset(self):
+        request = self.context.get('request')
+        if request is None or not getattr(request, 'user', None):
+            return FloorPlan.objects.all()
+        return FloorPlan.objects.filter(owner=request.user)
+
+    def to_internal_value(self, data):
+        try:
+            return super().to_internal_value(data)
+        except serializers.ValidationError:
+            raise Http404
+
+
 class ObjectSerializer(serializers.ModelSerializer):
+    floor_plan = OwnedFloorPlanField()
+
     class Meta:
         model = Objects
         fields = [
@@ -28,7 +70,9 @@ class ObjectSerializer(serializers.ModelSerializer):
         Lines require a `points` array (curved lines also require a
         `curve_style`); Shapes accept kind-specific sizing in `properties`
         beyond the shared width/height/rotation fields, with no additional
-        required keys enforced here.
+        required keys enforced here. (Ownership of the referenced
+        `floor_plan` is enforced at the field level — see
+        OwnedFloorPlanField.)
         """
         obj_type = attrs.get('type', getattr(self.instance, 'type', None))
         properties = attrs.get('properties', getattr(self.instance, 'properties', None))
@@ -63,12 +107,33 @@ class ObjectSerializer(serializers.ModelSerializer):
             })
 
 
-class FloorPlanSerializer(serializers.ModelSerializer):
-    items = ObjectSerializer(many=True, read_only=True)
+class SyncObjectSerializer(ObjectSerializer):
+    """ObjectSerializer variant for the bulk-sync endpoint
+    (PUT /api/floor-plans/<pk>/objects/). There the floor plan is resolved
+    from the URL through the user-scoped queryset and passed via
+    `serializer.save(floor_plan=plan)`, so `floor_plan` is read-only here:
+    any `floor_plan` value inside a payload item is ignored, which both
+    keeps the URL as the single source of truth and closes the
+    cross-plan-reassignment hole a writable field would reopen in this
+    flow. Output shape is unchanged (still the floor plan's pk).
+    """
 
+    floor_plan = serializers.PrimaryKeyRelatedField(read_only=True)
+
+
+class FloorPlanSerializer(serializers.ModelSerializer):
     class Meta:
         model = FloorPlan
+        # `owner` is deliberately omitted: it's not client-writable and the
+        # frontend never needs to display it. It's set server-side via
+        # perform_create() in FloorPlanViewSet.
+        #
+        # Nested `items` are also deliberately NOT serialized: the frontend
+        # always fetches objects separately via /objects/?floor_plan=<id>,
+        # so nesting them here only produced an N+1 on the dashboard's list
+        # endpoint and shipped every object of every plan for a card grid
+        # that renders name and dates.
         fields = [
             'id', 'name', 'grid_size', 'canvas_width', 'canvas_height',
-            'items', 'created_at', 'updated_at',
+            'created_at', 'updated_at',
         ]
