@@ -46,17 +46,11 @@ import type { CanvasObject, ObjectType } from './types'
  * cleanup effect (an unmount handler) fires and flushes any pending edit
  * before the incoming form for the new selection ever renders.
  *
- * U13 update: still commits straight to the store via `updateItemProperties`
- * (unchanged from U10 — the instant local feedback R19 asks for), but now
- * ALSO invokes an optional `onPersist(id, patch, previousItem)` callback
- * after that local commit, which `CanvasEditorPage` wires to
- * `handlePropertiesCommit` (dispatching the matching `PATCH` + rollback-on-
- * failure via `useObjects.ts`'s `useObjectPersistence`). `onPersist` is
- * optional (not a required prop replacing the store call) specifically so
- * this component's existing test suite — which renders `<PropertyPanel />`
- * directly against a manually-seeded store, with no `CanvasEditorPage`/
- * mutation machinery in play — keeps working unchanged; U13 only adds a
- * side channel, it doesn't change who owns the local write.
+ * Explicit-save model: commits go straight to the store via
+ * `updateItemProperties` (the instant local feedback R19 asks for) and
+ * nowhere else — like every other canvas edit they stay local, marking the
+ * store dirty, until the user explicitly saves (Save button / Ctrl+S in
+ * `CanvasEditorPage`).
  */
 
 const LINE_STRUCTURAL_KEYS = new Set(['points', 'curve_style'])
@@ -274,28 +268,12 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
   )
 }
 
-interface PropertyPanelProps {
-  /** U13: called with (id, patch, previousItem) right after a commit has
-   * already been applied locally via `updateItemProperties` — lets
-   * `CanvasEditorPage` dispatch the matching persistence call without this
-   * component needing to know TanStack Query/`useObjects.ts` exist.
-   * Optional so tests/callers that only care about the local-store
-   * behavior (all of this file's existing U10 tests) can omit it. */
-  onPersist?: (id: CanvasObject['id'], patch: PropertiesPatch, previous: CanvasObject) => void
-}
-
-export function PropertyPanel({ onPersist }: PropertyPanelProps = {}) {
+export function PropertyPanel() {
   const items = useCanvasStore((state) => state.items)
   const selectedItemId = useCanvasStore((state) => state.selectedItemId)
   const updateItemProperties = useCanvasStore((state) => state.updateItemProperties)
 
   const selectedItem = items.find((item) => item.id === selectedItemId) ?? null
-
-  const handleCommit = (id: CanvasObject['id'], patch: PropertiesPatch) => {
-    const previous = items.find((item) => item.id === id)
-    updateItemProperties(id, patch)
-    if (previous) onPersist?.(id, patch, previous)
-  }
 
   if (!selectedItem) return null
 
@@ -304,7 +282,7 @@ export function PropertyPanel({ onPersist }: PropertyPanelProps = {}) {
       aria-label="Property panel"
       className="flex w-[260px] flex-col gap-3 overflow-y-auto border-l p-4"
     >
-      <PropertyPanelForm key={selectedItem.id} item={selectedItem} onCommit={handleCommit} />
+      <PropertyPanelForm key={selectedItem.id} item={selectedItem} onCommit={updateItemProperties} />
     </aside>
   )
 }

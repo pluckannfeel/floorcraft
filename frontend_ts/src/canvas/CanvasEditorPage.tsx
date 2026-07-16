@@ -3,10 +3,11 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { AxiosError } from "axios";
 import type Konva from "konva";
+import { Save, SaveCheck, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { apiClient } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
-import { useIsObjectsMutating, useObjectPersistence, useObjects } from "../hooks/useObjects";
+import { useObjects, useSaveObjects } from "../hooks/useObjects";
 import { useCanvasStore } from "../state/canvasStore";
 import { useCanvasShortcuts } from "../hooks/useCanvasShortcuts";
 import { CanvasStage } from "./CanvasStage";
@@ -24,7 +25,6 @@ import type {
   Point,
   ShapeType,
 } from "./types";
-import { isLocalId } from "./types";
 
 /** True when a floor-plan fetch failed because the backend answered 404 —
  * per U2's per-user queryset scoping, a nonexistent id and someone else's
@@ -40,6 +40,13 @@ function isNotFoundError(error: unknown): boolean {
  * nonexistent or foreign-owned id (the backend 404s both identically, R14),
  * or a malformed one, renders a not-found state linking back to the
  * dashboard instead of the editor.
+ *
+ * Persistence model (explicit save): every canvas edit below is a pure
+ * local store mutation — nothing persists per action. The store's `dirty`
+ * flag drives the header's "Unsaved changes"/"Saved" indicator, the Save
+ * button, and the leave guards; the ONLY write path to the backend is
+ * `useSaveObjects` (Save button or Ctrl+S), which PUTs the full items list
+ * and re-baselines the store from the canonical response.
  */
 export function CanvasEditorPage() {
   const { logout } = useAuth();
@@ -67,27 +74,23 @@ export function CanvasEditorPage() {
     // A 404 is a definitive answer (not yours / doesn't exist, R14), not a
     // transient failure — retrying it would just loop before the not-found
     // state below renders. Other failures keep a small retry budget.
-    retry: (failureCount, error) =>
-      !isNotFoundError(error) && failureCount < 2,
+    retry: (failureCount, error) => !isNotFoundError(error) && failureCount < 2,
   });
 
   const objectsQuery = useObjects(floorPlanId);
-  // U13: the single persistence handle every create/update/delete below
-  // dispatches through — also the thing that gets registered as
-  // `canvasStore.ts`'s module-level dispatcher for undo/redo (see
-  // `useObjects.ts`'s `useObjectPersistence` doc comment).
-  const persistence = useObjectPersistence(floorPlanId);
-  // Keyed to the CURRENT route's floorPlanId (institutional learning:
-  // tanstack-query-cross-mutation-resync-flicker) — navigating between two
-  // plans must not let one plan's settling mutation gate (or clobber) the
-  // other plan's resync.
-  const isMutating = useIsObjectsMutating(floorPlanId);
+  // The explicit save: PUTs the store's full items list (ids translated
+  // through `serverIdMap`) and merges the response's id_map back — items
+  // and undo history are deliberately untouched, so undo/redo keep working
+  // across saves. See `useObjects.ts`'s `useSaveObjects` doc comment.
+  const { mutate: saveObjects, isPending: isSaving } =
+    useSaveObjects(floorPlanId);
 
   const items = useCanvasStore((state) => state.items);
   const selectedItemId = useCanvasStore((state) => state.selectedItemId);
   const activeTool = useCanvasStore((state) => state.activeTool);
   const zoom = useCanvasStore((state) => state.zoom);
   const stagePosition = useCanvasStore((state) => state.stagePosition);
+  const dirty = useCanvasStore((state) => state.dirty);
   const setItems = useCanvasStore((state) => state.setItems);
   const createItemLocal = useCanvasStore((state) => state.createItemLocal);
   const selectItem = useCanvasStore((state) => state.selectItem);
@@ -103,149 +106,71 @@ export function CanvasEditorPage() {
   );
   const setStagePosition = useCanvasStore((state) => state.setStagePosition);
 
-  // U13: every wrapped handler below follows the same shape — capture the
-  // item's pre-change snapshot (for the mutation's onError rollback),
-  // apply the LOCAL store action (unchanged from U7-U18, still instant per
-  // R16), then dispatch the matching persistence call, skipped for an item
-  // that's still `local-`-id-only (its create POST hasn't resolved yet, so
-  // there's no backend row yet to PATCH/DELETE against — see `isLocalId`).
+  const handleSave = useCallback(() => {
+    // Read `dirty` off the store directly so the guard is always current —
+    // this callback is also Ctrl+S's target (via `useCanvasShortcuts`
+    // below), which can fire between renders.
+    if (!useCanvasStore.getState().dirty || isSaving) return;
+    saveObjects();
+  }, [saveObjects, isSaving]);
 
-  // activate keyboard shortcuts for undo/redo (R15) — see `useCanvasShortcuts.ts`
-  useCanvasShortcuts();
+  // Keyboard shortcuts: undo/redo (R15) plus Ctrl/Cmd+S -> explicit save —
+  // see `useCanvasShortcuts.ts`.
+  useCanvasShortcuts(handleSave);
 
   const handleDeleteSelected = useCallback(() => {
     if (selectedItemId == null) return;
-    const previous = items.find((item) => item.id === selectedItemId);
     deleteItem(selectedItemId);
-    if (previous && !isLocalId(selectedItemId)) {
-      persistence.deleteObject(selectedItemId, previous);
-    }
-  }, [selectedItemId, items, deleteItem, persistence]);
-
-  const handleGeometryChange = useCallback(
-    (
-      id: CanvasObject["id"],
-      patch: Partial<
-        Pick<CanvasObject, "x" | "y" | "width" | "height" | "rotation">
-      >,
-    ) => {
-      const previous = items.find((item) => item.id === id);
-      updateItemGeometry(id, patch);
-      if (previous && !isLocalId(id)) {
-        persistence.updateObject(id, patch, previous);
-      }
-    },
-    [items, updateItemGeometry, persistence],
-  );
-
-  const handleLinePointDragEnd = useCallback(
-    (id: CanvasObject["id"], pointIndex: number, point: Point) => {
-      const previous = items.find((item) => item.id === id);
-      updateLinePoints(id, pointIndex, point);
-      if (previous && !isLocalId(id)) {
-        const updated = useCanvasStore
-          .getState()
-          .items.find((item) => item.id === id);
-        if (updated) {
-          persistence.updateObject(
-            id,
-            { properties: updated.properties },
-            previous,
-          );
-        }
-      }
-    },
-    [items, updateLinePoints, persistence],
-  );
-
-  const handleReorderZIndex = useCallback(
-    (id: CanvasObject["id"], direction: "front" | "back") => {
-      const previous = items.find((item) => item.id === id);
-      reorderZIndex(id, direction);
-      if (previous && !isLocalId(id)) {
-        const updated = useCanvasStore
-          .getState()
-          .items.find((item) => item.id === id);
-        if (updated) {
-          persistence.updateObject(id, { z_index: updated.z_index }, previous);
-        }
-      }
-    },
-    [items, reorderZIndex, persistence],
-  );
-
-  // U10/U13: Property Panel edits are excluded from undo (R15) but DO still
-  // persist ("Writes go through updateItemProperties ... and the
-  // persistence hook (U13)", U10's Approach). Unlike the handlers above,
-  // `PropertyPanel` itself already applies the local `updateItemProperties`
-  // commit (see that component's doc comment) and hands this callback the
-  // already-captured `previous` snapshot — this handler's only job is
-  // dispatching the matching persistence call.
-  const handlePropertiesPersist = useCallback(
-    (
-      id: CanvasObject["id"],
-      patch: { name?: string; properties?: Record<string, unknown> },
-      previous: CanvasObject,
-    ) => {
-      if (!isLocalId(id)) {
-        persistence.updateObject(id, patch, previous);
-      }
-    },
-    [persistence],
-  );
+  }, [selectedItemId, deleteItem]);
 
   // U5: the zustand canvasStore — including its zundo undo/redo history —
   // is module-global, while this editor renders one floor plan at a time.
-  // `items` themselves are replaced by the resync effect below once the new
+  // `items` themselves are replaced by the seed effect below once the new
   // plan's objects load (untracked via temporal.pause/resume), but
   // everything else would survive a plan switch: zundo's past/future stacks
   // (plan A's undo history applying onto plan B's canvas), the selection
   // (a stale plan-A id enabling z-order buttons and making Delete push a
   // junk undo entry on plan B), the previous plan's items (rendered as
-  // plan B's if B's objects fetch errors before ever resyncing), and the
-  // zoom/pan. Reset all of it keyed on the route's floorPlanId.
+  // plan B's if B's objects fetch errors before ever reseeding), and the
+  // zoom/pan. Reset all of it keyed on the route's floorPlanId. `setItems`
+  // also clears `dirty`, so a stale unsaved-changes flag can't leak onto
+  // the next plan either.
   useEffect(() => {
     const store = useCanvasStore.getState();
-    store.setItems([]); // pauses/resumes zundo internally
+    store.setItems([]); // pauses/resumes zundo internally; clears dirty
     store.selectItem(null); // untracked (partialize covers items only)
     store.resetZoom(); // untracked
     useCanvasStore.temporal.getState().clear();
   }, [floorPlanId]);
 
-  // Seed the store from the fetched Objects once they load. Later fetches
-  // (e.g. a refetch) also resync — U13 layers real mutations on top without
-  // changing this initial-load behavior.
+  // Seed the store from the fetched Objects ONCE per floor plan (reseeding
+  // again on a plan switch, after the reset effect above emptied the
+  // store).
   //
-  // Gated on `!isMutating` (code-review finding, fixed): every mutation's
-  // `onSettled` invalidates this same query key, so one mutation settling
-  // can trigger a refetch whose data is stale for a DIFFERENT, still-in-
-  // flight mutation's item — resyncing then would transiently overwrite
-  // that item's optimistic change. Deferring until nothing is mutating
-  // means the resync that does land always reflects every optimistic
-  // change already having a settled (success or rolled-back) outcome.
-  //
-  // ALSO gated on `!isFetching` (undo/redo jitter fix): when a mutation
-  // settles, `isMutating` drops to 0 and the invalidation's refetch starts
-  // — but `objectsQuery.data` is still the PRE-mutation cache until that
-  // refetch returns. Without this gate the effect re-fires on the
-  // isMutating flip and briefly resyncs the store to the stale snapshot
-  // (objects visibly jump back to their pre-undo positions), then jumps
-  // forward again when the refetch lands. Waiting out the fetch means the
-  // one resync that runs carries the post-mutation server state.
+  // Strictly once, not on every data change: with explicit save the store
+  // is the single source of truth for the whole editing session — a
+  // background refetch (e.g. refetch-on-window-focus) must never clobber
+  // unsaved local edits, and the post-save `setQueryData` must not trigger
+  // a re-baseline either (setItems would reset `serverIdMap` and swap item
+  // ids out from under the undo history, breaking undo/redo after a save).
+  const seededForPlanRef = useRef<number | null>(null);
   useEffect(() => {
-    if (objectsQuery.data && !isMutating && !objectsQuery.isFetching) {
+    if (
+      objectsQuery.data &&
+      seededForPlanRef.current !== floorPlanId
+    ) {
+      seededForPlanRef.current = floorPlanId;
       setItems(objectsQuery.data);
     }
-  }, [objectsQuery.data, isMutating, objectsQuery.isFetching, setItems]);
+  }, [objectsQuery.data, floorPlanId, setItems]);
 
-  // Unsaved-changes guard: edits persist optimistically in the background,
-  // so "unsaved" here means object mutations still in flight. Closing or
-  // reloading the tab mid-save could lose them — surface the browser's
-  // native leave-confirmation while any save is pending. (In-app exits —
-  // the Home link and Log out — get their own confirm() below, since
-  // beforeunload doesn't fire for SPA navigation.)
+  // Leave guards: closing/reloading the tab with unsaved changes (or while
+  // the save PUT is still in flight) would lose them — surface the
+  // browser's native confirmation. (In-app exits — the Home link and Log
+  // out — get their own confirm() below, since beforeunload doesn't fire
+  // for SPA navigation.)
   useEffect(() => {
-    if (!isMutating) return;
+    if (!dirty && !isSaving) return;
     const warn = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       // Chrome ignores preventDefault alone; returnValue must be set for
@@ -254,24 +179,22 @@ export function CanvasEditorPage() {
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [isMutating]);
+  }, [dirty, isSaving]);
 
-  const confirmLeaveWhileSaving = useCallback(
+  const confirmLeaveWithUnsavedChanges = useCallback(
     () =>
-      !isMutating ||
-      window.confirm(
-        "Your latest changes are still saving. Leave anyway and risk losing them?",
-      ),
-    [isMutating],
+      (!dirty && !isSaving) ||
+      window.confirm("You have unsaved changes. Leave anyway?"),
+    [dirty, isSaving],
   );
 
   const getStage = useCallback(() => stageRef.current, []);
 
   // Shared by handleDrop/handleCreateShape/handleCreateLine below: every
-  // newly-created Object needs a locally-created client-side id (until U13's
-  // persistence swaps it for the server-assigned one), a top-of-stack
-  // z_index, and the same fixed set of defaulted fields — only the type,
-  // geometry, and properties actually differ per creation path.
+  // newly-created Object gets a client-side `local-` id (kept until the
+  // next explicit save round-trips it for a server-assigned one), a
+  // top-of-stack z_index, and the same fixed set of defaulted fields — only
+  // the type, geometry, and properties actually differ per creation path.
   const buildLocalObject = useCallback(
     (
       floorPlanId: number,
@@ -305,16 +228,16 @@ export function CanvasEditorPage() {
       const floorPlan = floorPlanQuery.data;
       if (!floorPlan) return;
 
-      const newItem = buildLocalObject(floorPlan.id, type, {
-        x: point.x,
-        y: point.y,
-        width: 40,
-        height: 40,
-      });
-      createItemLocal(newItem);
-      persistence.createObject(newItem);
+      createItemLocal(
+        buildLocalObject(floorPlan.id, type, {
+          x: point.x,
+          y: point.y,
+          width: 40,
+          height: 40,
+        }),
+      );
     },
-    [floorPlanQuery.data, buildLocalObject, createItemLocal, persistence],
+    [floorPlanQuery.data, buildLocalObject, createItemLocal],
   );
 
   // U15: commits a click-drag-sized Shape. Resets `activeTool` back to
@@ -325,12 +248,10 @@ export function CanvasEditorPage() {
       const floorPlan = floorPlanQuery.data;
       if (!floorPlan) return;
 
-      const newItem = buildLocalObject(floorPlan.id, type, geometry);
-      createItemLocal(newItem);
-      persistence.createObject(newItem);
+      createItemLocal(buildLocalObject(floorPlan.id, type, geometry));
       setActiveTool("select");
     },
-    [floorPlanQuery.data, buildLocalObject, createItemLocal, setActiveTool, persistence],
+    [floorPlanQuery.data, buildLocalObject, createItemLocal, setActiveTool],
   );
 
   // U16: commits a finished (>= 2 points) click-per-point Line.
@@ -347,15 +268,15 @@ export function CanvasEditorPage() {
       if (!floorPlan) return;
 
       const bbox = computeLineBoundingBox(points);
-      const newItem = buildLocalObject(floorPlan.id, type, bbox, {
-        points,
-        curve_style: curveStyleForType(type),
-      });
-      createItemLocal(newItem);
-      persistence.createObject(newItem);
+      createItemLocal(
+        buildLocalObject(floorPlan.id, type, bbox, {
+          points,
+          curve_style: curveStyleForType(type),
+        }),
+      );
       setActiveTool("select");
     },
-    [floorPlanQuery.data, buildLocalObject, createItemLocal, setActiveTool, persistence],
+    [floorPlanQuery.data, buildLocalObject, createItemLocal, setActiveTool],
   );
 
   // U5/R14: a malformed route param or a 404 (nonexistent, or someone
@@ -379,8 +300,8 @@ export function CanvasEditorPage() {
   // `objectsQuery.isError` matters as much as the floor-plan errors: without
   // it, a failed objects fetch would fall through and render the editor with
   // whatever the module-global store still holds (possibly a previously
-  // opened plan's items) — and edits would then persist against THAT plan's
-  // object ids under this plan's header.
+  // opened plan's items) — and a save would then send THAT plan's objects
+  // under this plan's header.
   if (floorPlanQuery.isError || !floorPlanQuery.data || objectsQuery.isError) {
     return (
       <div role="alert">
@@ -398,7 +319,10 @@ export function CanvasEditorPage() {
         <div className="flex items-center gap-3">
           {/* U6/R13: the name label is inline-editable (click it, or the
               pencil button) — see FloorPlanNameEditor.tsx. */}
-          <FloorPlanNameEditor floorPlanId={floorPlan.id} name={floorPlan.name} />
+          <FloorPlanNameEditor
+            floorPlanId={floorPlan.id}
+            name={floorPlan.name}
+          />
           <span aria-hidden="true" className="h-4 w-px bg-border" />
           {/* Page navigation: "Home" is the floor-plan dashboard ("/" just
               redirects there, so link to it directly). */}
@@ -407,25 +331,44 @@ export function CanvasEditorPage() {
               to="/floor-plans"
               className="text-sm text-muted-foreground transition-colors hover:text-foreground"
               onClick={(event) => {
-                if (!confirmLeaveWhileSaving()) event.preventDefault();
+                if (!confirmLeaveWithUnsavedChanges()) event.preventDefault();
               }}
             >
               Home
             </Link>
           </nav>
-          {/* Save-state indicator: edits persist automatically, so this is
-              the user-visible "you have unsaved changes" signal while any
-              mutation is still in flight. */}
-          <span aria-live="polite" className="text-xs text-muted-foreground">
-            {isMutating ? "Saving…" : "All changes saved"}
-          </span>
+          {/* Save button doubling as the save-state indicator: canvas edits
+              stay local until the user explicitly saves (Ctrl+S works too),
+              so its label is the "you have unsaved changes" signal — Save
+              (unsaved) / Saving… (PUT in flight) / Saved (clean). */}
+          <Button
+            variant={dirty ? "default" : "ghost"}
+            size="sm"
+            aria-label="Save changes"
+            disabled={!dirty || isSaving}
+            onClick={handleSave}
+          >
+            {isSaving ? (
+              <>
+                <LoaderCircle className="animate-spin" /> Saving…
+              </>
+            ) : dirty ? (
+              <>
+                <Save /> Save
+              </>
+            ) : (
+              <>
+                <SaveCheck /> Saved
+              </>
+            )}
+          </Button>
         </div>
         <Button
           type="button"
           variant="outline"
           size="sm"
           onClick={() => {
-            if (confirmLeaveWhileSaving()) logout();
+            if (confirmLeaveWithUnsavedChanges()) logout();
           }}
         >
           Log out
@@ -435,7 +378,7 @@ export function CanvasEditorPage() {
       <Toolbar
         getStage={getStage}
         selectedItemId={selectedItemId}
-        onReorderZIndex={handleReorderZIndex}
+        onReorderZIndex={reorderZIndex}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -455,19 +398,19 @@ export function CanvasEditorPage() {
             objects={items}
             selectedItemId={selectedItemId}
             onSelectObject={selectItem}
-            onGeometryChange={handleGeometryChange}
+            onGeometryChange={updateItemGeometry}
             onDeleteSelected={handleDeleteSelected}
             activeTool={activeTool}
             onCreateShape={handleCreateShape}
             onCreateLine={handleCreateLine}
-            onLinePointDragEnd={handleLinePointDragEnd}
+            onLinePointDragEnd={updateLinePoints}
             zoom={zoom}
             stagePosition={stagePosition}
             onZoomChange={setZoomAndPosition}
             onPanEnd={setStagePosition}
           />
         </div>
-        <PropertyPanel onPersist={handlePropertiesPersist} />
+        <PropertyPanel />
       </div>
     </div>
   );

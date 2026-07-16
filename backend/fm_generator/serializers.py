@@ -107,6 +107,20 @@ class ObjectSerializer(serializers.ModelSerializer):
             })
 
 
+class SyncObjectSerializer(ObjectSerializer):
+    """ObjectSerializer variant for the bulk-sync endpoint
+    (PUT /api/floor-plans/<pk>/objects/). There the floor plan is resolved
+    from the URL through the user-scoped queryset and passed via
+    `serializer.save(floor_plan=plan)`, so `floor_plan` is read-only here:
+    any `floor_plan` value inside a payload item is ignored, which both
+    keeps the URL as the single source of truth and closes the
+    cross-plan-reassignment hole a writable field would reopen in this
+    flow. Output shape is unchanged (still the floor plan's pk).
+    """
+
+    floor_plan = serializers.PrimaryKeyRelatedField(read_only=True)
+
+
 class FloorPlanSerializer(serializers.ModelSerializer):
     class Meta:
         model = FloorPlan

@@ -1,7 +1,10 @@
 import { useRef, useState, type KeyboardEvent } from "react";
 import { Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { DEFAULT_FLOOR_PLAN_NAME, useRenameFloorPlan } from "../hooks/useFloorPlans";
+import {
+  DEFAULT_FLOOR_PLAN_NAME,
+  useRenameFloorPlan,
+} from "../hooks/useFloorPlans";
 
 interface FloorPlanNameEditorProps {
   floorPlanId: number;
@@ -23,7 +26,10 @@ interface FloorPlanNameEditorProps {
  * failure the label reverts (the cache was never touched) and
  * `useRenameFloorPlan` raises the error toast.
  */
-export function FloorPlanNameEditor({ floorPlanId, name }: FloorPlanNameEditorProps) {
+export function FloorPlanNameEditor({
+  floorPlanId,
+  name,
+}: FloorPlanNameEditorProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState("");
   // Guards double-commit: Enter commits AND unmounts the input, and the
@@ -82,7 +88,9 @@ export function FloorPlanNameEditor({ floorPlanId, name }: FloorPlanNameEditorPr
   // cache update made the NEW name on success, and left as the previous
   // name on failure (the revert).
   const displayName =
-    rename.isPending && rename.variables ? rename.variables.name : name || "Floor plan";
+    rename.isPending && rename.variables
+      ? rename.variables.name
+      : name || "Floor plan";
 
   return (
     <div className="flex items-center gap-1">

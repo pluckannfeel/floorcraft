@@ -272,143 +272,109 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
     expect(useCanvasStore.temporal.getState().futureStates).toHaveLength(0)
   })
 
-  it('undo does not bounce through the stale cache while its refetch is in flight (jitter regression)', async () => {
-    // Reproduces the visual "shake" on undo: the store shows the undone
-    // state instantly, the undo's PATCH settles (isMutating drops to 0)
-    // and invalidates — but the query cache still holds the PRE-undo
-    // snapshot until the refetch returns. An isMutating-only gate lets the
-    // resync effect fire in that window and briefly snap objects back to
-    // their pre-undo positions before the fresh data lands. The fix also
-    // gates on isFetching.
-    const initialObjects = [makeObject({ id: 701, floor_plan: 7, x: 200 })]
-    const movedObjects = [makeObject({ id: 701, floor_plan: 7, x: 300 })]
-    let releaseRefetch: ((value: { data: CanvasObject[] }) => void) | null = null
-
-    let objectsCall = 0
-    vi.spyOn(apiClient, 'get').mockImplementation(((url: string) => {
-      if (url === '/floor-plans/7/') {
-        return Promise.resolve({ data: makePlan({ id: 7, name: 'Jitter Plan' }) })
-      }
-      if (url === '/objects/') {
-        objectsCall += 1
-        if (objectsCall === 1) return Promise.resolve({ data: initialObjects })
-        if (objectsCall === 2) return Promise.resolve({ data: movedObjects })
-        // Third call: the post-undo refetch — held pending so the test can
-        // assert the store's state inside the stale-cache window.
-        return new Promise((resolve) => {
-          releaseRefetch = resolve
-        })
-      }
-      return Promise.reject(new Error(`Unexpected GET ${url}`))
-    }) as never)
-    const patchSpy = vi.spyOn(apiClient, 'patch').mockResolvedValue({
-      data: makeObject({ id: 701, floor_plan: 7, x: 200 }),
+  it('save flow: edit shows Save, saving PUTs, and undo STILL works after the save', async () => {
+    mockGetForPlans({
+      7: {
+        plan: makePlan({ id: 7, name: 'Savable Plan' }),
+        objects: [makeObject({ id: 701, floor_plan: 7, x: 200 })],
+      },
+    })
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: {
+        objects: [makeObject({ id: 701, floor_plan: 7, x: 300 })],
+        id_map: {},
+      },
     } as never)
 
-    const { queryClient } = renderEditor('/floor-plans/7')
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Savable Plan')).toBeInTheDocument()
+    // Clean after the initial seed.
+    expect(
+      await screen.findByRole('button', { name: /save changes/i }),
+    ).toHaveTextContent('Saved')
 
-    expect(await screen.findByText('Jitter Plan')).toBeInTheDocument()
-    await waitFor(() =>
-      expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 200 })),
-    )
-
-    // A tracked move (x: 200 → 300), then a resync that refreshes the
-    // cache to the moved state — mirroring the real flow where the move's
-    // own PATCH already invalidated and refetched.
+    // A local edit flips the indicator to an enabled "Save" — nothing has
+    // been sent to the backend (explicit-save model).
     act(() => {
       useCanvasStore.getState().updateItemGeometry(701, { x: 300 })
     })
-    await act(async () => {
-      await queryClient.invalidateQueries({ queryKey: ['objects', 7] })
-    })
-    await waitFor(() =>
-      expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 300 })),
-    )
+    const saveButton = screen.getByRole('button', { name: /save changes/i })
+    expect(saveButton).toHaveTextContent('Save')
+    expect(saveButton).toBeEnabled()
+    expect(putSpy).not.toHaveBeenCalled()
 
-    // Undo: the store snaps back to x=200 immediately and dispatches the
-    // PATCH persisting it.
+    // Saving PUTs the full items list to the sync endpoint.
+    const user = userEvent.setup()
+    await user.click(saveButton)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /save changes/i })).toHaveTextContent('Saved'),
+    )
+    expect(putSpy).toHaveBeenCalledTimes(1)
+    const [url, body] = putSpy.mock.calls[0] as [string, { objects: { id: unknown }[] }]
+    expect(url).toBe('/floor-plans/7/objects/')
+    expect(body.objects.map((o) => o.id)).toEqual([701])
+
+    // THE user-reported regression: undo must still work AFTER a save.
     act(() => {
       undo()
     })
-    expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 200 }))
-
-    // Wait until the PATCH settled and its invalidation kicked off the
-    // (held-pending) refetch — this is exactly the stale-cache window.
-    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
-    await waitFor(() => expect(releaseRefetch).not.toBeNull())
-    await act(async () => {})
-
-    // THE regression assertion: inside the window the store must still
-    // show the undone position, not the cache's stale pre-undo x=300.
-    expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 200 }))
-
-    // Releasing the refetch lands the fresh post-undo server state.
-    act(() => {
-      releaseRefetch!({ data: [makeObject({ id: 701, floor_plan: 7, x: 200 })] })
-    })
-    await waitFor(() =>
-      expect(useCanvasStore.getState().items[0]).toEqual(expect.objectContaining({ x: 200 })),
+    expect(useCanvasStore.getState().items[0]).toEqual(
+      expect.objectContaining({ id: 701, x: 200 }),
     )
+    // ...and the undone divergence is unsaved again.
+    expect(screen.getByRole('button', { name: /save changes/i })).toHaveTextContent('Save')
   })
 
-  it('warns about unsaved changes while a save is in flight, and guards leaving', async () => {
-    // A PATCH held pending keeps isMutating > 0 — the app's definition of
-    // "unsaved changes" (edits persist automatically in the background).
+  it('guards leaving with unsaved changes, and releases the guards after a save', async () => {
     mockGetForPlans({
       7: {
         plan: makePlan({ id: 7, name: 'Guarded Plan' }),
         objects: [makeObject({ id: 701, floor_plan: 7, x: 200 })],
       },
     })
-    let releasePatch: ((value: { data: CanvasObject }) => void) | null = null
-    vi.spyOn(apiClient, 'patch').mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          releasePatch = resolve
-        }) as never,
-    )
+    vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: {
+        objects: [makeObject({ id: 701, floor_plan: 7, x: 300 })],
+        id_map: {},
+      },
+    } as never)
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
 
     renderEditor('/floor-plans/7')
     expect(await screen.findByText('Guarded Plan')).toBeInTheDocument()
-    expect(screen.getByText('All changes saved')).toBeInTheDocument()
 
-    // A tracked move + undo dispatches a PATCH that stays in flight.
+    // Clean: no guard fires.
+    const cleanUnload = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(cleanUnload)
+    expect(cleanUnload.defaultPrevented).toBe(false)
+
+    // Unsaved local edit -> every exit is guarded.
     act(() => {
       useCanvasStore.getState().updateItemGeometry(701, { x: 300 })
     })
-    act(() => {
-      undo()
-    })
-    expect(await screen.findByText('Saving…')).toBeInTheDocument()
 
-    // Browser-level exit (close/reload): beforeunload is prevented.
     const unloadEvent = new Event('beforeunload', { cancelable: true })
     window.dispatchEvent(unloadEvent)
     expect(unloadEvent.defaultPrevented).toBe(true)
 
-    // In-app exit via Home: declining the confirm stays on the editor.
     const user = userEvent.setup()
     await user.click(screen.getByRole('link', { name: 'Home' }))
     expect(confirmSpy).toHaveBeenCalled()
     expect(screen.queryByText('Dashboard Placeholder')).not.toBeInTheDocument()
 
-    // Logout is guarded the same way.
     await user.click(screen.getByRole('button', { name: /log out/i }))
     expect(logout).not.toHaveBeenCalled()
 
-    // Once the save settles, the warning state clears entirely...
-    act(() => {
-      releasePatch!({ data: makeObject({ id: 701, floor_plan: 7, x: 200 }) })
-    })
-    expect(await screen.findByText('All changes saved')).toBeInTheDocument()
+    // Saving clears the divergence and releases every guard.
+    await user.click(screen.getByRole('button', { name: /save changes/i }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /save changes/i })).toHaveTextContent('Saved'),
+    )
 
-    // ...beforeunload no longer warns...
     const quietUnload = new Event('beforeunload', { cancelable: true })
     window.dispatchEvent(quietUnload)
     expect(quietUnload.defaultPrevented).toBe(false)
 
-    // ...and Home navigates without any confirm.
     confirmSpy.mockClear()
     await user.click(screen.getByRole('link', { name: 'Home' }))
     expect(confirmSpy).not.toHaveBeenCalled()
