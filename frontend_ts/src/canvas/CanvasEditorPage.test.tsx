@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
@@ -104,7 +105,10 @@ const navigateRef: { current: ReturnType<typeof useNavigate> | null } = {
 }
 
 function CaptureNavigate() {
-  navigateRef.current = useNavigate()
+  const navigate = useNavigate()
+  useEffect(() => {
+    navigateRef.current = navigate
+  }, [navigate])
   return null
 }
 
