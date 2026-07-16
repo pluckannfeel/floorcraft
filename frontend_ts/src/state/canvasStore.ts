@@ -24,8 +24,11 @@ export type ActiveTool = 'select' | ShapeType | LineType
  * the backend per action. The canvas diverges locally from the last
  * server-confirmed state, tracked by the `dirty` flag, until the user
  * explicitly saves (Save button / Ctrl+S -> `useSaveObjects` in
- * `hooks/useObjects.ts`), which PUTs the full `items` list and re-baselines
- * the store from the server's canonical response via `setItems`.
+ * `hooks/useObjects.ts`), which PUTs the full `items` list with ids
+ * translated through `serverIdMap`. A successful save deliberately does
+ * NOT touch `items` or the undo history — it only merges the response's
+ * id_map and clears `dirty` — so undo/redo stays valid across saves
+ * (see docs/solutions/ui-bugs/undo-redo-broken-after-save-2026-07-16.md).
  *
  * Undo/redo design notes (U9):
  * - `zundo`'s `partialize` returns only `{ items }`, so `undo()`/`redo()`
@@ -232,9 +235,10 @@ export interface CanvasState {
   ) => void
 
   /** Clears the `dirty` flag — the canvas now matches the last
-   * server-confirmed state. (A successful save clears it via `setItems`
-   * re-baselining from the response; this standalone action exists for
-   * callers/tests that need to reset the flag without replacing `items`.) */
+   * server-confirmed state. This IS the save path's flag reset:
+   * `useSaveObjects`' onSuccess calls it (gated on `items` being
+   * unchanged since dispatch) precisely because a save must never call
+   * `setItems`/clear history — see the class doc above. */
   markSaved: () => void
 
   /** Sets the active drawing tool (U15/U16). Untracked by undo. */
