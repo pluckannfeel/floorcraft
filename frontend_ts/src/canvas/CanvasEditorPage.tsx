@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
+import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import type { AxiosError } from "axios";
 import type Konva from "konva";
 import { apiClient } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
@@ -20,39 +22,64 @@ import type {
   Point,
   ShapeType,
 } from "./types";
-import { DEFAULT_FLOOR_PLAN_ID, isLocalId } from "./types";
+import { isLocalId } from "./types";
+
+/** True when a floor-plan fetch failed because the backend answered 404 —
+ * per U2's per-user queryset scoping, a nonexistent id and someone else's
+ * floor plan are deliberately indistinguishable (R14). */
+function isNotFoundError(error: unknown): boolean {
+  return (error as AxiosError | null | undefined)?.response?.status === 404;
+}
 
 /**
- * Top-level canvas editor route (mounted at "/" behind `RequireAuth`,
- * R8/U5). Fetches `FloorPlan` id=1 (the only FloorPlan row — no
- * floor-plan selector per confirmed scope) and its Objects, then composes
- * the Konva stage and the catalog sidebar.
- *
- * Property panel and toolbar (undo/redo, zoom, drawing tools, z-order) are
- * later units (U8-U18) — this unit only needs the shell structure they'll
- * slot into.
+ * Canvas editor for one floor plan, mounted at "/floor-plans/:floorPlanId"
+ * behind `RequireAuth` (U5). Fetches the route's `FloorPlan` and its
+ * Objects, then composes the Konva stage and the catalog sidebar. A
+ * nonexistent or foreign-owned id (the backend 404s both identically, R14),
+ * or a malformed one, renders a not-found state linking back to the
+ * dashboard instead of the editor.
  */
 export function CanvasEditorPage() {
   const { logout } = useAuth();
   const stageRef = useRef<Konva.Stage | null>(null);
 
+  // U5: the editor is route-driven. A malformed (`NaN` after `Number(...)`)
+  // or non-positive param can never match a backend row, so it's treated
+  // exactly like a 404 below — without ever firing a request for it (both
+  // queries are `enabled`-gated on validity).
+  const { floorPlanId: floorPlanIdParam } = useParams<{
+    floorPlanId: string;
+  }>();
+  const floorPlanId = Number(floorPlanIdParam);
+  const isValidFloorPlanId = Number.isInteger(floorPlanId) && floorPlanId > 0;
+
   const floorPlanQuery = useQuery({
-    queryKey: ["floorPlan", DEFAULT_FLOOR_PLAN_ID],
+    queryKey: ["floorPlan", floorPlanId],
     queryFn: async () => {
       const { data } = await apiClient.get<FloorPlan>(
-        `/floor-plans/${DEFAULT_FLOOR_PLAN_ID}/`,
+        `/floor-plans/${floorPlanId}/`,
       );
       return data;
     },
+    enabled: isValidFloorPlanId,
+    // A 404 is a definitive answer (not yours / doesn't exist, R14), not a
+    // transient failure — retrying it would just loop before the not-found
+    // state below renders. Other failures keep a small retry budget.
+    retry: (failureCount, error) =>
+      !isNotFoundError(error) && failureCount < 2,
   });
 
-  const objectsQuery = useObjects(DEFAULT_FLOOR_PLAN_ID);
+  const objectsQuery = useObjects(floorPlanId);
   // U13: the single persistence handle every create/update/delete below
   // dispatches through — also the thing that gets registered as
   // `canvasStore.ts`'s module-level dispatcher for undo/redo (see
   // `useObjects.ts`'s `useObjectPersistence` doc comment).
-  const persistence = useObjectPersistence(DEFAULT_FLOOR_PLAN_ID);
-  const isMutating = useIsObjectsMutating(DEFAULT_FLOOR_PLAN_ID);
+  const persistence = useObjectPersistence(floorPlanId);
+  // Keyed to the CURRENT route's floorPlanId (institutional learning:
+  // tanstack-query-cross-mutation-resync-flicker) — navigating between two
+  // plans must not let one plan's settling mutation gate (or clobber) the
+  // other plan's resync.
+  const isMutating = useIsObjectsMutating(floorPlanId);
 
   const items = useCanvasStore((state) => state.items);
   const selectedItemId = useCanvasStore((state) => state.selectedItemId);
@@ -165,6 +192,17 @@ export function CanvasEditorPage() {
     [persistence],
   );
 
+  // U5: the zustand canvasStore — including its zundo undo/redo history —
+  // is module-global, while this editor renders one floor plan at a time.
+  // `items` themselves are replaced by the resync effect below once the new
+  // plan's objects load (untracked via temporal.pause/resume), but zundo's
+  // past/future stacks would otherwise survive a plan switch, letting plan
+  // A's undo history apply onto plan B's canvas. Clearing keyed on the
+  // route's floorPlanId guarantees each plan starts with a fresh history.
+  useEffect(() => {
+    useCanvasStore.temporal.getState().clear();
+  }, [floorPlanId]);
+
   // Seed the store from the fetched Objects once they load. Later fetches
   // (e.g. a refetch) also resync — U13 layers real mutations on top without
   // changing this initial-load behavior.
@@ -275,12 +313,31 @@ export function CanvasEditorPage() {
     [floorPlanQuery.data, buildLocalObject, createItemLocal, setActiveTool, persistence],
   );
 
+  // U5/R14: a malformed route param or a 404 (nonexistent, or someone
+  // else's plan — the backend deliberately doesn't distinguish) renders a
+  // not-found state with a way back, rather than crashing or retry-looping.
+  // Checked before the loading branch: a foreign plan's objects query can
+  // still be in flight while the floor-plan 404 is already definitive.
+  if (!isValidFloorPlanId || isNotFoundError(floorPlanQuery.error)) {
+    return (
+      <div role="alert">
+        <p>Floor plan not found.</p>
+        <Link to="/floor-plans">Back to dashboard</Link>
+      </div>
+    );
+  }
+
   if (floorPlanQuery.isLoading || objectsQuery.isLoading) {
     return <div role="status">Loading floor plan…</div>;
   }
 
   if (floorPlanQuery.isError || !floorPlanQuery.data) {
-    return <div role="alert">Unable to load the floor plan.</div>;
+    return (
+      <div role="alert">
+        <p>Unable to load the floor plan.</p>
+        <Link to="/floor-plans">Back to dashboard</Link>
+      </div>
+    );
   }
 
   const floorPlan = floorPlanQuery.data;

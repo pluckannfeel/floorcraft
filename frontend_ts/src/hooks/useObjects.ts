@@ -5,7 +5,6 @@ import { apiClient } from '../api/client'
 import { registerPersistenceDispatcher } from '../state/canvasStore'
 import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject } from '../canvas/types'
-import { DEFAULT_FLOOR_PLAN_ID } from '../canvas/types'
 import { useToast } from '../notifications/ToastContext'
 
 /**
@@ -17,7 +16,7 @@ import { useToast } from '../notifications/ToastContext'
  * uses for its `onSettled` invalidation — this is the plan's single shared
  * cache key across all mutation types (Key Technical Decisions).
  */
-export function useObjects(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID) {
+export function useObjects(floorPlanId: number) {
   return useQuery({
     queryKey: ['objects', floorPlanId],
     queryFn: async () => {
@@ -26,6 +25,11 @@ export function useObjects(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID) {
       })
       return data
     },
+    // U5: `floorPlanId` comes from the `/floor-plans/:floorPlanId` route
+    // param. A malformed param (`NaN` after `Number(...)`) or non-positive
+    // id can never match a backend row — don't fire a garbage request for
+    // it (`CanvasEditorPage` renders its not-found state instead).
+    enabled: Number.isInteger(floorPlanId) && floorPlanId > 0,
   })
 }
 
@@ -149,7 +153,7 @@ export interface DeleteObjectVariables {
  * precedence over R17's generic revert-and-toast, per Key Technical
  * Decisions).
  */
-export function useCreateObject(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID) {
+export function useCreateObject(floorPlanId: number) {
   const queryClient = useQueryClient()
   const { showError } = useToast()
 
@@ -191,7 +195,7 @@ export function useCreateObject(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID) {
  * single item rather than the whole list. Same 401/403-defers-to-interceptor
  * handling as `useCreateObject` above.
  */
-export function useUpdateObject(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID) {
+export function useUpdateObject(floorPlanId: number) {
   const queryClient = useQueryClient()
   const { showError } = useToast()
 
@@ -220,7 +224,7 @@ export function useUpdateObject(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID) {
  * `onError` re-adds the removed item via `restoreItemUntracked` (same
  * per-item scoping rationale as `useUpdateObject`). Same 401/403 handling.
  */
-export function useDeleteObject(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID) {
+export function useDeleteObject(floorPlanId: number) {
   const queryClient = useQueryClient()
   const { showError } = useToast()
 
@@ -262,7 +266,7 @@ export interface ObjectPersistence {
  * source of truth for "how do I persist a change," used identically by
  * direct user interactions and by undo/redo.
  */
-export function useObjectPersistence(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID): ObjectPersistence {
+export function useObjectPersistence(floorPlanId: number): ObjectPersistence {
   const createMutation = useCreateObject(floorPlanId)
   const updateMutation = useUpdateObject(floorPlanId)
   const deleteMutation = useDeleteObject(floorPlanId)
@@ -308,6 +312,6 @@ export function useObjectPersistence(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID
  * the eventual resync always reflects a moment where every optimistic
  * change already has a settled outcome.
  */
-export function useIsObjectsMutating(floorPlanId: number = DEFAULT_FLOOR_PLAN_ID): boolean {
+export function useIsObjectsMutating(floorPlanId: number): boolean {
   return useIsMutating({ mutationKey: ['objects', floorPlanId] }) > 0
 }

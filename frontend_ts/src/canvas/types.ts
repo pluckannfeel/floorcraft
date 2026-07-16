@@ -61,10 +61,6 @@ export interface Point {
   y: number
 }
 
-/** Currently the only `FloorPlan` row in the system (confirmed scope: no
- * floor-plan selector). */
-export const DEFAULT_FLOOR_PLAN_ID = 1
-
 /**
  * U13: true for a client-side-only id assigned to a not-yet-persisted item
  * (`local-${crypto.randomUUID()}`, see `CanvasEditorPage.tsx`'s create

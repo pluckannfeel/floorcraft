@@ -308,8 +308,9 @@ export interface CanvasState {
    * floor plan's stacking order by setting its `z_index` to one above the
    * current max, or one below the current min, among ALL of this store's
    * `items` (siblings on the same FloorPlan — this store never holds more
-   * than one FloorPlan's items at a time, per `DEFAULT_FLOOR_PLAN_ID`'s "no
-   * floor-plan selector" scope, so no extra `floor_plan` filtering is
+   * than one FloorPlan's items at a time: the `/floor-plans/:floorPlanId`
+   * editor route renders a single plan and `setItems` replaces the store
+   * wholesale on a plan switch, so no extra `floor_plan` filtering is
    * needed here). Mirrors `handleDrop`/`handleCreateShape`/`handleCreateLine`
    * in `CanvasEditorPage.tsx`, which already compute a new item's initial
    * `z_index` the same "one past the current max" way.
