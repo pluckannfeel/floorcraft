@@ -63,6 +63,7 @@ beforeEach(() => {
     items: [],
     selectedItemIds: [],
     activeTool: 'select',
+    canvasSize: null,
     dirty: false,
     serverIdMap: {},
   })
@@ -391,6 +392,150 @@ describe('useSaveObjects', () => {
       objects: Record<string, unknown>[]
     }
     expect(secondBody.objects.map((o) => o.id)).toEqual([10, 55])
+  })
+
+  it('always sends the store dims as `canvas` alongside the objects, and merges them into the floorPlan cache on success (U8)', async () => {
+    // Seeded (then cropped) dims: the PUT must carry them whether or not a
+    // crop happened this session — always-send is the plan's decision.
+    useCanvasStore.getState().setItems([makeObject({ id: 10 })], { width: 1600, height: 1200 })
+    act(() => {
+      useCanvasStore.getState().applyCrop({ x: 100, y: 100, width: 800, height: 600 })
+    })
+    queryClient.setQueryData(['floorPlan', 7], {
+      id: 7,
+      name: 'Croppable',
+      grid_size: 20,
+      canvas_width: 1600,
+      canvas_height: 1200,
+    })
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: { objects: [], id_map: {} },
+    } as never)
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const body = putSpy.mock.calls[0][1] as {
+      objects: Record<string, unknown>[]
+      canvas?: { width: number; height: number }
+    }
+    // One PUT carries objects (shifted: the object sat at the origin, the
+    // crop origin was (100, 100)) AND the cropped dims.
+    expect(body.canvas).toEqual({ width: 800, height: 600 })
+    expect(body.objects[0]).toMatchObject({ x: -100, y: -100 })
+    // Dirty cleared (nothing changed mid-flight) and the floorPlan cache
+    // now mirrors the persisted dims (merged, other fields kept).
+    expect(useCanvasStore.getState().dirty).toBe(false)
+    expect(queryClient.getQueryData(['floorPlan', 7])).toEqual({
+      id: 7,
+      name: 'Croppable',
+      grid_size: 20,
+      canvas_width: 800,
+      canvas_height: 600,
+    })
+  })
+
+  it('omits the canvas field when canvasSize is null (pre-seed edge), and leaves the floorPlan cache alone', async () => {
+    useCanvasStore.setState({ items: [makeObject({ id: 10 })], dirty: true })
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: { objects: [], id_map: {} },
+    } as never)
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const body = putSpy.mock.calls[0][1] as Record<string, unknown>
+    expect(body).not.toHaveProperty('canvas')
+    expect(queryClient.getQueryData(['floorPlan', 7])).toBeUndefined()
+  })
+
+  it('crop → save → undo → save restores the original dims server-side (the second PUT carries the pre-crop dims) (U8)', async () => {
+    useCanvasStore.getState().setItems(
+      [makeObject({ id: 10, x: 300, y: 250 })],
+      { width: 1600, height: 1200 },
+    )
+    act(() => {
+      useCanvasStore.getState().applyCrop({ x: 200, y: 200, width: 800, height: 600 })
+    })
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: { objects: [makeObject({ id: 10, x: 100, y: 50 })], id_map: {} },
+    } as never)
+
+    // Save #1 persists the crop.
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const firstBody = putSpy.mock.calls[0][1] as {
+      objects: Record<string, unknown>[]
+      canvas?: { width: number; height: number }
+    }
+    expect(firstBody.canvas).toEqual({ width: 800, height: 600 })
+    expect(firstBody.objects[0]).toMatchObject({ x: 100, y: 50 })
+    expect(useCanvasStore.getState().dirty).toBe(false)
+
+    // Undo AFTER the save: ONE step restores dims and coordinates, and the
+    // divergence re-dirties the canvas.
+    act(() => undo())
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 1600, height: 1200 })
+    expect(useCanvasStore.getState().items[0]).toMatchObject({ x: 300, y: 250 })
+    expect(useCanvasStore.getState().dirty).toBe(true)
+
+    // Save #2: the chain of truth holds — the PUT carries the RESTORED
+    // dims (and coordinates), so the server returns to the pre-crop state.
+    act(() => result.current.mutate())
+    await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(2))
+    const secondBody = putSpy.mock.calls[1][1] as {
+      objects: Record<string, unknown>[]
+      canvas?: { width: number; height: number }
+    }
+    expect(secondBody.canvas).toEqual({ width: 1600, height: 1200 })
+    expect(secondBody.objects[0]).toMatchObject({ x: 300, y: 250 })
+  })
+
+  it('keeps dirty set when a crop landed while the PUT was in flight (sentCanvasSize gating), while the cache gets the SENT dims (U8)', async () => {
+    useCanvasStore.getState().setItems([makeObject({ id: 10 })], { width: 1600, height: 1200 })
+    useCanvasStore.setState({ dirty: true })
+    queryClient.setQueryData(['floorPlan', 7], {
+      id: 7,
+      name: 'Racy',
+      grid_size: 20,
+      canvas_width: 1600,
+      canvas_height: 1200,
+    })
+    let releasePut: ((value: unknown) => void) | null = null
+    vi.spyOn(apiClient, 'put').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releasePut = resolve
+        }) as never,
+    )
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(releasePut).not.toBeNull())
+
+    // Mid-flight crop: replaces BOTH tracked refs — but even a dims-only
+    // divergence must block markSaved, so change ONLY canvasSize here (the
+    // items reference stays identical to what was sent).
+    act(() => {
+      useCanvasStore.setState({ canvasSize: { width: 500, height: 400 }, dirty: true })
+    })
+
+    act(() => {
+      releasePut!({ data: { objects: [], id_map: {} } })
+    })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    // The in-flight save covered the OLD dims only: still dirty...
+    expect(useCanvasStore.getState().dirty).toBe(true)
+    // ...and the floorPlan cache reflects what the server actually
+    // persisted (the sent 1600x1200), not the unsaved mid-flight crop.
+    expect(queryClient.getQueryData(['floorPlan', 7])).toMatchObject({
+      canvas_width: 1600,
+      canvas_height: 1200,
+    })
   })
 
   it('keeps dirty set when the user edited while the PUT was in flight', async () => {

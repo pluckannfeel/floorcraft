@@ -8,6 +8,22 @@ from .models import FloorPlan, Objects
 from .serializers import FloorPlanSerializer, ObjectSerializer, SyncObjectSerializer
 
 
+def _validate_canvas(canvas):
+    """Validates sync_objects' optional `canvas` value (U8 crop): must be an
+    object carrying positive-integer `width` and `height`. Returns an error
+    message, or None when valid. Booleans are explicitly rejected (Python
+    bools pass isinstance(int) checks), matching the id-matching rule's
+    bool guard.
+    """
+    if not isinstance(canvas, dict):
+        return 'Expected an object of the form {"width": <int>, "height": <int>}.'
+    for key in ('width', 'height'):
+        value = canvas.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            return f"'{key}' must be a positive integer."
+    return None
+
+
 class FloorPlanViewSet(viewsets.ModelViewSet):
     queryset = FloorPlan.objects.all()
     serializer_class = FloorPlanSerializer
@@ -35,10 +51,21 @@ class FloorPlanViewSet(viewsets.ModelViewSet):
             mutate a foreign row;
           - existing objects absent from the payload -> deleted.
 
+        U8 (canvas-tools crop): the payload may also carry an OPTIONAL
+        `canvas: {"width": <int>, "height": <int>}` -- the plan's canvas
+        dimensions, applied to the FloorPlan row inside the SAME
+        transaction as the object writes, so a crop's dims and its shifted
+        coordinates persist atomically (or not at all). Positive integers
+        only; anything else is a per-request 400 with nothing applied.
+        Objects-only payloads (no `canvas` key) remain valid -- the field
+        exists for backward compatibility, the current frontend always
+        sends it.
+
         All items are validated up front (no writes yet); any per-item
         error returns 400 with errors aligned to the payload's indexes and
         persists nothing. The writes themselves run inside one
-        transaction.atomic(). Responds 200 with:
+        transaction.atomic(). Responds 200 (shape unchanged by `canvas`)
+        with:
           {"objects": [...], "id_map": {"<sent id>": <created id>, ...}}
         where "objects" is the plan's canonical object list ordered by
         (z_index, id) (item shape identical to
@@ -58,6 +85,18 @@ class FloorPlanViewSet(viewsets.ModelViewSet):
                 {'objects': ['Expected a payload of the form {"objects": [...]}.']},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # U8: optional canvas dims -- validated up front like the items, so
+        # a malformed `canvas` 400s before anything (objects included) is
+        # written. `None` (key absent) skips the dims update entirely.
+        canvas = request.data.get('canvas')
+        if canvas is not None:
+            canvas_error = _validate_canvas(canvas)
+            if canvas_error is not None:
+                return Response(
+                    {'canvas': [canvas_error]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         existing = {obj.id: obj for obj in plan.items.all()}
         context = self.get_serializer_context()
@@ -91,6 +130,14 @@ class FloorPlanViewSet(viewsets.ModelViewSet):
 
         id_map = {}
         with transaction.atomic():
+            # U8: dims and objects persist in the SAME transaction -- a
+            # crop's canvas resize can never land without its shifted
+            # coordinates (or vice versa). `updated_at` is auto_now, which
+            # only refreshes when named in update_fields.
+            if canvas is not None:
+                plan.canvas_width = canvas['width']
+                plan.canvas_height = canvas['height']
+                plan.save(update_fields=['canvas_width', 'canvas_height', 'updated_at'])
             keep_ids = [s.instance.id for s in item_serializers if s.instance is not None]
             plan.items.exclude(id__in=keep_ids).delete()
             for serializer, sent_id in zip(item_serializers, sent_ids):

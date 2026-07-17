@@ -23,6 +23,9 @@ interface SidebarProps {
    * computed against its current transform (zoom/pan-aware). */
   getStage: () => Konva.Stage | null
   gridSize: number
+  /** U8 (canvas-tools): fed from the STORE's live `canvasSize` (not the
+   * floor-plan query) so drops clamp against the possibly-cropped canvas
+   * the user is actually looking at. */
   canvasWidth: number
   canvasHeight: number
   /** Called with the catalog type and the snapped/clamped stage-space drop

@@ -28,6 +28,7 @@ import {
 import type { ClipboardPayload } from "./clipboard";
 import { ContextMenu, resolveContextMenuAvailability } from "./ContextMenu";
 import { clampToBounds, snapToGrid } from "./coordinates";
+import type { BoundingBox } from "./coordinates";
 import { FloorPlanNameEditor } from "./FloorPlanNameEditor";
 import { computeLineBoundingBox, curveStyleForType } from "./LineTool";
 import { PropertyPanel } from "./PropertyPanel";
@@ -111,10 +112,18 @@ export function CanvasEditorPage() {
   const items = useCanvasStore((state) => state.items);
   const selectedItemIds = useCanvasStore((state) => state.selectedItemIds);
   const activeTool = useCanvasStore((state) => state.activeTool);
+  // U8: the LIVE canvas dims — seeded once per plan from the floor-plan
+  // query, then owned by the store (a crop replaces them locally until an
+  // explicit Save). Every dims consumer below (CanvasStage, Sidebar, the
+  // text-tool clamp) reads THIS, never the query, so an unsaved crop is
+  // what the editor actually shows. `null` until the seed effect runs — the
+  // loading gate below holds the editor back until then.
+  const canvasSize = useCanvasStore((state) => state.canvasSize);
   const zoom = useCanvasStore((state) => state.zoom);
   const stagePosition = useCanvasStore((state) => state.stagePosition);
   const dirty = useCanvasStore((state) => state.dirty);
   const setItems = useCanvasStore((state) => state.setItems);
+  const applyCrop = useCanvasStore((state) => state.applyCrop);
   const createItemLocal = useCanvasStore((state) => state.createItemLocal);
   // U5: the batched paste commit — one tracked set() per paste, one undo
   // entry however many items the clipboard held.
@@ -383,8 +392,11 @@ export function CanvasEditorPage() {
   const seededForPlanRef = useRef<number | null>(null);
   useEffect(() => {
     const store = useCanvasStore.getState();
+    // U8: setItems([]) also resets `canvasSize` to null (its omitted second
+    // argument), so an UNSAVED crop's dims can't leak into the next plan —
+    // the editor re-gates on the loading branch until the new plan seeds.
     store.setItems([]); // pauses/resumes zundo internally; clears dirty
-    store.clearSelection(); // untracked (partialize covers items only)
+    store.clearSelection(); // untracked (partialize covers items/canvasSize only)
     store.resetZoom(); // untracked
     useCanvasStore.temporal.getState().clear();
     // Forget which plan was seeded, too: without this, a same-mount
@@ -404,15 +416,27 @@ export function CanvasEditorPage() {
   // unsaved local edits, and the post-save `setQueryData` must not trigger
   // a re-baseline either (setItems would reset `serverIdMap` and swap item
   // ids out from under the undo history, breaking undo/redo after a save).
+  //
+  // U8: the seed now spans TWO queries — items from objectsQuery, canvas
+  // dims from floorPlanQuery — so it gates on BOTH having data before the
+  // single `setItems(items, canvasSize)` call (one seed, both tracked
+  // references stamped inside the same paused bracket). The post-save
+  // `['floorPlan', id]` cache dims update can't re-fire this either: same
+  // seed-once ref guard.
   useEffect(() => {
+    const floorPlan = floorPlanQuery.data;
     if (
       objectsQuery.data &&
+      floorPlan &&
       seededForPlanRef.current !== floorPlanId
     ) {
       seededForPlanRef.current = floorPlanId;
-      setItems(objectsQuery.data);
+      setItems(objectsQuery.data, {
+        width: floorPlan.canvas_width,
+        height: floorPlan.canvas_height,
+      });
     }
-  }, [objectsQuery.data, floorPlanId, setItems]);
+  }, [objectsQuery.data, floorPlanQuery.data, floorPlanId, setItems]);
 
   // Leave guards: closing/reloading the tab with unsaved changes (or while
   // the save PUT is still in flight) would lose them — surface the
@@ -540,13 +564,18 @@ export function CanvasEditorPage() {
     (point: Point) => {
       const floorPlan = floorPlanQuery.data;
       if (!floorPlan) return;
+      // U8: clamp against the STORE dims (the live, possibly-cropped
+      // canvas), not the query's — read at call time so the handler stays
+      // referentially stable across crops.
+      const liveCanvasSize = useCanvasStore.getState().canvasSize;
+      if (!liveCanvasSize) return;
 
       const snapped = clampToBounds(
         snapToGrid(point, floorPlan.grid_size),
         0,
         0,
-        floorPlan.canvas_width,
-        floorPlan.canvas_height,
+        liveCanvasSize.width,
+        liveCanvasSize.height,
       );
       const size = measureTextBox("", DEFAULT_TEXT_STYLING);
       const draft = buildLocalObject(
@@ -613,6 +642,19 @@ export function CanvasEditorPage() {
   // re-edits keep their previous content.
   const handleTextEditCancel = useCallback(() => setTextEditor(null), []);
 
+  // U8: a confirmed crop region. ONE tracked store action (applyCrop
+  // replaces the shifted items array AND canvasSize together — a single
+  // undo restores both), then back to the select tool, matching the
+  // one-shot convention of the shape/line tools. Nothing persists here:
+  // the cropped dims ride the next explicit Save's PUT.
+  const handleApplyCrop = useCallback(
+    (region: BoundingBox) => {
+      applyCrop(region);
+      setActiveTool("select");
+    },
+    [applyCrop, setActiveTool],
+  );
+
   // U5/R14: a malformed route param or a 404 (nonexistent, or someone
   // else's plan — the backend deliberately doesn't distinguish) renders a
   // not-found state with a way back, rather than crashing or retry-looping.
@@ -661,6 +703,14 @@ export function CanvasEditorPage() {
         </Link>
       </div>
     );
+  }
+
+  // U8: the stage renders from the STORE's dims, which only exist once the
+  // seed-once effect has run (it fires right after the render that had both
+  // queries' data, so this state is a single-frame gate in practice — and
+  // the plan-switch reset re-arms it so a stale plan's dims never flash).
+  if (!canvasSize) {
+    return <div role="status">Loading floor plan…</div>;
   }
 
   const floorPlan = floorPlanQuery.data;
@@ -736,18 +786,22 @@ export function CanvasEditorPage() {
       />
 
       <div className="flex flex-1 overflow-hidden">
+        {/* U8: canvas dims come from the STORE (live, crop-aware) — only
+            grid_size still reads from the floor-plan query (crop doesn't
+            touch it). The query dims' sole remaining job is the initial
+            seed. */}
         <Sidebar
           getStage={getStage}
           gridSize={floorPlan.grid_size}
-          canvasWidth={floorPlan.canvas_width}
-          canvasHeight={floorPlan.canvas_height}
+          canvasWidth={canvasSize.width}
+          canvasHeight={canvasSize.height}
           onDrop={handleDrop}
         />
         <div className="flex-1 overflow-auto p-4">
           <CanvasStage
             ref={stageRef}
-            width={floorPlan.canvas_width}
-            height={floorPlan.canvas_height}
+            width={canvasSize.width}
+            height={canvasSize.height}
             gridSize={floorPlan.grid_size}
             objects={items}
             selectedItemIds={selectedItemIds}
@@ -772,6 +826,7 @@ export function CanvasEditorPage() {
             editingItemId={
               activeTextEditor?.mode === "edit" ? activeTextEditor.itemId : null
             }
+            onApplyCrop={handleApplyCrop}
           />
         </div>
         <PropertyPanel />

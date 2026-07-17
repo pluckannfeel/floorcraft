@@ -29,10 +29,19 @@ import { CanvasEditorPage } from './CanvasEditorPage'
  * limitation ShapeTool.test.tsx / SelectionTransformer.test.tsx document —
  * no test in this codebase mounts a Konva component). Everything else the
  * page composes (Toolbar/Sidebar/PropertyPanel, the queries, the store
- * seeding, the route-state branches) is real and exercised here.
+ * seeding, the route-state branches) is real and exercised here. The stub
+ * records the props it last received (U8) so the page's Stage wiring —
+ * e.g. `onApplyCrop`, and that width/height come from the STORE dims —
+ * can be asserted/driven without mounting Konva.
  */
+const canvasStageProps = vi.hoisted(() => ({
+  current: null as Record<string, unknown> | null,
+}))
 vi.mock('./CanvasStage', () => ({
-  CanvasStage: () => <div data-testid="canvas-stage" />,
+  CanvasStage: (props: Record<string, unknown>) => {
+    canvasStageProps.current = props
+    return <div data-testid="canvas-stage" />
+  },
 }))
 
 function makePlan(overrides: Partial<FloorPlan> = {}): FloorPlan {
@@ -136,9 +145,16 @@ function renderEditor(initialPath: string) {
 const logout = vi.fn()
 
 beforeEach(() => {
-  useCanvasStore.setState({ items: [], selectedItemIds: [], activeTool: 'select' })
+  useCanvasStore.setState({
+    items: [],
+    selectedItemIds: [],
+    activeTool: 'select',
+    canvasSize: null,
+    dirty: false,
+  })
   useCanvasStore.temporal.getState().clear()
   navigateRef.current = null
+  canvasStageProps.current = null
   logout.mockClear()
   vi.spyOn(AuthContextModule, 'useAuth').mockReturnValue({
     user: { id: 1, email: 'ada@example.com' },
@@ -232,7 +248,8 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
         objects: [makeObject({ id: 101, floor_plan: 1 })],
       },
       2: {
-        plan: makePlan({ id: 2, name: 'Plan B' }),
+        // Distinct dims so a leaked plan-A crop (below) would be visible.
+        plan: makePlan({ id: 2, name: 'Plan B', canvas_width: 900, canvas_height: 700 }),
         objects: [makeObject({ id: 202, floor_plan: 2, x: 77 })],
       },
     })
@@ -245,15 +262,19 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
         expect.objectContaining({ id: 101, floor_plan: 1 }),
       ]),
     )
+    // U8: the seed stamped plan A's dims into the store.
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 1600, height: 1200 })
 
     // A tracked user action on plan A pushes a real undo history entry,
-    // and a selection (U1: a selection SET) exists on plan A.
+    // a selection (U1: a selection SET) exists on plan A, and an UNSAVED
+    // crop (U8) has replaced the store dims.
     act(() => {
       useCanvasStore.getState().updateItemGeometry(101, { x: 500 })
       useCanvasStore.getState().replaceSelection([101])
+      useCanvasStore.getState().applyCrop({ x: 100, y: 100, width: 400, height: 300 })
     })
     expect(useCanvasStore.temporal.getState().pastStates.length).toBeGreaterThan(0)
-    expect(useCanvasStore.getState().selectedItemIds).toEqual([101])
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 400, height: 300 })
 
     // In-app navigation to plan B: the same Route element stays mounted,
     // only the :floorPlanId param changes — the hardest variant of the
@@ -276,6 +297,69 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
     // ...and plan A's selection must not leak either (stale ids would
     // enable z-order buttons and feed Delete a nonexistent id on plan B).
     expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+    // U8: plan A's UNSAVED cropped dims must not leak onto plan B either —
+    // the reset covered canvasSize and the seed stamped B's own dims,
+    // which is also what the Stage now renders (store dims, not query
+    // dims).
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 900, height: 700 })
+    await waitFor(() =>
+      expect(canvasStageProps.current).toMatchObject({ width: 900, height: 700 }),
+    )
+  })
+
+  it('confirming a crop applies it through the store (ONE undoable step) and returns to the select tool (U8)', async () => {
+    mockGetForPlans({
+      7: {
+        plan: makePlan({ id: 7, name: 'Croppable Plan' }),
+        objects: [
+          makeObject({ id: 701, floor_plan: 7, x: 300, y: 250 }),
+          makeObject({ id: 702, floor_plan: 7, x: 10, y: 10 }),
+        ],
+      },
+    })
+
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Croppable Plan')).toBeInTheDocument()
+    await waitFor(() => expect(useCanvasStore.getState().items).toHaveLength(2))
+
+    // The user picks the crop tool (which clears any selection), draws a
+    // region, and the Stage reports the confirmed rect up.
+    act(() => {
+      useCanvasStore.getState().replaceSelection([701])
+      useCanvasStore.getState().setActiveTool('crop')
+    })
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+
+    const onApplyCrop = canvasStageProps.current?.onApplyCrop as (rect: {
+      x: number
+      y: number
+      width: number
+      height: number
+    }) => void
+    act(() => {
+      onApplyCrop({ x: 200, y: 200, width: 800, height: 600 })
+    })
+
+    // Applied: dims + shifted coords (outside object kept, negative), the
+    // tool snapped back to select, and the divergence is unsaved.
+    const state = useCanvasStore.getState()
+    expect(state.canvasSize).toEqual({ width: 800, height: 600 })
+    expect(state.items.find((item) => item.id === 701)).toMatchObject({ x: 100, y: 50 })
+    expect(state.items.find((item) => item.id === 702)).toMatchObject({ x: -190, y: -190 })
+    expect(state.activeTool).toBe('select')
+    expect(screen.getByRole('button', { name: /save changes/i })).toHaveTextContent('Save')
+    // The Stage re-rendered with the STORE's cropped dims.
+    expect(canvasStageProps.current).toMatchObject({ width: 800, height: 600 })
+
+    // ONE undo restores dims and every coordinate.
+    act(() => {
+      undo()
+    })
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 1600, height: 1200 })
+    expect(useCanvasStore.getState().items.find((item) => item.id === 701)).toMatchObject({
+      x: 300,
+      y: 250,
+    })
   })
 
   it('save flow: edit shows Save, saving PUTs, and undo STILL works after the save', async () => {

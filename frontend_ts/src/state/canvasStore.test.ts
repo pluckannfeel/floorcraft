@@ -1453,3 +1453,190 @@ describe('canvasStore text objects (U7)', () => {
     })
   })
 })
+
+// U8 (canvas-tools): the crop tool's store half — `canvasSize` joins the
+// TRACKED snapshot (partialize/equality now cover BOTH references) and
+// `applyCrop` replaces items + dims in ONE set(), so a crop undoes as a
+// single step restoring dims AND every coordinate. Also pinned here: the
+// equality regression (untracked actions still push no entries with the
+// wider partialize), the exported undo()'s dirty check covering a
+// dims-only traversal, the plan-switch reset clearing canvasSize, and
+// entering the crop tool clearing the selection.
+describe('canvasStore crop (U8)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({
+      items: [],
+      selectedItemIds: [],
+      activeTool: 'select',
+      canvasSize: null,
+      dirty: false,
+      zoom: 1,
+      stagePosition: { x: 0, y: 0 },
+    })
+    useCanvasStore.temporal.getState().clear()
+  })
+
+  function seedCroppablePlan() {
+    useCanvasStore.getState().setItems(
+      [
+        makeItem({ id: 'inside-box', x: 300, y: 250 }),
+        // Fully OUTSIDE the crop region below — must survive the crop at
+        // negative coordinates (R22), never be dropped or clamped.
+        makeItem({ id: 'outside-box', x: 10, y: 10 }),
+        makeItem({
+          id: 'line-1',
+          type: 'line_straight',
+          x: 260,
+          y: 300,
+          width: 140,
+          height: 0,
+          properties: {
+            points: [
+              { x: 260, y: 300 },
+              { x: 400, y: 300 },
+            ],
+            curve_style: 'straight',
+          },
+        }),
+      ],
+      { width: 1600, height: 1200 },
+    )
+  }
+
+  it('applyCrop shifts every coordinate (line points included), shrinks dims, and keeps the fully-outside object at negative coords — ONE undo restores dims AND every coordinate (AE6)', () => {
+    seedCroppablePlan()
+
+    useCanvasStore.getState().applyCrop({ x: 200, y: 200, width: 800, height: 600 })
+
+    const state = useCanvasStore.getState()
+    expect(state.canvasSize).toEqual({ width: 800, height: 600 })
+    expect(state.items.find((item) => item.id === 'inside-box')).toMatchObject({ x: 100, y: 50 })
+    expect(state.items.find((item) => item.id === 'outside-box')).toMatchObject({ x: -190, y: -190 })
+    const line = state.items.find((item) => item.id === 'line-1')
+    expect(line).toMatchObject({ x: 60, y: 100 })
+    expect(line?.properties.points).toEqual([
+      { x: 60, y: 100 },
+      { x: 200, y: 100 },
+    ])
+    // The whole crop is exactly ONE history entry...
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+
+    // ...and a single undo restores the dims and every coordinate together.
+    undo()
+    const restored = useCanvasStore.getState()
+    expect(restored.canvasSize).toEqual({ width: 1600, height: 1200 })
+    expect(restored.items.find((item) => item.id === 'inside-box')).toMatchObject({ x: 300, y: 250 })
+    expect(restored.items.find((item) => item.id === 'outside-box')).toMatchObject({ x: 10, y: 10 })
+    expect(restored.items.find((item) => item.id === 'line-1')?.properties.points).toEqual([
+      { x: 260, y: 300 },
+      { x: 400, y: 300 },
+    ])
+
+    // Redo re-applies both halves too.
+    redo()
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 800, height: 600 })
+    expect(useCanvasStore.getState().items.find((item) => item.id === 'inside-box')).toMatchObject({ x: 100, y: 50 })
+  })
+
+  it('applyCrop marks the store dirty (a crop is unsaved divergence like any other content edit)', () => {
+    seedCroppablePlan()
+    expect(useCanvasStore.getState().dirty).toBe(false)
+
+    useCanvasStore.getState().applyCrop({ x: 0, y: 0, width: 400, height: 300 })
+
+    expect(useCanvasStore.getState().dirty).toBe(true)
+  })
+
+  it('untouched properties (rotation, width/height, group_key) survive a crop', () => {
+    useCanvasStore.getState().setItems(
+      [makeItem({ id: 'item-1', x: 100, y: 100, width: 80, height: 60, rotation: 45, group_key: 'group-abc' })],
+      { width: 1600, height: 1200 },
+    )
+
+    useCanvasStore.getState().applyCrop({ x: 50, y: 50, width: 800, height: 600 })
+
+    expect(useCanvasStore.getState().items[0]).toMatchObject({
+      x: 50,
+      y: 50,
+      width: 80,
+      height: 60,
+      rotation: 45,
+      group_key: 'group-abc',
+    })
+  })
+
+  it('zoom/pan/selection/tool switches still create NO history entries now that partialize carries canvasSize (equality regression)', () => {
+    seedCroppablePlan()
+
+    useCanvasStore.getState().replaceSelection(['inside-box'])
+    useCanvasStore.getState().toggleInSelection('outside-box')
+    useCanvasStore.getState().clearSelection()
+    useCanvasStore.getState().setActiveTool('shape_rectangle')
+    useCanvasStore.getState().setActiveTool('crop')
+    useCanvasStore.getState().setActiveTool('select')
+    useCanvasStore.getState().setZoomAndPosition(2, { x: 40, y: -20 })
+    useCanvasStore.getState().setStagePosition({ x: 9, y: 9 })
+    useCanvasStore.getState().zoomIn()
+    useCanvasStore.getState().zoomOut()
+    useCanvasStore.getState().resetZoom()
+    useCanvasStore.getState().markSaved()
+
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('a dims-only traversal sets dirty — the exported undo() covers the canvasSize reference, not just items', () => {
+    useCanvasStore.getState().setItems([makeItem()], { width: 1600, height: 1200 })
+    const itemsBefore = useCanvasStore.getState().items
+
+    // A canvasSize-ONLY tracked change: the items reference is untouched,
+    // so the old items-only dirty check would have missed this traversal.
+    useCanvasStore.setState({ canvasSize: { width: 800, height: 600 } })
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+    expect(useCanvasStore.getState().dirty).toBe(false)
+
+    undo()
+
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 1600, height: 1200 })
+    expect(useCanvasStore.getState().items).toBe(itemsBefore)
+    expect(useCanvasStore.getState().dirty).toBe(true)
+  })
+
+  it('setItems([]) (the plan-switch reset) clears canvasSize, so an unsaved crop cannot leak dims into the next plan', () => {
+    seedCroppablePlan()
+    useCanvasStore.getState().applyCrop({ x: 100, y: 100, width: 400, height: 300 })
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 400, height: 300 })
+    const entriesAfterCrop = useCanvasStore.temporal.getState().pastStates.length
+
+    useCanvasStore.getState().setItems([])
+
+    expect(useCanvasStore.getState().canvasSize).toBeNull()
+    expect(useCanvasStore.getState().dirty).toBe(false)
+    // The reset itself is paused — no new history entry (the page's reset
+    // effect clears zundo history separately).
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(entriesAfterCrop)
+  })
+
+  it('seeding via setItems(items, canvasSize) stamps both refs inside the paused bracket — not undoable, not dirty', () => {
+    useCanvasStore.getState().setItems([makeItem()], { width: 900, height: 700 })
+
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 900, height: 700 })
+    expect(useCanvasStore.getState().dirty).toBe(false)
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+
+    undo()
+    // Nothing to undo — the seed stays.
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 900, height: 700 })
+  })
+
+  it('entering the crop tool clears the selection; other tools leave it alone', () => {
+    seedCroppablePlan()
+    useCanvasStore.getState().replaceSelection(['inside-box', 'outside-box'])
+
+    useCanvasStore.getState().setActiveTool('text')
+    expect(useCanvasStore.getState().selectedItemIds).toEqual(['inside-box', 'outside-box'])
+
+    useCanvasStore.getState().setActiveTool('crop')
+    expect(useCanvasStore.getState().activeTool).toBe('crop')
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+  })
+})

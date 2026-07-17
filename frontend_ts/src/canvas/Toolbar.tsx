@@ -8,6 +8,7 @@ import {
   AlignStartHorizontal,
   AlignStartVertical,
   AlignVerticalDistributeCenter,
+  Crop,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useStore } from 'zustand'
@@ -202,6 +203,21 @@ export function Toolbar({
         onClick={() => setActiveTool(activeTool === 'text' ? 'select' : 'text')}
       >
         Text
+      </Button>
+
+      {/* U8 (canvas-tools): the Crop tool — drag a region on the canvas,
+          then confirm (Enter / the floating Apply button) to trim the
+          canvas to it. Same toggle/active-variant conventions as the other
+          tools; entering it also clears the selection (the store's
+          setActiveTool handles that). */}
+      <Button
+        type="button"
+        variant={activeTool === 'crop' ? 'default' : 'outline'}
+        size="sm"
+        aria-pressed={activeTool === 'crop'}
+        onClick={() => setActiveTool(activeTool === 'crop' ? 'select' : 'crop')}
+      >
+        <Crop /> Crop
       </Button>
 
       <ToolbarDivider />

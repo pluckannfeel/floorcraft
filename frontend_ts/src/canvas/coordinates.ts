@@ -60,6 +60,14 @@ export function snapToGrid(point: Point, gridSize: number): Point {
  * Applied AFTER `snapToGrid` (snap-then-clamp order, per Key Technical
  * Decisions) so the bounds invariant always holds even when the grid-snapped
  * position would otherwise land outside the canvas.
+ *
+ * U8 (crop) note: an object left outside the canvas by a crop (R22 keeps
+ * outside objects at their now-negative coordinates) teleports back in on
+ * its first single-object drag, because this clamp runs on every dragmove
+ * frame — the plan explicitly accepts that ("drag it back in" is the
+ * recovery gesture). Transforms and group drags of out-of-bounds boxes are
+ * the interactions that must NOT be blocked, and those are relaxed in
+ * `constrainTransformBox`/`clampGroupDragDelta` below instead.
  */
 export function clampToBounds(
   point: Point,
@@ -241,6 +249,11 @@ export const SELECTION_CHROME = {
   fill: 'rgba(37, 99, 235, 0.08)',
   strokeWidth: 1,
   dash: [4, 4],
+  /** U8: the crop preview's outside-the-region dimming fill (the four
+   * translucent overlay strips) — part of the shared token so the crop
+   * chrome stays in the same visual system as the marquee/group outlines
+   * rather than minting its own color. */
+  dimFill: 'rgba(15, 23, 42, 0.35)',
 } as const
 
 /**
@@ -265,13 +278,22 @@ export function unionBoundingBoxes(boxes: BoundingBox[]): BoundingBox | null {
 }
 
 /** One axis of `clampGroupDragDelta`: the translation that keeps
- * `[start, start + size]` within `[0, canvasSize]`. When the box is larger
- * than the canvas there is no valid translation at all — freeze the axis
- * (delta 0) rather than teleporting the selection to either edge. */
+ * `[start, start + size]` within `[0, canvasSize]`.
+ *
+ * U8 (crop): an axis on which the box ALREADY violates the bounds is left
+ * completely unclamped. Crop makes out-of-bounds objects a supported state
+ * (R22: outside objects keep their now-negative coordinates), and clamping
+ * such a box would either teleport it in (`min = -start > 0` forces a
+ * rightward jump for a box past the left edge) or freeze it outright (the
+ * old larger-than-canvas rule) — both would make a crop-stranded or
+ * overhanging selection unmovable/jumpy. This also subsumes the previous
+ * "freeze an oversized box" rule: a box larger than the canvas necessarily
+ * violates at least one edge, so it now moves freely on that axis instead
+ * of being stuck. In-bounds boxes clamp exactly as before. */
 function clampAxisDelta(delta: number, start: number, size: number, canvasSize: number): number {
+  if (start < 0 || start + size > canvasSize) return delta
   const min = -start
   const max = canvasSize - size - start
-  if (max < min) return 0
   return Math.min(Math.max(delta, min), max)
 }
 
@@ -359,11 +381,33 @@ export interface TransformBoundBox {
   rotation: number
 }
 
+/** True when a box's post-rotation axis-aligned bounding box violates
+ * `[0, canvasWidth] x [0, canvasHeight]` — shared by `constrainTransformBox`'s
+ * old-box/new-box checks. */
+function transformBoxOutOfBounds(
+  box: TransformBoundBox,
+  canvasWidth: number,
+  canvasHeight: number,
+): boolean {
+  const rotationDeg = (box.rotation * 180) / Math.PI
+  const bbox = getRotatedBoundingBox({ x: box.x, y: box.y }, box.width, box.height, rotationDeg)
+  return bbox.x < 0 || bbox.y < 0 || bbox.x + bbox.width > canvasWidth || bbox.y + bbox.height > canvasHeight
+}
+
 /**
  * Rejects (falls back to `oldBox`) a resize/rotate that would shrink below
  * `minSize`, or push the item's post-rotation axis-aligned bounding box
  * outside `[0, canvasWidth] x [0, canvasHeight]`; otherwise passes `newBox`
  * through unchanged.
+ *
+ * U8 (crop) exception: when the CURRENT box already violates the bounds —
+ * a crop-stranded object outside the canvas, or a multi-selection whose
+ * collective box overhangs the edge — the bounds rejection is skipped
+ * entirely (only the min-size floor still applies). Crop makes
+ * out-of-bounds a supported state (R22), so hard rejection is no longer a
+ * valid invariant there: keeping it would leave stranded objects with dead
+ * transformer handles. Transforms of in-bounds boxes behave exactly as
+ * before.
  *
  * Pure and Konva-independent so `SelectionTransformer`'s `boundBoxFunc` (and
  * this logic's tests) don't need a real Konva `Transformer` instance.
@@ -379,10 +423,10 @@ export function constrainTransformBox(
     return oldBox
   }
 
-  const rotationDeg = (newBox.rotation * 180) / Math.PI
-  const bbox = getRotatedBoundingBox({ x: newBox.x, y: newBox.y }, newBox.width, newBox.height, rotationDeg)
-
-  if (bbox.x < 0 || bbox.y < 0 || bbox.x + bbox.width > canvasWidth || bbox.y + bbox.height > canvasHeight) {
+  if (
+    !transformBoxOutOfBounds(oldBox, canvasWidth, canvasHeight) &&
+    transformBoxOutOfBounds(newBox, canvasWidth, canvasHeight)
+  ) {
     return oldBox
   }
 

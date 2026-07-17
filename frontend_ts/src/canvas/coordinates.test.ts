@@ -229,6 +229,43 @@ describe('constrainTransformBox', () => {
     const newBox = { x: -10, y: 100, width: 40, height: 40, rotation: 0 }
     expect(constrainTransformBox(oldBox, newBox, 1600, 1200)).toBe(oldBox)
   })
+
+  // U8 (crop): out-of-bounds is a supported state (R22) — when the CURRENT
+  // box already violates the bounds, the bounds rejection is skipped so
+  // crop-stranded objects don't end up with dead transformer handles.
+  describe('already-out-of-bounds boxes (U8 crop relaxation)', () => {
+    it('a fully-outside object can still be resized (newBox accepted even though still out of bounds)', () => {
+      // A crop-stranded object entirely left/above the canvas origin.
+      const strandedBox = { x: -200, y: -150, width: 40, height: 40, rotation: 0 }
+      const resized = { x: -200, y: -150, width: 80, height: 60, rotation: 0 }
+      expect(constrainTransformBox(strandedBox, resized, 1600, 1200)).toEqual(resized)
+    })
+
+    it('a fully-outside object can still be rotated', () => {
+      const strandedBox = { x: -200, y: -150, width: 40, height: 40, rotation: 0 }
+      const rotated = { x: -200, y: -150, width: 40, height: 40, rotation: Math.PI / 4 }
+      expect(constrainTransformBox(strandedBox, rotated, 1600, 1200)).toEqual(rotated)
+    })
+
+    it('an overhanging box (partially outside) can still transform', () => {
+      // A multi-selection collective box overhanging the left canvas edge.
+      const overhanging = { x: -30, y: 100, width: 100, height: 100, rotation: 0 }
+      const transformed = { x: -30, y: 100, width: 140, height: 120, rotation: 0 }
+      expect(constrainTransformBox(overhanging, transformed, 1600, 1200)).toEqual(transformed)
+    })
+
+    it('still enforces the minimum size for an out-of-bounds box', () => {
+      const strandedBox = { x: -200, y: -150, width: 40, height: 40, rotation: 0 }
+      const tooSmall = { x: -200, y: -150, width: 5, height: 40, rotation: 0 }
+      expect(constrainTransformBox(strandedBox, tooSmall, 1600, 1200)).toBe(strandedBox)
+    })
+
+    it('in-bounds boxes keep the original rejection (a transform may not NEWLY violate bounds)', () => {
+      const inBounds = { x: 100, y: 100, width: 40, height: 40, rotation: 0 }
+      const escaping = { x: -10, y: 100, width: 40, height: 40, rotation: 0 }
+      expect(constrainTransformBox(inBounds, escaping, 1600, 1200)).toBe(inBounds)
+    })
+  })
 })
 
 // U3: pure group-drag / multi-node transform helpers.
@@ -274,9 +311,26 @@ describe('clampGroupDragDelta', () => {
     expect(clampGroupDragDelta({ x: -500, y: 10 }, collectiveBox, 1600, 1200)).toEqual({ x: -100, y: 10 })
   })
 
-  it('freezes an axis when the collective box is larger than the canvas (no valid translation)', () => {
+  // U8 (crop): an axis the collective box ALREADY violates is left
+  // unclamped — out-of-bounds selections must remain movable (clamping
+  // would teleport a stranded selection in, or freeze an oversized one).
+  it('leaves an axis unclamped when the collective box already violates it (crop-stranded selection stays movable)', () => {
+    // Fully left of the canvas: x violates, y is in bounds.
+    const stranded = { x: -300, y: 50, width: 200, height: 100 }
+    // Moving further out AND back in are both allowed on x; y clamps
+    // normally (top edge at -50).
+    expect(clampGroupDragDelta({ x: -40, y: -500 }, stranded, 1600, 1200)).toEqual({ x: -40, y: -50 })
+    expect(clampGroupDragDelta({ x: 250, y: 10 }, stranded, 1600, 1200)).toEqual({ x: 250, y: 10 })
+  })
+
+  it('an overhanging selection (box past the right edge) still moves on that axis', () => {
+    const overhanging = { x: 1500, y: 50, width: 200, height: 100 }
+    expect(clampGroupDragDelta({ x: 30, y: 0 }, overhanging, 1600, 1200)).toEqual({ x: 30, y: 0 })
+  })
+
+  it('a collective box larger than the canvas moves freely on that axis (it always violates an edge — supersedes the old freeze rule)', () => {
     const oversized = { x: -10, y: 0, width: 2000, height: 50 }
-    expect(clampGroupDragDelta({ x: 40, y: 20 }, oversized, 1600, 1200)).toEqual({ x: 0, y: 20 })
+    expect(clampGroupDragDelta({ x: 40, y: 20 }, oversized, 1600, 1200)).toEqual({ x: 40, y: 20 })
   })
 })
 

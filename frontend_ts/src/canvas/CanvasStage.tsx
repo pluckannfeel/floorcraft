@@ -21,6 +21,7 @@ import {
 import type { BoundingBox, ZoomPanState } from './coordinates'
 import { buildClipboardPayload } from './clipboard'
 import type { ClipboardPayload } from './clipboard'
+import { CropConfirmControls, CropRegionOverlay, useCropTool } from './CropTool'
 import { LineAnchorHandles } from './LineAnchorHandles'
 import {
   computeLineBoundingBox,
@@ -153,6 +154,13 @@ interface CanvasStageProps {
    * that object's Konva node hides (the overlay's textarea IS the visible
    * text during editing, per Konva's official pattern). */
   editingItemId?: CanvasObject['id'] | null
+  /** U8: a drawn crop region was CONFIRMED (Enter or the floating Apply
+   * button). The caller owns both the store write (`applyCrop` — one
+   * tracked entry shifting every coordinate and replacing the dims) and
+   * the switch back to the select tool, the same delegation as
+   * `onCreateShape`/`onCreateLine`. Optional: without it the crop tool
+   * draws but confirm is a no-op (tests that don't exercise crop). */
+  onApplyCrop?: (region: BoundingBox) => void
 }
 
 /** What `onOpenContextMenu` reports up — see the prop's doc above. */
@@ -795,6 +803,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onCreateTextAt,
     onEditTextObject,
     editingItemId = null,
+    onApplyCrop,
   },
   ref,
 ) {
@@ -802,6 +811,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   const drawingShape = isShapeTool(activeTool)
   const drawingLine = isLineTool(activeTool)
   const textToolActive = isTextType(activeTool)
+  const croppingTool = activeTool === 'crop'
 
   // U2: plain drag on empty canvas is the marquee now; panning is
   // pan-active-only. The Stage is natively `draggable` ONLY while Space is
@@ -987,7 +997,85 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     }
   }, [marqueeActive])
 
-  // U2 cursor language: crosshair while a marquee is being drawn;
+  // U8: the crop gesture state machine (see `useCropTool`'s doc in
+  // CropTool.tsx). `onPointerDown` begins it; move/release live on
+  // window-level listeners below for the same out-of-canvas-release reason
+  // as the marquee's; Enter/Escape have their own listener while a gesture
+  // or pending region exists.
+  const crop = useCropTool({
+    zoom,
+    stagePosition,
+    canvasWidth: width,
+    canvasHeight: height,
+    onApplyCrop,
+  })
+
+  // Latest-value ref, same rationale as `marqueeRef` above.
+  const cropRef = useRef(crop)
+  useEffect(() => {
+    cropRef.current = crop
+  })
+
+  const cropDrawing = crop.isDrawing
+  useEffect(() => {
+    if (!cropDrawing) return undefined
+    function handleWindowPointerMove(event: PointerEvent) {
+      const stage = stageRef.current
+      if (!stage) return
+      cropRef.current.update(clientToContainerPoint(stage, event.clientX, event.clientY))
+    }
+    function handleWindowPointerUp(event: PointerEvent) {
+      // Only the primary button's release ends the drag (same guard as the
+      // marquee's window pointerup).
+      if (event.button !== 0) return
+      cropRef.current.release()
+    }
+    window.addEventListener('pointermove', handleWindowPointerMove)
+    window.addEventListener('pointerup', handleWindowPointerUp)
+    return () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove)
+      window.removeEventListener('pointerup', handleWindowPointerUp)
+    }
+  }, [cropDrawing])
+
+  // U8: Enter confirms / Escape cancels while a crop gesture or pending
+  // region exists (the floating Apply/Cancel buttons drive the same
+  // confirm/cancel). Escape ownership (plan's documented priority order,
+  // innermost first): text overlay → context menu → crop region →
+  // marquee-in-progress → line-draw finish. The overlay/menu both sit above
+  // this and stop propagation from their own handlers; the marquee and
+  // line-draw sit below and can never coexist with a crop gesture (both
+  // require a different active tool, and `onContextMenu` below suppresses
+  // the menu entirely while the crop tool is active so a menu can't open
+  // OVER a pending region either) — so this listener existing only while a
+  // crop gesture/region is live keeps the order correct by construction.
+  const cropActive = crop.isDrawing || crop.isPending
+  useEffect(() => {
+    if (!cropActive) return undefined
+    function handleWindowKeyDown(event: KeyboardEvent) {
+      const activeElement = document.activeElement as HTMLElement | null
+      if (isEditableTarget(activeElement?.tagName, activeElement?.isContentEditable ?? false)) return
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        cropRef.current.cancel()
+      } else if (event.key === 'Enter' && cropRef.current.isPending) {
+        event.preventDefault()
+        cropRef.current.confirm()
+      }
+    }
+    window.addEventListener('keydown', handleWindowKeyDown)
+    return () => window.removeEventListener('keydown', handleWindowKeyDown)
+  }, [cropActive])
+
+  // U8: leaving the crop tool (Toolbar toggle, confirm's switch back to
+  // select) discards any in-progress gesture/region — the preview must
+  // never outlive the tool.
+  useEffect(() => {
+    if (!croppingTool) cropRef.current.cancel()
+  }, [croppingTool])
+
+  // U2 cursor language: crosshair while a marquee is being drawn and for
+  // the Crop tool (U8 — the plan's cursor spec groups them);
   // grab/grabbing while pan is available/active (Space held or an actual
   // pan drag, including middle-mouse); I-beam for the Text tool over the
   // canvas (U7); default arrow otherwise (the plan explicitly allows
@@ -995,7 +1083,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   useEffect(() => {
     const container = stageRef.current?.container()
     if (!container) return
-    container.style.cursor = marqueeActive
+    container.style.cursor = marqueeActive || croppingTool
       ? 'crosshair'
       : panDragging
         ? 'grabbing'
@@ -1004,7 +1092,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           : textToolActive
             ? 'text'
             : ''
-  }, [marqueeActive, panDragging, spaceHeld, textToolActive])
+  }, [marqueeActive, croppingTool, panDragging, spaceHeld, textToolActive])
 
   // Map<id, Konva.Node> resolving the selected item's live node for
   // SelectionTransformer's `.nodes([ref])` attach — populated/cleared by
@@ -1248,6 +1336,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   }, [shapeTool.isDrawing, shapeTool.endDraw])
 
   return (
+    <>
     <Stage
       ref={setStageRef}
       width={width}
@@ -1366,6 +1455,19 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         if (drawingLine) {
           return
         }
+        // U8: Crop tool — a left-press starts (or, replacing any pending
+        // region, restarts) the region drag. The objects layer is
+        // non-listening while cropping (see the Layer gate below), so the
+        // press always reaches the Stage regardless of what's under the
+        // cursor; move/release are the window listeners above. Mouse-only,
+        // like the marquee (v1).
+        if (croppingTool) {
+          if (event.evt.button === 0 && event.evt.pointerType !== 'touch') {
+            const pointer = stage.getPointerPosition()
+            if (pointer) crop.begin(pointer)
+          }
+          return
+        }
         // U7: Text tool — a left-press on EMPTY canvas creates a text
         // object there (the caller snaps/clamps, builds the draft, and
         // opens the edit overlay). A press on an existing object falls
@@ -1461,6 +1563,13 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // overlay later) are never intercepted — their native context menu
         // stays, per the plan's text-editing rule.
         event.evt.preventDefault()
+        // U8: no context menu while the crop tool is active — crop owns the
+        // canvas interaction (its region drag, dim preview, and confirm
+        // affordance), and keeping the menu out is what makes the
+        // documented Escape order (menu ABOVE crop) hold by construction:
+        // a menu can never open over a pending crop region, so the two
+        // window-level Escape listeners can never race.
+        if (croppingTool) return
         const stage = event.target.getStage()
         if (!stage) return
         // Right-click selection rule FIRST (plan Key Technical Decision),
@@ -1495,8 +1604,10 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           an existing Object underneath the drag/click. Also non-listening
           while Space is held (U2): pan owns the gesture, so a Space+drag
           starting over an Object must reach the draggable Stage instead of
-          dragging that Object. */}
-      <Layer listening={!drawingShape && !drawingLine && !spaceHeld}>
+          dragging that Object. U8: the crop tool joins the drawing tools —
+          a crop drag must start wherever the pointer is, objects
+          underneath included. */}
+      <Layer listening={!drawingShape && !drawingLine && !spaceHeld && !croppingTool}>
         {/* U18: render order comes from `sortObjectsByZIndex` (above) —
             deliberately NOT from imperative Konva `.moveToTop()`/`.zIndex()`
             calls, which react-konva's own docs warn will fight React's own
@@ -1608,11 +1719,38 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             listening={false}
           />
         )}
+        {/* U8: the crop preview — four dimming strips outside the region
+            plus its border (shared selection-chrome token), live while the
+            region is being dragged AND while it awaits confirm/cancel. */}
+        {crop.region && (
+          <CropRegionOverlay
+            region={crop.region}
+            canvasWidth={width}
+            canvasHeight={height}
+            zoom={zoom}
+          />
+        )}
         {/* U19: temporary dashed guide lines, matched during a drag/resize
             and destroyed on dragend/transformend (see the `guides` state
             above). */}
         <AlignmentGuideLines guides={guides} width={width} height={height} />
       </Layer>
     </Stage>
+    {/* U8: the floating confirm/cancel affordance for a pending crop
+        region — DOM (shadcn Buttons), so it renders OUTSIDE the Konva
+        Stage, fixed-positioned at the region's bottom-right corner.
+        Enter/Escape drive the same confirm/cancel via the window listener
+        above. */}
+    {crop.isPending && crop.region && (
+      <CropConfirmControls
+        region={crop.region}
+        zoom={zoom}
+        stagePosition={stagePosition}
+        getStage={() => stageRef.current}
+        onConfirm={crop.confirm}
+        onCancel={crop.cancel}
+      />
+    )}
+    </>
   )
 })

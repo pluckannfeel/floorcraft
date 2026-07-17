@@ -483,6 +483,135 @@ class SyncTextTests(SyncEndpointTestCase):
         self.assertEqual(response.json()['objects'][0]['properties']['text'], '')
 
 
+class SyncCanvasTests(SyncEndpointTestCase):
+    """U8 (canvas-tools crop): the sync payload's OPTIONAL `canvas` key
+    updates the FloorPlan's dimensions inside the same transaction as the
+    object writes -- a crop's dims and shifted coordinates persist
+    atomically. Positive integers only; anything else is a per-request 400
+    with nothing (dims OR objects) applied. Objects-only payloads stay
+    valid, and the response envelope is unchanged by `canvas`.
+    """
+
+    def sync_with_canvas(self, floor_plan_id, objects, canvas):
+        return self.client.put(
+            f'/api/floor-plans/{floor_plan_id}/objects/',
+            json.dumps({'objects': objects, 'canvas': canvas}),
+            content_type='application/json',
+        )
+
+    def test_canvas_applies_with_objects_in_one_atomic_sync(self):
+        """The crop save: dims shrink AND the shifted object persists, in
+        one 200 whose envelope shape is unchanged.
+        """
+        self.login_as()
+        row = Objects.objects.create(
+            floor_plan=self.floor_plan, type=Objects.ObjectType.TABLES,
+            name='Shifted table', x=300, y=200,
+        )
+
+        response = self.sync_with_canvas(self.floor_plan.id, [
+            object_payload(id=row.id, name='Shifted table', x=200, y=120),
+        ], {'width': 800, 'height': 600})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json().keys()), {'objects', 'id_map'})
+
+        self.floor_plan.refresh_from_db()
+        self.assertEqual(self.floor_plan.canvas_width, 800)
+        self.assertEqual(self.floor_plan.canvas_height, 600)
+        row.refresh_from_db()
+        self.assertEqual((row.x, row.y), (200, 120))
+
+    def test_objects_only_payload_still_works_and_keeps_dims(self):
+        """`canvas` is optional -- an old-style payload neither fails nor
+        touches the stored dimensions.
+        """
+        self.login_as()
+        original_width = self.floor_plan.canvas_width
+        original_height = self.floor_plan.canvas_height
+
+        response = self.sync(self.floor_plan.id, [object_payload(name='Plain')])
+
+        self.assertEqual(response.status_code, 200)
+        self.floor_plan.refresh_from_db()
+        self.assertEqual(self.floor_plan.canvas_width, original_width)
+        self.assertEqual(self.floor_plan.canvas_height, original_height)
+
+    def test_invalid_canvas_is_400_and_nothing_applies(self):
+        """Atomicity for the dims rule: a bad `canvas` poisons the WHOLE
+        request -- the valid object update/create/delete from the same
+        payload must not land either.
+        """
+        self.login_as()
+        kept = Objects.objects.create(
+            floor_plan=self.floor_plan, type=Objects.ObjectType.TABLES,
+            name='Untouched', x=5, y=5,
+        )
+        doomed = Objects.objects.create(
+            floor_plan=self.floor_plan, type=Objects.ObjectType.CHAIRS,
+            name='Would-be-deleted', x=10, y=10,
+        )
+        original_width = self.floor_plan.canvas_width
+
+        invalid_canvases = [
+            {'width': 0, 'height': 600},        # non-positive
+            {'width': -800, 'height': 600},     # negative
+            {'width': 800},                     # missing height
+            {'width': 'wide', 'height': 600},   # non-int
+            {'width': 800.5, 'height': 600},    # float
+            {'width': True, 'height': 600},     # bool (isinstance int!)
+            ['800', '600'],                     # not an object
+        ]
+        for canvas in invalid_canvases:
+            with self.subTest(canvas=canvas):
+                response = self.sync_with_canvas(self.floor_plan.id, [
+                    object_payload(id=kept.id, name='Should not stick'),
+                    object_payload(name='Should not exist'),
+                ], canvas)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('canvas', response.json())
+
+                # Nothing applied: dims, update, create, and implied
+                # delete all untouched.
+                self.floor_plan.refresh_from_db()
+                self.assertEqual(self.floor_plan.canvas_width, original_width)
+                kept.refresh_from_db()
+                self.assertEqual(kept.name, 'Untouched')
+                self.assertTrue(Objects.objects.filter(id=doomed.id).exists())
+                self.assertFalse(Objects.objects.filter(name='Should not exist').exists())
+
+    def test_invalid_object_item_also_rolls_back_canvas(self):
+        """The other atomicity direction: a bad OBJECT item means the valid
+        `canvas` dims must not persist either.
+        """
+        self.login_as()
+        original_width = self.floor_plan.canvas_width
+        original_height = self.floor_plan.canvas_height
+
+        response = self.sync_with_canvas(self.floor_plan.id, [
+            # Invalid: line without points (ObjectSerializer's line rule).
+            object_payload(type=Objects.ObjectType.LINE_STRAIGHT, name='Bad line', properties={}),
+        ], {'width': 800, 'height': 600})
+
+        self.assertEqual(response.status_code, 400)
+        self.floor_plan.refresh_from_db()
+        self.assertEqual(self.floor_plan.canvas_width, original_width)
+        self.assertEqual(self.floor_plan.canvas_height, original_height)
+
+    def test_foreign_plan_with_canvas_still_404s_and_changes_nothing(self):
+        intruder = make_verified_user(email='canvas-intruder@example.com')
+        FloorPlan.objects.create(name="Intruder's Plan", owner=intruder)
+        self.login_as('canvas-intruder@example.com')
+        original_width = self.floor_plan.canvas_width
+
+        response = self.sync_with_canvas(self.floor_plan.id, [], {'width': 10, 'height': 10})
+
+        self.assertEqual(response.status_code, 404)
+        self.floor_plan.refresh_from_db()
+        self.assertEqual(self.floor_plan.canvas_width, original_width)
+
+
 class SyncAuthenticationTests(SyncEndpointTestCase):
     """Matches the existing endpoints' behavior: without a session the
     request is rejected (401/403, per SessionAuthentication + the global

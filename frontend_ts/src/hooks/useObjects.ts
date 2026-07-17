@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { AxiosError } from 'axios'
 import { apiClient } from '../api/client'
 import { useCanvasStore } from '../state/canvasStore'
-import type { CanvasObject } from '../canvas/types'
+import type { CanvasObject, FloorPlan } from '../canvas/types'
 import { useToast } from '../notifications/ToastContext'
 
 /**
@@ -102,18 +102,30 @@ interface SaveObjectsResponse {
  * shape as the GET above) and `id_map` maps every sent-but-created id to
  * its real new row id.
  *
+ * U8 (canvas-tools): the PUT also ALWAYS carries the store's live canvas
+ * dims as `canvas: {width, height}` — not only after a crop. A
+ * diverged-from-baseline check would need baseline bookkeeping and invites
+ * silent client/server dims drift; always-send is idempotent and
+ * self-healing (the server field stays optional purely for backward
+ * compatibility). The field is skipped only when `canvasSize` is null (the
+ * pre-seed edge — a save can't fire from the unrendered editor, but the
+ * hook must not fabricate dims if it somehow does).
+ *
  * On success — deliberately WITHOUT touching `items` or the undo history
  * (the fix for "undo/redo doesn't work after saving"):
  * - `mergeServerIdMap(id_map)` re-points the affected client ids at their
  *   new rows, so the NEXT save's payload translation stays correct even
  *   for items that were created (or deleted-then-redone) across saves.
- * - `markSaved()` clears `dirty` — but only when `items` hasn't changed
- *   since the payload was captured; if the user kept editing while the PUT
- *   was in flight, those edits are still unsaved and the flag must stay.
+ * - `markSaved()` clears `dirty` — but only when NEITHER `items` NOR
+ *   `canvasSize` (U8) changed since the payload was captured; if the user
+ *   kept editing (or cropped again) while the PUT was in flight, those
+ *   edits are still unsaved and the flag must stay.
  * - The canonical list is written into the query cache (`setQueryData`,
  *   not invalidate-and-refetch): the cache backs the initial seed of
  *   future editor mounts, and a background refetch here could race a user
- *   already editing again.
+ *   already editing again. U8: the `['floorPlan', id]` cache gets the
+ *   saved dims merged in the same way (the useRenameFloorPlan pattern), so
+ *   a later remount seeds the persisted dims without a refetch.
  *
  * On error: toast (except 401/403, where the global axios interceptor's
  * redirect-to-login already owns the messaging — R30) and nothing else:
@@ -126,23 +138,45 @@ export function useSaveObjects(floorPlanId: number) {
 
   return useMutation({
     mutationFn: async () => {
-      const { items, serverIdMap } = useCanvasStore.getState()
+      const { items, serverIdMap, canvasSize } = useCanvasStore.getState()
       const { data } = await apiClient.put<SaveObjectsResponse>(
         `/floor-plans/${floorPlanId}/objects/`,
-        { objects: items.map((item) => toSaveObjectPayload(item, serverIdMap)) },
+        {
+          objects: items.map((item) => toSaveObjectPayload(item, serverIdMap)),
+          ...(canvasSize
+            ? { canvas: { width: canvasSize.width, height: canvasSize.height } }
+            : {}),
+        },
       )
-      return { ...data, sentItems: items }
+      return { ...data, sentItems: items, sentCanvasSize: canvasSize }
     },
-    onSuccess: ({ objects, id_map, sentItems }) => {
+    onSuccess: ({ objects, id_map, sentItems, sentCanvasSize }) => {
       const store = useCanvasStore.getState()
       store.mergeServerIdMap(id_map)
       // Edits made while the PUT was in flight replaced the `items` array
-      // reference and are NOT covered by this save — leave `dirty` alone
-      // for those; otherwise the canvas now matches the server.
-      if (useCanvasStore.getState().items === sentItems) {
+      // reference (or, U8, the `canvasSize` reference — another crop) and
+      // are NOT covered by this save — leave `dirty` alone for those;
+      // otherwise the canvas now matches the server.
+      const current = useCanvasStore.getState()
+      if (current.items === sentItems && current.canvasSize === sentCanvasSize) {
         store.markSaved()
       }
       queryClient.setQueryData(['objects', floorPlanId], objects)
+      // U8: the saved dims are now the server truth — merge them into the
+      // floor-plan cache entry (like useRenameFloorPlan's name merge) so
+      // future seeds/readers see them without a refetch. Merge-only: if
+      // nothing is cached there's nothing stale to fix.
+      if (sentCanvasSize) {
+        queryClient.setQueryData<FloorPlan>(['floorPlan', floorPlanId], (existing) =>
+          existing
+            ? {
+                ...existing,
+                canvas_width: sentCanvasSize.width,
+                canvas_height: sentCanvasSize.height,
+              }
+            : existing,
+        )
+      }
     },
     onError: (error) => {
       if (!isAuthError(error)) {
