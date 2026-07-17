@@ -79,14 +79,14 @@ describe('canvasStore geometry/delete actions (U8)', () => {
   describe('deleteItem', () => {
     it('removes the item from the items array', () => {
       useCanvasStore.setState({ items: [makeItem()] })
-      useCanvasStore.getState().deleteItem('item-1')
+      useCanvasStore.getState().deleteItems(['item-1'])
 
       expect(useCanvasStore.getState().items).toEqual([])
     })
 
     it('drops the deleted item from the selection when it was selected', () => {
       useCanvasStore.setState({ items: [makeItem()], selectedItemIds: ['item-1'] })
-      useCanvasStore.getState().deleteItem('item-1')
+      useCanvasStore.getState().deleteItems(['item-1'])
 
       expect(useCanvasStore.getState().selectedItemIds).toEqual([])
     })
@@ -96,7 +96,7 @@ describe('canvasStore geometry/delete actions (U8)', () => {
         items: [makeItem({ id: 'item-1' }), makeItem({ id: 'item-2' })],
         selectedItemIds: ['item-2'],
       })
-      useCanvasStore.getState().deleteItem('item-1')
+      useCanvasStore.getState().deleteItems(['item-1'])
 
       expect(useCanvasStore.getState().selectedItemIds).toEqual(['item-2'])
       expect(useCanvasStore.getState().items).toEqual([makeItem({ id: 'item-2' })])
@@ -222,7 +222,7 @@ describe('canvasStore undo/redo (U9)', () => {
     useCanvasStore.temporal.getState().clear()
 
     useCanvasStore.getState().replaceSelection(['item-1'])
-    useCanvasStore.getState().toggleInSelection('item-2')
+    useCanvasStore.getState().toggleIdsInSelection(['item-2'])
     useCanvasStore.getState().clearSelection()
     useCanvasStore.getState().setActiveTool('shape_rectangle')
 
@@ -243,7 +243,7 @@ describe('canvasStore undo/redo (U9)', () => {
     useCanvasStore.getState().createItemLocal(makeItem())
     useCanvasStore.temporal.getState().clear()
 
-    useCanvasStore.getState().deleteItem('item-1')
+    useCanvasStore.getState().deleteItems(['item-1'])
     expect(useCanvasStore.getState().items).toHaveLength(0)
 
     undo()
@@ -258,7 +258,7 @@ describe('canvasStore undo/redo (U9)', () => {
   it('a create -> move -> delete -> undo x3 -> redo x3 sequence returns items to the same shape', () => {
     useCanvasStore.getState().createItemLocal(makeItem())
     useCanvasStore.getState().updateItemGeometry('item-1', { x: 100, y: 100 })
-    useCanvasStore.getState().deleteItem('item-1')
+    useCanvasStore.getState().deleteItems(['item-1'])
 
     expect(useCanvasStore.getState().items).toHaveLength(0)
 
@@ -346,7 +346,7 @@ describe('canvasStore reorderZIndex (U18)', () => {
       ],
     })
 
-    useCanvasStore.getState().reorderZIndex('a', 'front')
+    useCanvasStore.getState().reorderZIndexItems(['a'], 'front')
 
     const items = useCanvasStore.getState().items
     const itemA = items.find((item) => item.id === 'a')!
@@ -363,7 +363,7 @@ describe('canvasStore reorderZIndex (U18)', () => {
       ],
     })
 
-    useCanvasStore.getState().reorderZIndex('b', 'back')
+    useCanvasStore.getState().reorderZIndexItems(['b'], 'back')
 
     const items = useCanvasStore.getState().items
     const itemB = items.find((item) => item.id === 'b')!
@@ -379,7 +379,7 @@ describe('canvasStore reorderZIndex (U18)', () => {
       ],
     })
 
-    useCanvasStore.getState().reorderZIndex('a', 'front')
+    useCanvasStore.getState().reorderZIndexItems(['a'], 'front')
 
     const items = useCanvasStore.getState().items
     expect(items.find((item) => item.id === 'b')).toEqual(
@@ -395,7 +395,7 @@ describe('canvasStore reorderZIndex (U18)', () => {
     useCanvasStore.setState({ items: original })
     useCanvasStore.temporal.getState().clear()
 
-    useCanvasStore.getState().reorderZIndex('missing-id', 'front')
+    useCanvasStore.getState().reorderZIndexItems(['missing-id'], 'front')
 
     expect(useCanvasStore.getState().items).toEqual(original)
     expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
@@ -407,7 +407,7 @@ describe('canvasStore reorderZIndex (U18)', () => {
     })
     useCanvasStore.temporal.getState().clear()
 
-    useCanvasStore.getState().reorderZIndex('a', 'front')
+    useCanvasStore.getState().reorderZIndexItems(['a'], 'front')
     expect(useCanvasStore.getState().items.find((item) => item.id === 'a')!.z_index).toBeGreaterThan(5)
     expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
 
@@ -424,7 +424,7 @@ describe('canvasStore reorderZIndex (U18)', () => {
     })
     useCanvasStore.temporal.getState().clear()
 
-    useCanvasStore.getState().reorderZIndex('a', 'front')
+    useCanvasStore.getState().reorderZIndexItems(['a'], 'front')
 
     expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
   })
@@ -703,14 +703,14 @@ describe('canvasStore selection set + batched mutations (U1)', () => {
 
     it('toggleInSelection appends an unselected id at the end', () => {
       useCanvasStore.getState().replaceSelection(['a'])
-      useCanvasStore.getState().toggleInSelection('b')
+      useCanvasStore.getState().toggleIdsInSelection(['b'])
 
       expect(useCanvasStore.getState().selectedItemIds).toEqual(['a', 'b'])
     })
 
     it('toggleInSelection removes an already-selected id (AE1 ctrl-click contract)', () => {
       useCanvasStore.getState().replaceSelection(['a', 'b', 'c'])
-      useCanvasStore.getState().toggleInSelection('b')
+      useCanvasStore.getState().toggleIdsInSelection(['b'])
 
       expect(useCanvasStore.getState().selectedItemIds).toEqual(['a', 'c'])
     })
@@ -724,7 +724,7 @@ describe('canvasStore selection set + batched mutations (U1)', () => {
 
     it('selection actions never create undo history entries or set dirty', () => {
       useCanvasStore.getState().replaceSelection(['a'])
-      useCanvasStore.getState().toggleInSelection('b')
+      useCanvasStore.getState().toggleIdsInSelection(['b'])
       useCanvasStore.getState().clearSelection()
 
       expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
@@ -1569,7 +1569,7 @@ describe('canvasStore crop (U8)', () => {
     seedCroppablePlan()
 
     useCanvasStore.getState().replaceSelection(['inside-box'])
-    useCanvasStore.getState().toggleInSelection('outside-box')
+    useCanvasStore.getState().toggleIdsInSelection(['outside-box'])
     useCanvasStore.getState().clearSelection()
     useCanvasStore.getState().setActiveTool('shape_rectangle')
     useCanvasStore.getState().setActiveTool('crop')
@@ -1638,5 +1638,61 @@ describe('canvasStore crop (U8)', () => {
     useCanvasStore.getState().setActiveTool('crop')
     expect(useCanvasStore.getState().activeTool).toBe('crop')
     expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+  })
+})
+
+describe('code-review fixes (canvas-tools)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({
+      items: [],
+      selectedItemIds: [],
+      activeTool: 'select',
+      dirty: false,
+      serverIdMap: {},
+      canvasSize: { width: 1600, height: 1200 },
+    })
+    useCanvasStore.temporal.getState().clear()
+  })
+
+  it('applyCrop re-clamps a stale rect against the CURRENT canvas (crop only trims)', () => {
+    useCanvasStore.setState({ canvasSize: { width: 400, height: 300 } })
+    // A rect captured before a redo shrank the canvas: larger than current.
+    useCanvasStore.getState().applyCrop({ x: 100, y: 100, width: 1000, height: 800 })
+
+    const size = useCanvasStore.getState().canvasSize
+    expect(size).toEqual({ width: 300, height: 200 }) // clipped to 400-100 x 300-100
+  })
+
+  it('applyCrop no-ops on a degenerate (fully out-of-canvas) rect', () => {
+    useCanvasStore.setState({ canvasSize: { width: 400, height: 300 } })
+    useCanvasStore.temporal.getState().clear()
+    const before = useCanvasStore.getState().items
+
+    useCanvasStore.getState().applyCrop({ x: 500, y: 500, width: 200, height: 200 })
+
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 400, height: 300 })
+    expect(useCanvasStore.getState().items).toBe(before)
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('deleteItems dissolves groups reduced to a single member — one history entry', () => {
+    useCanvasStore.setState({
+      items: [
+        makeItem({ id: 'a', group_key: 'group-1' }),
+        makeItem({ id: 'b', group_key: 'group-1' }),
+        makeItem({ id: 'c' }),
+      ],
+    })
+    useCanvasStore.temporal.getState().clear()
+
+    useCanvasStore.getState().deleteItems(['a'])
+
+    const survivor = useCanvasStore.getState().items.find((item) => item.id === 'b')
+    expect(survivor?.group_key).toBeNull()
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+    // Undo restores both the deleted member and the group key.
+    undo()
+    const restored = useCanvasStore.getState().items.find((item) => item.id === 'b')
+    expect(restored?.group_key).toBe('group-1')
   })
 })

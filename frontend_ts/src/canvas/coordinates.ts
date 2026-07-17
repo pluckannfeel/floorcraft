@@ -447,7 +447,11 @@ export function constrainTransformBox(
  * drift between them. */
 export function isEditableTarget(activeElementTag: string | undefined, isContentEditable: boolean): boolean {
   const tag = activeElementTag?.toUpperCase()
-  return tag === 'INPUT' || tag === 'TEXTAREA' || isContentEditable
+  // SELECT counts as editable (code-review fix): the property panel's font
+  // dropdown is a native <select> — Delete while it's focused must not
+  // delete the object being styled, and Space must open the dropdown, not
+  // arm canvas panning.
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || isContentEditable
 }
 
 export function shouldHandleDeleteKey(

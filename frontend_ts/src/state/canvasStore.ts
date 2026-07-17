@@ -90,15 +90,15 @@ export type ItemGeometryPatch = Partial<
  *   entry at all: it compares the `items` array AND `canvasSize` (U8) by
  *   *reference*. Every
  *   action below that isn't supposed to be undoable (the selection actions
- *   `replaceSelection`/`toggleInSelection`/`toggleIdsInSelection`/
- *   `clearSelection`, `setActiveTool`, `markSaved`, the zoom/pan actions)
+ *   `replaceSelection`/`toggleIdsInSelection`/`clearSelection`,
+ *   `setActiveTool`, `markSaved`, the zoom/pan actions)
  *   only ever `set()`s
  *   keys other than `items`/`canvasSize`, so both keep the same reference
  *   across
  *   those calls and no history entry is created. `createItemLocal`/
  *   `createItemsLocal`,
- *   `updateItemGeometry`/`updateItemsGeometry`, `deleteItem`/`deleteItems`,
- *   `reorderZIndex`/`reorderZIndexItems`, `updateLinePoints`, U4's
+ *   `updateItemGeometry`/`updateItemsGeometry`, `deleteItems`,
+ *   `reorderZIndexItems`, `updateLinePoints`, U4's
  *   `groupSelection`/`ungroupSelection`, U7's `updateItemText`, and U8's
  *   `applyCrop` (which replaces BOTH tracked references at once) all
  *   replace `items` with a new array, so those calls
@@ -279,19 +279,18 @@ export interface CanvasState {
    * click contract. Removes the id if present; appends it at the END if
    * not (the array is insertion-ordered). Untracked by undo.
    */
-  toggleInSelection: (id: CanvasObject['id']) => void
 
   /**
-   * U4: batched variant of `toggleInSelection` — toggles a whole id SET
+   * U4: toggles a whole id SET
    * in/out of the selection atomically, the group-aware ctrl(/meta)+click
    * contract (the handler expands the clicked member's `group_key` peers
    * via `expandIdsByGroup` and passes the expanded set here). When EVERY
    * given id is already selected the whole set is removed; otherwise the
    * missing ids are appended at the END in the given order (so a partially
    * selected group completes rather than half-toggling). A one-element set
-   * behaves exactly like `toggleInSelection`, which remains for lone-object
-   * paths (the same single+batched convention as `deleteItem`/
-   * `deleteItems`). Untracked by undo.
+   * covers the lone-object ctrl+click too (a one-element set) — after the
+   * U1 conversion, batched actions are the ONLY mutation paths; the old
+   * single-item variants were removed as dead code (code-review). Untracked by undo.
    */
   toggleIdsInSelection: (ids: CanvasObject['id'][]) => void
 
@@ -356,10 +355,9 @@ export interface CanvasState {
   ) => void
 
   /** Removes an item and drops its id from the selection if selected. */
-  deleteItem: (id: CanvasObject['id']) => void
 
   /**
-   * U1: batched multi-item variant of `deleteItem` — removes every listed
+   * U1: batched delete — removes every listed
    * item in ONE `set()` (one history entry for a whole-selection delete)
    * and drops the deleted ids from the selection in the same call. A no-op
    * when none of the ids match an item.
@@ -392,10 +390,9 @@ export interface CanvasState {
    * A no-op if `id` doesn't match any item, or if `items` has only one
    * item (nothing to reorder relative to).
    */
-  reorderZIndex: (id: CanvasObject['id'], direction: 'front' | 'back') => void
 
   /**
-   * U1: batched multi-item variant of `reorderZIndex` — moves ALL listed
+   * U1: batched z-reorder — moves ALL listed
    * items above the previous max (`'front'`) or below the previous min
    * (`'back'`) among this store's `items`, preserving the batch's own
    * relative z-order (current `z_index`, then `id` — the same tiebreak
@@ -554,7 +551,7 @@ export function expandIdsByGroup(
 }
 
 /**
- * Pure z-reorder math shared by `reorderZIndex` (single) and
+ * Pure z-reorder math backing
  * `reorderZIndexItems` (batched): returns the next `items` array with every
  * matched id renumbered contiguously above the current max (`'front'`) or
  * below the current min (`'back'`) among ALL items, preserving the batch's
@@ -633,8 +630,26 @@ export const useCanvasStore = create<CanvasState>()(
         temporalStore.resume()
       },
 
-      applyCrop: (rect) =>
-        set((state) => ({
+      applyCrop: (rawRect) =>
+        set((state) => {
+          // Code-review fix: re-clamp against the CURRENT canvas at apply
+          // time — a pending region is plain UI state that survives
+          // undo/redo of canvasSize, so the rect captured at release time
+          // can be stale (e.g. a redo shrank the canvas while the confirm
+          // affordance was showing). Crop only ever trims: intersect with
+          // the live canvas and no-op on a degenerate result.
+          const current = state.canvasSize
+          if (!current) return {}
+          const x = Math.max(0, Math.min(rawRect.x, current.width))
+          const y = Math.max(0, Math.min(rawRect.y, current.height))
+          const rect = {
+            x,
+            y,
+            width: Math.min(rawRect.width, current.width - x),
+            height: Math.min(rawRect.height, current.height - y),
+          }
+          if (rect.width < 1 || rect.height < 1) return {}
+          return {
           // ONE tracked set() replacing BOTH tracked references (see the
           // action's interface doc): a single history entry restores dims
           // and every coordinate together on undo.
@@ -662,7 +677,8 @@ export const useCanvasStore = create<CanvasState>()(
           }),
           canvasSize: { width: rect.width, height: rect.height },
           dirty: true,
-        })),
+          }
+        }),
 
       createItemLocal: (item) =>
         set((state) => ({
@@ -682,12 +698,6 @@ export const useCanvasStore = create<CanvasState>()(
 
       replaceSelection: (ids) => set({ selectedItemIds: ids }),
 
-      toggleInSelection: (id) =>
-        set((state) => ({
-          selectedItemIds: state.selectedItemIds.includes(id)
-            ? state.selectedItemIds.filter((existing) => existing !== id)
-            : [...state.selectedItemIds, id],
-        })),
 
       toggleIdsInSelection: (ids) =>
         set((state) => {
@@ -778,20 +788,30 @@ export const useCanvasStore = create<CanvasState>()(
           }
         }),
 
-      deleteItem: (id) =>
-        set((state) => ({
-          items: state.items.filter((item) => item.id !== id),
-          selectedItemIds: state.selectedItemIds.includes(id)
-            ? state.selectedItemIds.filter((existing) => existing !== id)
-            : state.selectedItemIds,
-          dirty: true,
-        })),
 
       deleteItems: (ids) =>
         set((state) => {
           const idSet = new Set(ids)
-          const nextItems = state.items.filter((item) => !idSet.has(item.id))
+          let nextItems = state.items.filter((item) => !idSet.has(item.id))
           if (nextItems.length === state.items.length) return {}
+          // Code-review fix: dissolve groups the deletion reduced to a
+          // single member — a one-member group is a state the UI can't
+          // otherwise create (groupSelection requires 2+), and it would
+          // persist as a junk key enabling Ungroup on a lone item. Same
+          // tracked set(), so delete + dissolve stay one history entry.
+          const survivorKeyCounts = new Map<string, number>()
+          for (const item of nextItems) {
+            if (item.group_key != null) {
+              survivorKeyCounts.set(item.group_key, (survivorKeyCounts.get(item.group_key) ?? 0) + 1)
+            }
+          }
+          if ([...survivorKeyCounts.values()].some((count) => count === 1)) {
+            nextItems = nextItems.map((item) =>
+              item.group_key != null && survivorKeyCounts.get(item.group_key) === 1
+                ? { ...item, group_key: null }
+                : item,
+            )
+          }
           return {
             items: nextItems,
             selectedItemIds: state.selectedItemIds.filter((id) => !idSet.has(id)),
@@ -799,11 +819,6 @@ export const useCanvasStore = create<CanvasState>()(
           }
         }),
 
-      reorderZIndex: (id, direction) =>
-        set((state) => {
-          const nextItems = applyZIndexReorder(state.items, [id], direction)
-          return nextItems ? { items: nextItems, dirty: true } : {}
-        }),
 
       reorderZIndexItems: (ids, direction) =>
         set((state) => {
@@ -925,7 +940,7 @@ export const useCanvasStore = create<CanvasState>()(
       partialize: (state) => ({ items: state.items, canvasSize: state.canvasSize }),
       // Reference equality on BOTH tracked keys is sufficient for the
       // actions that rely on it: the selection actions (replaceSelection/
-      // toggleInSelection/toggleIdsInSelection/clearSelection),
+      // toggleIdsInSelection/clearSelection),
       // setActiveTool, markSaved, and
       // the zoom/pan actions never reassign `items` or `canvasSize`, so
       // both references are

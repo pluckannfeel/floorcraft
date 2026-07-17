@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { resolveAlignmentAvailability } from './alignment'
 import type { AlignKind, DistributeAxis } from './alignment'
 import type { CanvasObject, Point } from './types'
@@ -204,13 +204,33 @@ export function ContextMenu({
     onClose()
   }
 
+  // Code-review fix: clamp the menu into the viewport — a fixed-position
+  // menu anchored at a bottom/right-edge click would otherwise render its
+  // lower entries (align/distribute) off-screen and unreachable. Measured
+  // after first paint; max-height + scroll below is the belt-and-braces
+  // for very short windows.
+  const [clamped, setClamped] = useState(position)
+  useLayoutEffect(() => {
+    const menu = menuRef.current
+    if (!menu) {
+      setClamped(position)
+      return
+    }
+    const margin = 8
+    const rect = menu.getBoundingClientRect()
+    setClamped({
+      x: Math.max(margin, Math.min(position.x, window.innerWidth - rect.width - margin)),
+      y: Math.max(margin, Math.min(position.y, window.innerHeight - rect.height - margin)),
+    })
+  }, [position])
+
   return (
     <div
       ref={menuRef}
       role="menu"
       aria-label="Canvas context menu"
-      style={{ left: position.x, top: position.y }}
-      className="fixed z-50 min-w-40 overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
+      style={{ left: clamped.x, top: clamped.y, maxHeight: 'calc(100vh - 16px)' }}
+      className="fixed z-50 min-w-40 overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
       // A right-click ON the menu itself must not re-open the native menu
       // dance mid-interaction; keep it inert like shadcn's menus do.
       onContextMenu={(event) => event.preventDefault()}

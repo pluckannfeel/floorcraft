@@ -125,10 +125,19 @@ export function buildClipboardPayload(
   // is non-empty here — the fallback is pure defensiveness.
   const origin: Point = setBox ? { x: setBox.x, y: setBox.y } : { x: 0, y: 0 }
 
+  // Code-review fix: only keys with 2+ members IN THE COPIED SET partition
+  // into groups — copying a lone grouped member (member-mode) must not
+  // mint a degenerate one-member group on paste.
+  const keyCounts = new Map<string, number>()
+  for (const item of selected) {
+    if (item.group_key != null) {
+      keyCounts.set(item.group_key, (keyCounts.get(item.group_key) ?? 0) + 1)
+    }
+  }
   const groupIndexByKey = new Map<string, number>()
   const entries = selected.map((item): ClipboardEntry => {
     let groupIndex: number | null = null
-    if (item.group_key != null) {
+    if (item.group_key != null && (keyCounts.get(item.group_key) ?? 0) >= 2) {
       const existing = groupIndexByKey.get(item.group_key)
       groupIndex = existing ?? groupIndexByKey.size
       if (existing === undefined) groupIndexByKey.set(item.group_key, groupIndex)

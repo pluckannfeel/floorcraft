@@ -1296,11 +1296,20 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // keyboard events by default.
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      const activeElement = document.activeElement as HTMLElement | null
+      // Code-review fix: the Escape branch shares the same "is the user
+      // typing?" guard as Delete/Backspace — Escape pressed to leave a
+      // property-panel or name field mid-line-draw must not also commit
+      // the half-drawn line.
+      if (
+        isEditableTarget(activeElement?.tagName, activeElement?.isContentEditable ?? false)
+      ) {
+        return
+      }
       if (event.key === 'Escape' && drawingLine) {
         lineTool.finishDraw()
         return
       }
-      const activeElement = document.activeElement as HTMLElement | null
       if (shouldHandleDeleteKey(event.key, selectedItemIds, activeElement?.tagName, activeElement?.isContentEditable)) {
         onDeleteSelected?.()
       }
@@ -1462,7 +1471,15 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // cursor; move/release are the window listeners above. Mouse-only,
         // like the marquee (v1).
         if (croppingTool) {
-          if (event.evt.button === 0 && event.evt.pointerType !== 'touch') {
+          // Code-review fix: touch keeps single-finger panning even while
+          // the crop tool is active (region drawing stays mouse-only) —
+          // the same per-gesture draggable enable as the Select-tool touch
+          // path below, so a tablet user isn't left with an inert canvas.
+          if (event.evt.pointerType === 'touch') {
+            stage.draggable(true)
+            return
+          }
+          if (event.evt.button === 0) {
             const pointer = stage.getPointerPosition()
             if (pointer) crop.begin(pointer)
           }
@@ -1568,8 +1585,13 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // affordance), and keeping the menu out is what makes the
         // documented Escape order (menu ABOVE crop) hold by construction:
         // a menu can never open over a pending crop region, so the two
-        // window-level Escape listeners can never race.
-        if (croppingTool) return
+        // window-level Escape listeners can never race. Code-review fix:
+        // the same reasoning applies to an in-progress line/shape draw and
+        // an active marquee — CanvasStage's window Escape listener owns
+        // those states, so the menu must never open over them (Escape
+        // would otherwise be consumed by two owners at once, e.g. closing
+        // the menu AND committing a half-drawn line).
+        if (croppingTool || drawingLine || drawingShape || marquee.isActive) return
         const stage = event.target.getStage()
         if (!stage) return
         // Right-click selection rule FIRST (plan Key Technical Decision),

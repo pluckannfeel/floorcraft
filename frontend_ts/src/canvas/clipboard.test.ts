@@ -120,10 +120,11 @@ describe('buildClipboardPayload', () => {
     const a = makeObject({ id: 41, group_key: 'group-original-A', z_index: 0 })
     const b = makeObject({ id: 42, group_key: 'group-original-A', z_index: 1 })
     const c = makeObject({ id: 43, group_key: 'group-original-B', z_index: 2 })
-    const loose = makeObject({ id: 44, z_index: 3 })
-    const payload = buildClipboardPayload([41, 42, 43, 44], [a, b, c, loose])!
+    const c2 = makeObject({ id: 45, group_key: 'group-original-B', z_index: 3 })
+    const loose = makeObject({ id: 44, z_index: 4 })
+    const payload = buildClipboardPayload([41, 42, 43, 45, 44], [a, b, c, c2, loose])!
 
-    expect(payload.entries.map((entry) => entry.groupIndex)).toEqual([0, 0, 1, null])
+    expect(payload.entries.map((entry) => entry.groupIndex)).toEqual([0, 0, 1, 1, null])
     const serialized = JSON.stringify(payload)
     expect(serialized).not.toContain('group-original')
     expect(serialized).not.toContain('"id"')
@@ -200,12 +201,13 @@ describe('mintClipboardItems', () => {
     const a = makeObject({ id: 'a', group_key: 'group-one', z_index: 0 })
     const b = makeObject({ id: 'b', group_key: 'group-one', z_index: 1 })
     const c = makeObject({ id: 'c', group_key: 'group-two', z_index: 2 })
-    const loose = makeObject({ id: 'd', z_index: 3 })
-    const payload = buildClipboardPayload(['a', 'b', 'c', 'd'], [a, b, c, loose])!
+    const c2 = makeObject({ id: 'c2', group_key: 'group-two', z_index: 3 })
+    const loose = makeObject({ id: 'd', z_index: 4 })
+    const payload = buildClipboardPayload(['a', 'b', 'c', 'c2', 'd'], [a, b, c, c2, loose])!
 
-    const minted = mintClipboardItems(payload, { x: 0, y: 0 }, 7, 4)
+    const minted = mintClipboardItems(payload, { x: 0, y: 0 }, 7, 5)
 
-    const [mintedA, mintedB, mintedC, mintedLoose] = minted
+    const [mintedA, mintedB, mintedC, , mintedLoose] = minted
     expect(mintedA.group_key).toMatch(/^group-/)
     expect(mintedA.group_key).toBe(mintedB.group_key)
     expect(mintedC.group_key).toMatch(/^group-/)
@@ -497,5 +499,26 @@ describe('text objects in the clipboard (U7)', () => {
     expect(pasted.height).toBe(20)
     expect(pasted.properties).toEqual(text.properties)
     expect(pasted.properties).not.toBe(text.properties) // deep clone
+  })
+})
+
+describe('member-mode copy (code-review fix)', () => {
+  it('copying a LONE grouped member does not mint a one-member group on paste', () => {
+    const member = makeObject({ id: 'm1', group_key: 'group-orig' })
+    const payload = buildClipboardPayload(['m1'], [member])
+
+    const minted = mintClipboardItems(payload!, { x: 10, y: 10 }, 7, 0)
+    expect(minted).toHaveLength(1)
+    expect(minted[0].group_key ?? null).toBeNull()
+  })
+
+  it('a full 2-member group still pastes grouped', () => {
+    const a = makeObject({ id: 'a', group_key: 'group-orig' })
+    const b = makeObject({ id: 'b', x: 50, group_key: 'group-orig' })
+    const payload = buildClipboardPayload(['a', 'b'], [a, b])
+
+    const minted = mintClipboardItems(payload!, { x: 10, y: 10 }, 7, 0)
+    expect(minted[0].group_key).toBeTruthy()
+    expect(minted[0].group_key).toBe(minted[1].group_key)
   })
 })

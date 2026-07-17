@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  isEditableTarget,
   applyNodeTransformToPoints,
   clampGroupDragDelta,
   clampToBounds,
@@ -430,5 +431,12 @@ describe('shouldHandleDeleteKey', () => {
 
   it('returns false while focus is in a textarea field', () => {
     expect(shouldHandleDeleteKey('Backspace', ['item-1'], 'textarea')).toBe(false)
+  })
+})
+
+describe('isEditableTarget — SELECT (code-review fix)', () => {
+  it('treats a focused <select> as editable so Delete/Space never hit the canvas', () => {
+    expect(isEditableTarget('SELECT', false)).toBe(true)
+    expect(isEditableTarget('select', false)).toBe(true)
   })
 })
