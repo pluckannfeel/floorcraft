@@ -80,6 +80,10 @@ function toSaveObjectPayload(
     rotation: item.rotation,
     z_index: item.z_index,
     properties: item.properties,
+    // U4: always sent explicitly (null when the item was never grouped, or
+    // carries no key) so an ungroup round-trips as a CLEAR server-side —
+    // omitting the field on an update would silently keep the old key.
+    group_key: item.group_key ?? null,
   }
 }
 

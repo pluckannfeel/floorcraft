@@ -4,8 +4,10 @@ import { getRotatedBoundingBox, MIN_ITEM_SIZE } from './coordinates'
 import {
   computeGeometryFromTransform,
   computeTransformCommit,
+  isPersistentGroupSelection,
   resolveTransformerNodes,
 } from './SelectionTransformer'
+import type { CanvasObject } from './types'
 
 /**
  * `SelectionTransformer` wraps Konva's `Transformer`, which requires a real
@@ -293,5 +295,57 @@ describe('computeTransformCommit', () => {
     expect(patch.points).toEqual([])
     expect(patch.x).toBeUndefined()
     expect(patch.width).toBeUndefined()
+  })
+})
+
+// U4: the selection-visual discriminator behind the transformer's dashed
+// border — pure, so it's tested here like every other Konva-free helper in
+// this file (the borderDash/borderStroke props themselves are thin plumbing
+// per the module doc above).
+describe('isPersistentGroupSelection (U4)', () => {
+  function makeObject(overrides: Partial<CanvasObject> = {}): CanvasObject {
+    return {
+      id: 'a',
+      floor_plan: 1,
+      type: 'chairs',
+      name: '',
+      x: 0,
+      y: 0,
+      width: 40,
+      height: 40,
+      rotation: 0,
+      z_index: 0,
+      properties: {},
+      ...overrides,
+    }
+  }
+
+  const objects = [
+    makeObject({ id: 'a', group_key: 'group-1' }),
+    makeObject({ id: 'b', group_key: 'group-1' }),
+    makeObject({ id: 'c', group_key: 'group-2' }),
+    makeObject({ id: 'loose' }),
+  ]
+
+  it('true for a whole persistent group (2+ ids, one shared non-null key) — dashed border', () => {
+    expect(isPersistentGroupSelection(['a', 'b'], objects)).toBe(true)
+  })
+
+  it('false for an ad-hoc multi-select of loose items — solid border', () => {
+    expect(isPersistentGroupSelection(['loose', 'c'], objects)).toBe(false)
+  })
+
+  it('false for a mixed selection (group + loose item, or two different groups)', () => {
+    expect(isPersistentGroupSelection(['a', 'b', 'loose'], objects)).toBe(false)
+    expect(isPersistentGroupSelection(['a', 'b', 'c'], objects)).toBe(false)
+  })
+
+  it('false for single selections — member-mode has its own cue in CanvasStage', () => {
+    expect(isPersistentGroupSelection(['a'], objects)).toBe(false)
+    expect(isPersistentGroupSelection([], objects)).toBe(false)
+  })
+
+  it('false when a selected id resolves to no object (mid-delete race)', () => {
+    expect(isPersistentGroupSelection(['a', 'ghost'], objects)).toBe(false)
   })
 })

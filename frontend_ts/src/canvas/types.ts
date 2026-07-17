@@ -40,6 +40,17 @@ export interface CanvasObject {
   rotation: number
   z_index: number
   properties: Record<string, unknown>
+  /**
+   * U4 (canvas-tools): persistent-group membership tag — an opaque,
+   * CLIENT-generated key (`group-${crypto.randomUUID()}`, never
+   * server-assigned) shared by every member of one flat group; `null` (or
+   * absent, for locally-created items that were never grouped) means
+   * ungrouped. Client-generated identity is the institutional invariant
+   * that keeps group keys valid inside zundo `items` snapshots across
+   * saves with zero `serverIdMap` involvement (see
+   * docs/solutions/ui-bugs/undo-redo-broken-after-save-2026-07-16.md).
+   */
+  group_key?: string | null
   created_at?: string
   updated_at?: string
 }

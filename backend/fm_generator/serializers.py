@@ -62,7 +62,12 @@ class ObjectSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'floor_plan', 'type', 'name',
             'x', 'y', 'width', 'height', 'rotation', 'z_index',
-            'properties', 'created_at', 'updated_at',
+            # `group_key` (U4) is a plain writable passthrough: an opaque
+            # client-generated grouping tag (see models.py) with no
+            # ownership semantics of its own — plan-level ownership already
+            # gates every write path, and the key means nothing outside the
+            # plan's own objects. SyncObjectSerializer inherits it.
+            'properties', 'group_key', 'created_at', 'updated_at',
         ]
 
     def validate(self, attrs):

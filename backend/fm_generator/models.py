@@ -50,6 +50,15 @@ class Objects(models.Model):
     # Line points/curve_style, Shape kind-specific sizing)
     properties = models.JSONField(default=dict, blank=True)
 
+    # U4 (canvas-tools): persistent-group membership tag. An OPAQUE,
+    # CLIENT-generated identity (`group-<uuid4>`, ~42 chars) shared by every
+    # member of one flat group — a plain writable passthrough with no
+    # server-side ownership semantics, no FK, and never server-assigned
+    # (client-generated identity keeps group keys valid inside frontend undo
+    # snapshots with zero id-map involvement). NULL means ungrouped. Scoped,
+    # like every field here, to the owning floor plan's own objects.
+    group_key = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

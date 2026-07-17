@@ -3,7 +3,12 @@ import type Konva from 'konva'
 import { Transformer } from 'react-konva'
 import { NO_GUIDES, snapResizeBox } from './AlignmentGuides'
 import type { GuideLines } from './AlignmentGuides'
-import { applyNodeTransformToPoints, constrainTransformBox, MIN_ITEM_SIZE } from './coordinates'
+import {
+  applyNodeTransformToPoints,
+  constrainTransformBox,
+  MIN_ITEM_SIZE,
+  SELECTION_CHROME,
+} from './coordinates'
 import { computeLineBoundingBox, flattenPoints, pairPoints } from './LineTool'
 import type { ItemGeometryPatch } from '../state/canvasStore'
 import type { CanvasObject, Point } from './types'
@@ -147,6 +152,37 @@ function isLineNode(node: Konva.Node): node is Konva.Line {
   return typeof (node as Konva.Line).points === 'function'
 }
 
+/**
+ * U4's selection-visual discriminator, pure for jsdom tests: true exactly
+ * when the selection is one PERSISTENT group — 2+ selected ids that all
+ * resolve to items sharing the same non-null `group_key`. The transformer
+ * border then draws DASHED (the shared `SELECTION_CHROME` token's dash
+ * variant) versus solid for ad-hoc multi-selects and plain single
+ * selections, so "saved group" always reads differently from "things I
+ * just marqueed". A mixed selection (a group plus loose items, or two
+ * different groups) is ad-hoc by definition — solid. Member-mode (a single
+ * grouped member) is NOT a group selection; its cue is `CanvasStage`'s
+ * dashed group-context outline instead.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isPersistentGroupSelection(
+  selectedItemIds: CanvasObject['id'][],
+  objects: CanvasObject[],
+): boolean {
+  if (selectedItemIds.length < 2) return false
+  let sharedKey: string | null = null
+  for (const id of selectedItemIds) {
+    const key = objects.find((object) => object.id === id)?.group_key
+    if (key == null) return false
+    if (sharedKey == null) {
+      sharedKey = key
+    } else if (key !== sharedKey) {
+      return false
+    }
+  }
+  return true
+}
+
 interface SelectionTransformerProps {
   /** The current selection set — every id with a registered node attaches
    * (U3's multi-node Transformer; see `resolveTransformerNodes`). */
@@ -218,6 +254,10 @@ export function SelectionTransformer({
   // plan explicitly waives alignment-snap for multi-selections in v1.
   const soleSelectedId = selectedItemIds.length === 1 ? selectedItemIds[0] : null
 
+  // U4: a persistent-group selection draws a DASHED border (see
+  // isPersistentGroupSelection above); everything else stays solid.
+  const groupSelected = isPersistentGroupSelection(selectedItemIds, allObjects ?? [])
+
   useEffect(() => {
     const transformer = transformerRef.current
     if (!transformer) return
@@ -252,6 +292,16 @@ export function SelectionTransformer({
       // multi-node transformer decision; applies to single selections too,
       // where dragging an anchor past the opposite edge previously flipped).
       flipEnabled={false}
+      // U4 selection visuals: every border draws from the shared
+      // SELECTION_CHROME token (one chrome language with the marquee and
+      // the member-mode group outline); a persistent-group selection gets
+      // the token's DASH variant, ad-hoc multi-selects and single
+      // selections stay solid (an explicit empty dash array, not
+      // `undefined` — react-konva only re-applies CHANGED props, so a
+      // group→ad-hoc selection switch must write a concrete value to clear
+      // the dash).
+      borderStroke={SELECTION_CHROME.stroke}
+      borderDash={groupSelected ? [...SELECTION_CHROME.dash] : []}
       // U19: alignment-snap runs first (adjusting newBox's x/y/width/height
       // per whichever edge matched — see `AlignmentGuides.tsx`'s
       // `snapResizeBox`/`applyAxisSnapToEdge`), then the existing

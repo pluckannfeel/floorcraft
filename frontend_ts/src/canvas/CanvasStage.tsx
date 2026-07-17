@@ -33,6 +33,7 @@ import type { GroupDragHandlers, SelectionClickModifiers } from './ObjectShape'
 import { SelectionTransformer } from './SelectionTransformer'
 import { isShapeTool, ShapePreview, useShapeTool } from './ShapeTool'
 import type { ShapeGeometry } from './ShapeTool'
+import { expandIdsByGroup } from '../state/canvasStore'
 import type { ActiveTool, ItemGeometryPatch } from '../state/canvasStore'
 import type { CanvasObject, LineType, Point, ShapeType } from './types'
 
@@ -59,13 +60,17 @@ interface CanvasStageProps {
    * contract). */
   selectedItemIds: CanvasObject['id'][]
   /** U1 click routing: a plain click on an object replaces the selection
-   * with `[id]` (and U2's marquee will pass its full hit set). Wired to the
-   * store's `replaceSelection` by the caller — same delegation as
-   * `onGeometryChange`/`onDeleteSelected`. */
+   * with its GROUP-EXPANDED operand set (U4: `expandIdsByGroup([id])` — a
+   * grouped member selects its whole group; U2's marquee passes its full,
+   * likewise-expanded hit set; U4's double-click passes the bare `[id]`
+   * for member-mode). Wired to the store's `replaceSelection` by the
+   * caller — same delegation as `onGeometryChange`/`onDeleteSelected`. */
   onReplaceSelection: (ids: CanvasObject['id'][]) => void
-  /** U1 click routing: ctrl(/meta)+click toggles one id's membership in
-   * the selection. Wired to the store's `toggleInSelection`. */
-  onToggleInSelection: (id: CanvasObject['id']) => void
+  /** U1/U4 click routing: ctrl(/meta)+click toggles the clicked object's
+   * group-expanded id SET in/out of the selection atomically (a
+   * one-element set for ungrouped objects — same behavior as U1's
+   * single-id toggle). Wired to the store's `toggleIdsInSelection`. */
+  onToggleIdsInSelection: (ids: CanvasObject['id'][]) => void
   /** U1 click routing: clicking empty canvas clears the selection. Wired
    * to the store's `clearSelection`. */
   onClearSelection: () => void
@@ -176,6 +181,9 @@ export const MARQUEE_CLICK_THRESHOLD_PX = 4
  * guides already established rather than reimplementing it. Returned ids
  * keep `objects` order, making the hit set deterministic for
  * `replaceSelection` (the store's ordered-array selection contract).
+ * Deliberately NOT group-expanded here — this is the raw geometric hit
+ * set; `resolveMarqueeCommit` expands it (U4), keeping one hit-test and one
+ * expansion boundary.
  */
 // eslint-disable-next-line react-refresh/only-export-components
 export function selectIdsInRect(rect: BoundingBox, objects: CanvasObject[]): CanvasObject['id'][] {
@@ -258,7 +266,11 @@ export function resolveMarqueeCommit({
     containerToStagePoint(origin, zoom, stagePosition),
     containerToStagePoint(current, zoom, stagePosition),
   )
-  const hits = selectIdsInRect(rect, objects)
+  // U4: a marquee touching ANY member selects the whole group — the raw
+  // geometric hits get group-expanded at this selection-time boundary
+  // (same shared helper as the click routing), so the committed selection
+  // is already the literal operand set.
+  const hits = expandIdsByGroup(selectIdsInRect(rect, objects), objects)
   return { kind: 'select', ids: applyMarqueeSelection(selectedItemIds, hits, additive) }
 }
 
@@ -391,6 +403,32 @@ export function buildGroupDragPatches(
   return patches
 }
 
+/**
+ * U4's member-mode cue, pure for jsdom tests: when the selection is exactly
+ * ONE grouped member (the double-click "member-mode" state — a plain one-id
+ * selection, no mode flag), returns the union bounding box of that member's
+ * WHOLE group so `CanvasStage` can draw a dashed group-context outline
+ * around it — the member's own solid selection chrome nested inside the
+ * dashed group outline is what tells the user "you're inside a group"
+ * versus a plain single selection. Returns `null` for every other selection
+ * shape: ungrouped single selections, any multi-selection (a fully-selected
+ * group already reads as a group via the transformer's dashed border), and
+ * degenerate one-member "groups" (no surrounding context to show).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveMemberModeGroupBox(
+  selectedItemIds: CanvasObject['id'][],
+  objects: CanvasObject[],
+): BoundingBox | null {
+  if (selectedItemIds.length !== 1) return null
+  const sole = objects.find((object) => object.id === selectedItemIds[0])
+  const key = sole?.group_key
+  if (key == null) return null
+  const members = objects.filter((object) => object.group_key === key)
+  if (members.length < 2) return null
+  return unionBoundingBoxes(members.map(boundingBoxForObject))
+}
+
 interface UseMarqueeArgs {
   zoom: number
   stagePosition: Point
@@ -491,7 +529,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     objects,
     selectedItemIds,
     onReplaceSelection,
-    onToggleInSelection,
+    onToggleIdsInSelection,
     onClearSelection,
     onGeometryChange,
     onItemsGeometryChange,
@@ -591,18 +629,39 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     soleSelectedId != null ? (objects.find((object) => object.id === soleSelectedId) ?? null) : null
   const selectedIsLine = selectedObject != null && isLineTool(selectedObject.type)
 
-  // U1: basic selection click routing (the plan's U1-owned contract —
-  // U2 layers the marquee on top; U4 later makes this group-aware via a
-  // shared expansion helper, keeping the store's selection the literal
-  // operand set). Plain click REPLACES the selection with the clicked
-  // object; ctrl(/meta, for macOS)+click TOGGLES its membership.
+  // U1/U4: selection click routing, group-aware via the shared
+  // `expandIdsByGroup` helper — expansion happens HERE, at selection time
+  // (the plan's chosen model), so the store's selection is always the
+  // literal operand set and no consumer re-derives group membership. Plain
+  // click REPLACES the selection with the clicked object's expanded set (a
+  // grouped member selects its whole group); ctrl(/meta, for macOS)+click
+  // TOGGLES the whole expanded set's membership atomically.
   const handleObjectSelect = (id: CanvasObject['id'], modifiers?: SelectionClickModifiers) => {
+    const operand = expandIdsByGroup([id], objects)
     if (modifiers?.ctrlKey || modifiers?.metaKey) {
-      onToggleInSelection(id)
+      onToggleIdsInSelection(operand)
     } else {
-      onReplaceSelection([id])
+      onReplaceSelection(operand)
     }
   }
+
+  // U4: double-click on a group member enters MEMBER-MODE — the selection
+  // narrows to JUST that member (a plain one-id selection; there is no mode
+  // flag, so any outside click/marquee naturally restores group-level
+  // behavior by re-expanding). The double-click's constituent clicks also
+  // fired `handleObjectSelect` (browsers dispatch click, click, dblclick) —
+  // that ordering is expected and harmless: the first click selects the
+  // whole group, the second re-selects it, and this narrows to the member.
+  // Ungrouped objects need no narrowing (a plain click already selected
+  // exactly them), so this is a no-op for them.
+  const handleObjectDoubleClick = (id: CanvasObject['id']) => {
+    const target = objects.find((object) => object.id === id)
+    if (target?.group_key != null) onReplaceSelection([id])
+  }
+
+  // U4's member-mode cue: the dashed group-context outline drawn while
+  // exactly one grouped member is selected (see resolveMemberModeGroupBox).
+  const memberModeGroupBox = resolveMemberModeGroupBox(selectedItemIds, objects)
 
   // U2: the marquee gesture state machine (see `useMarquee`'s doc).
   // `onPointerDown` begins it; move/release/Escape are handled by the
@@ -1053,6 +1112,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             object={object}
             isSelected={selectedItemIds.includes(object.id)}
             onSelect={handleObjectSelect}
+            onDoubleClick={handleObjectDoubleClick}
             gridSize={gridSize}
             canvasWidth={width}
             canvasHeight={height}
@@ -1125,6 +1185,28 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             fill={SELECTION_CHROME.fill}
             stroke={SELECTION_CHROME.stroke}
             strokeWidth={SELECTION_CHROME.strokeWidth / zoom}
+            listening={false}
+          />
+        )}
+        {/* U4's member-mode nested-outline cue: while exactly one grouped
+            member is selected (double-click member-mode), a DASHED
+            group-context outline — the shared selection-chrome token's dash
+            variant, same language as the group transformer border — wraps
+            the whole group's bbox, so "inside a group" always reads
+            differently from a plain single selection. No fill: the member's
+            own solid chrome nests inside it. */}
+        {memberModeGroupBox && (
+          <Rect
+            x={memberModeGroupBox.x}
+            y={memberModeGroupBox.y}
+            width={memberModeGroupBox.width}
+            height={memberModeGroupBox.height}
+            stroke={SELECTION_CHROME.stroke}
+            strokeWidth={SELECTION_CHROME.strokeWidth / zoom}
+            // Dash lengths divided by zoom for the same reason strokeWidth
+            // is: this layer inherits the stage transform, and the dash
+            // rhythm should stay constant on SCREEN at every zoom level.
+            dash={SELECTION_CHROME.dash.map((segment) => segment / zoom)}
             listening={false}
           />
         )}

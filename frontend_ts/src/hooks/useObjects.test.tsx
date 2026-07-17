@@ -4,7 +4,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { apiClient } from '../api/client'
 import * as ToastContextModule from '../notifications/ToastContext'
-import { undo, useCanvasStore } from '../state/canvasStore'
+import { redo, undo, useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject } from '../canvas/types'
 import { useObjects, useSaveObjects } from './useObjects'
 
@@ -212,6 +212,114 @@ describe('useSaveObjects', () => {
       objects: Record<string, unknown>[]
     }
     expect(secondBody.objects.map((o) => o.id)).toEqual([99])
+  })
+
+  it('carries group_key in every payload item — the stored key for grouped items, an explicit null otherwise (U4)', async () => {
+    useCanvasStore.setState({
+      items: [
+        makeObject({ id: 1, name: 'Member', group_key: 'group-abc' }),
+        makeObject({ id: 2, name: 'Never grouped' }),
+        makeObject({ id: 3, name: 'Ungrouped', group_key: null }),
+      ],
+      dirty: true,
+    })
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: { objects: [], id_map: {} },
+    } as never)
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const body = putSpy.mock.calls[0][1] as {
+      objects: Record<string, unknown>[]
+    }
+    // Explicit null (never an omitted field): an ungroup must round-trip
+    // as a CLEAR server-side, and never-grouped items must stay NULL.
+    expect(body.objects.map((o) => o.group_key)).toEqual([
+      'group-abc',
+      null,
+      null,
+    ])
+  })
+
+  it('undo ACROSS a save of a grouping change stays consistent — mapped ids reused, key toggles cleanly (U4)', async () => {
+    // The chain: create 2 -> group -> save #1 -> undo (ungroups) ->
+    // save #2 (mapped ids, null keys) -> redo (regroups with the SAME
+    // key from the snapshot) -> save #3 (mapped ids, key back). Group
+    // keys are client-generated, so no id_map machinery ever touches
+    // them — they must ride the items snapshots verbatim.
+    act(() => {
+      useCanvasStore
+        .getState()
+        .createItemLocal(makeObject({ id: 'local-a' as never, name: 'A' }))
+    })
+    act(() => {
+      useCanvasStore
+        .getState()
+        .createItemLocal(makeObject({ id: 'local-b' as never, name: 'B' }))
+    })
+    act(() => {
+      useCanvasStore.getState().replaceSelection(['local-a', 'local-b'])
+    })
+    act(() => {
+      useCanvasStore.getState().groupSelection()
+    })
+    const groupKey = useCanvasStore.getState().items[0].group_key
+    expect(groupKey).toMatch(/^group-/)
+
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: {
+        objects: [
+          makeObject({ id: 1, name: 'A', group_key: groupKey }),
+          makeObject({ id: 2, name: 'B', group_key: groupKey }),
+        ],
+        id_map: { 'local-a': 1, 'local-b': 2 },
+      },
+    } as never)
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const firstBody = putSpy.mock.calls[0][1] as {
+      objects: Record<string, unknown>[]
+    }
+    expect(firstBody.objects.map((o) => o.group_key)).toEqual([
+      groupKey,
+      groupKey,
+    ])
+
+    // Undo AFTER the save reverts ONLY the grouping (one entry) and
+    // re-dirties; the items keep their client-side local ids.
+    act(() => undo())
+    expect(
+      useCanvasStore.getState().items.map((item) => item.group_key ?? null),
+    ).toEqual([null, null])
+    expect(useCanvasStore.getState().dirty).toBe(true)
+
+    // Save #2: ids translate through serverIdMap (updates, not duplicate
+    // creates) and the cleared keys go out as explicit nulls.
+    act(() => result.current.mutate())
+    await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(2))
+    const secondBody = putSpy.mock.calls[1][1] as {
+      objects: Record<string, unknown>[]
+    }
+    expect(secondBody.objects.map((o) => o.id)).toEqual([1, 2])
+    expect(secondBody.objects.map((o) => o.group_key)).toEqual([null, null])
+
+    // Redo restores the grouping with the ORIGINAL client-generated key
+    // (snapshots carry it verbatim); save #3 sends it under mapped ids.
+    act(() => redo())
+    act(() => result.current.mutate())
+    await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(3))
+    const thirdBody = putSpy.mock.calls[2][1] as {
+      objects: Record<string, unknown>[]
+    }
+    expect(thirdBody.objects.map((o) => o.id)).toEqual([1, 2])
+    expect(thirdBody.objects.map((o) => o.group_key)).toEqual([
+      groupKey,
+      groupKey,
+    ])
   })
 
   it('keeps dirty set when the user edited while the PUT was in flight', async () => {

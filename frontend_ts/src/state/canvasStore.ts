@@ -64,12 +64,14 @@ export type ItemGeometryPatch = Partial<
  * - `equality` gates whether a given `set()` call pushes a new history
  *   entry at all: it compares the `items` array by *reference*. Every
  *   action below that isn't supposed to be undoable (the selection actions
- *   `replaceSelection`/`toggleInSelection`/`clearSelection`,
- *   `setActiveTool`, `markSaved`, the zoom/pan actions) only ever `set()`s
+ *   `replaceSelection`/`toggleInSelection`/`toggleIdsInSelection`/
+ *   `clearSelection`, `setActiveTool`, `markSaved`, the zoom/pan actions)
+ *   only ever `set()`s
  *   keys other than `items`, so `items` keeps the same reference across
  *   those calls and no history entry is created. `createItemLocal`,
  *   `updateItemGeometry`/`updateItemsGeometry`, `deleteItem`/`deleteItems`,
- *   `reorderZIndex`/`reorderZIndexItems`, and `updateLinePoints` all
+ *   `reorderZIndex`/`reorderZIndexItems`, `updateLinePoints`, and U4's
+ *   `groupSelection`/`ungroupSelection` all
  *   replace `items` with a new array, so those calls
  *   do produce a history entry. This is simpler and safer than a
  *   `partialize` that strips fields per-item (e.g. dropping `properties`):
@@ -201,9 +203,45 @@ export interface CanvasState {
    */
   toggleInSelection: (id: CanvasObject['id']) => void
 
+  /**
+   * U4: batched variant of `toggleInSelection` — toggles a whole id SET
+   * in/out of the selection atomically, the group-aware ctrl(/meta)+click
+   * contract (the handler expands the clicked member's `group_key` peers
+   * via `expandIdsByGroup` and passes the expanded set here). When EVERY
+   * given id is already selected the whole set is removed; otherwise the
+   * missing ids are appended at the END in the given order (so a partially
+   * selected group completes rather than half-toggling). A one-element set
+   * behaves exactly like `toggleInSelection`, which remains for lone-object
+   * paths (the same single+batched convention as `deleteItem`/
+   * `deleteItems`). Untracked by undo.
+   */
+  toggleIdsInSelection: (ids: CanvasObject['id'][]) => void
+
   /** U1: empties the selection (empty-canvas click, PNG export, plan
    * switch). Untracked by undo. */
   clearSelection: () => void
+
+  /**
+   * U4: stamps ONE fresh client-generated key (`group-${crypto.randomUUID()}`,
+   * NEVER server-assigned — the institutional stable-identity invariant, so
+   * keys ride `items` snapshots safely with no id-map involvement) onto
+   * every currently-selected item, in ONE tracked `set()` — one history
+   * entry per Group action. Groups are FLAT (R9): items already carrying a
+   * key are simply re-stamped with the new one, merging any groups in the
+   * selection into a single group. A no-op (no history entry, `dirty`
+   * untouched) unless the selection matches at least 2 items.
+   */
+  groupSelection: () => void
+
+  /**
+   * U4: clears `group_key` (to null) on every currently-selected item, in
+   * ONE tracked `set()`. A mixed selection dissolves ALL groups present;
+   * loose (never-grouped) members are untouched, and the selection itself
+   * is left as-is (everything stays selected — selection is untracked
+   * anyway). A no-op (no history entry, `dirty` untouched) unless at least
+   * one selected item is grouped.
+   */
+  ungroupSelection: () => void
 
   /**
    * Patches an item's geometry (x/y/width/height/rotation) — the single
@@ -358,6 +396,45 @@ export interface CanvasState {
 }
 
 /**
+ * U4's shared selection-expansion helper — THE mechanism behind the plan's
+ * "expansion at selection time" model: the click/dblclick/marquee handlers
+ * (`CanvasStage.tsx`) pass their raw hit ids through this before writing
+ * the selection, so `selectedItemIds` is always the LITERAL operand set and
+ * no consumer ever re-derives group membership. For each input id, if its
+ * item carries a `group_key` the WHOLE key-set joins the result (in `items`
+ * order — deterministic for the ordered-array selection contract);
+ * ungrouped/unknown ids pass through as themselves. Deduplicated, input
+ * order first. Pure and Konva-free; deliberately NOT called by anything in
+ * this store — double-click member-mode (a plain one-id selection of a
+ * grouped member) exists precisely because handlers can also choose NOT to
+ * expand.
+ */
+export function expandIdsByGroup(
+  ids: CanvasObject['id'][],
+  items: CanvasObject[],
+): CanvasObject['id'][] {
+  const result: CanvasObject['id'][] = []
+  const seen = new Set<CanvasObject['id']>()
+  const push = (id: CanvasObject['id']) => {
+    if (!seen.has(id)) {
+      seen.add(id)
+      result.push(id)
+    }
+  }
+  for (const id of ids) {
+    const key = items.find((item) => item.id === id)?.group_key
+    if (key != null) {
+      for (const member of items) {
+        if (member.group_key === key) push(member.id)
+      }
+    } else {
+      push(id)
+    }
+  }
+  return result
+}
+
+/**
  * Pure z-reorder math shared by `reorderZIndex` (single) and
  * `reorderZIndexItems` (batched): returns the next `items` array with every
  * matched id renumbered contiguously above the current max (`'front'`) or
@@ -448,7 +525,54 @@ export const useCanvasStore = create<CanvasState>()(
             : [...state.selectedItemIds, id],
         })),
 
+      toggleIdsInSelection: (ids) =>
+        set((state) => {
+          const selected = new Set(state.selectedItemIds)
+          const allSelected = ids.every((id) => selected.has(id))
+          return {
+            selectedItemIds: allSelected
+              ? state.selectedItemIds.filter((existing) => !ids.includes(existing))
+              : [...state.selectedItemIds, ...ids.filter((id) => !selected.has(id))],
+          }
+        }),
+
       clearSelection: () => set({ selectedItemIds: [] }),
+
+      groupSelection: () =>
+        set((state) => {
+          const idSet = new Set(state.selectedItemIds)
+          const memberCount = state.items.reduce(
+            (count, item) => (idSet.has(item.id) ? count + 1 : count),
+            0,
+          )
+          // A group needs at least 2 real members — returning {} keeps the
+          // `items` reference, so no history entry and `dirty` untouched.
+          if (memberCount < 2) return {}
+          const groupKey = `group-${crypto.randomUUID()}`
+          return {
+            items: state.items.map((item) =>
+              idSet.has(item.id) ? { ...item, group_key: groupKey } : item,
+            ),
+            dirty: true,
+          }
+        }),
+
+      ungroupSelection: () =>
+        set((state) => {
+          const idSet = new Set(state.selectedItemIds)
+          const hasGroupedMember = state.items.some(
+            (item) => idSet.has(item.id) && item.group_key != null,
+          )
+          if (!hasGroupedMember) return {}
+          return {
+            items: state.items.map((item) =>
+              idSet.has(item.id) && item.group_key != null
+                ? { ...item, group_key: null }
+                : item,
+            ),
+            dirty: true,
+          }
+        }),
 
       updateItemGeometry: (id, patch) =>
         set((state) => ({
@@ -583,12 +707,14 @@ export const useCanvasStore = create<CanvasState>()(
       partialize: (state) => ({ items: state.items }),
       // Reference equality on `items` is sufficient for the actions that
       // rely on it: the selection actions (replaceSelection/
-      // toggleInSelection/clearSelection), setActiveTool, markSaved, and
+      // toggleInSelection/toggleIdsInSelection/clearSelection),
+      // setActiveTool, markSaved, and
       // the zoom/pan actions never reassign `items`, so its reference is
       // unchanged across those calls and no entry is created.
       // createItemLocal, updateItemGeometry/updateItemsGeometry,
-      // deleteItem/deleteItems, reorderZIndex/reorderZIndexItems, and
-      // updateLinePoints always build a new `items` array, so those do
+      // deleteItem/deleteItems, reorderZIndex/reorderZIndexItems,
+      // updateLinePoints, and groupSelection/ungroupSelection (U4)
+      // always build a new `items` array, so those do
       // produce an entry (the batched variants deliberately in ONE set()
       // each — one history entry per gesture, however many items it
       // touched). `setItems` and `updateItemProperties` ALSO build a new

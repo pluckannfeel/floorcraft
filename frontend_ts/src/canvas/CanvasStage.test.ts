@@ -6,10 +6,12 @@ import {
   MARQUEE_CLICK_THRESHOLD_PX,
   resolveGroupDragUpdate,
   resolveMarqueeCommit,
+  resolveMemberModeGroupBox,
   selectIdsInRect,
   sortObjectsByZIndex,
   useMarquee,
 } from './CanvasStage'
+import { expandIdsByGroup } from '../state/canvasStore'
 import type { CanvasObject } from './types'
 
 /**
@@ -531,6 +533,107 @@ describe('buildGroupDragPatches (U3 dragend commit)', () => {
     const emptyPatch = patches.find((patch) => patch.id === 'empty')?.patch
     expect(emptyPatch?.points).toEqual([])
     expect(emptyPatch?.x).toBeUndefined()
+  })
+})
+
+/**
+ * U4: the group-expansion routing. `expandIdsByGroup` (canvasStore.ts) is
+ * the ONE shared helper every selection-time expansion goes through — the
+ * click/ctrl+click handlers pass a clicked id through it, and
+ * `resolveMarqueeCommit` expands its raw hit set with it — so these tests
+ * pin both the helper's contract and its marquee integration. Member-mode
+ * (double-click) is deliberately just `replaceSelection([memberId])` with
+ * NO expansion; its pure surface here is `resolveMemberModeGroupBox`, the
+ * dashed group-context outline's geometry.
+ */
+describe('expandIdsByGroup (U4)', () => {
+  const items = [
+    makeObject({ id: 'a', group_key: 'group-1' }),
+    makeObject({ id: 'loose' }),
+    makeObject({ id: 'b', group_key: 'group-1' }),
+    makeObject({ id: 'c', group_key: 'group-2' }),
+    makeObject({ id: 'nullKey', group_key: null }),
+  ]
+
+  it("expands a member id to every id sharing its group_key, in items order (AE3's click-selects-group)", () => {
+    expect(expandIdsByGroup(['b'], items)).toEqual(['a', 'b'])
+  })
+
+  it('passes ungrouped ids through as themselves (explicit-null and absent keys alike)', () => {
+    expect(expandIdsByGroup(['loose'], items)).toEqual(['loose'])
+    expect(expandIdsByGroup(['nullKey'], items)).toEqual(['nullKey'])
+  })
+
+  it('deduplicates when several members of the same group are in the input', () => {
+    expect(expandIdsByGroup(['a', 'b'], items)).toEqual(['a', 'b'])
+  })
+
+  it('expands a mixed input — groups expand, loose ids interleave, input order first', () => {
+    expect(expandIdsByGroup(['loose', 'c', 'a'], items)).toEqual(['loose', 'c', 'a', 'b'])
+  })
+
+  it('keeps unknown ids as-is (mid-delete race safety)', () => {
+    expect(expandIdsByGroup(['ghost'], items)).toEqual(['ghost'])
+  })
+
+  it('after clearing keys (ungroup), members select individually again (AE3)', () => {
+    const ungrouped = items.map((item) => ({ ...item, group_key: null }))
+    expect(expandIdsByGroup(['b'], ungrouped)).toEqual(['b'])
+  })
+})
+
+describe('resolveMarqueeCommit group expansion (U4)', () => {
+  it('a marquee touching ONE member selects the WHOLE group', () => {
+    const objects = [
+      makeObject({ id: 'near', x: 100, y: 100, group_key: 'group-1' }),
+      makeObject({ id: 'far', x: 700, y: 700, group_key: 'group-1' }),
+      makeObject({ id: 'bystander', x: 400, y: 400 }),
+    ]
+
+    // Rect covers only "near" — nowhere close to "far" or "bystander".
+    const action = resolveMarqueeCommit({
+      origin: { x: 90, y: 90 },
+      current: { x: 150, y: 150 },
+      zoom: 1,
+      stagePosition: { x: 0, y: 0 },
+      objects,
+      selectedItemIds: [],
+      additive: false,
+    })
+
+    expect(action).toEqual({ kind: 'select', ids: ['near', 'far'] })
+  })
+})
+
+describe('resolveMemberModeGroupBox (U4)', () => {
+  const grouped = [
+    makeObject({ id: 'a', x: 0, y: 0, width: 40, height: 40, group_key: 'group-1' }),
+    makeObject({ id: 'b', x: 100, y: 60, width: 40, height: 40, group_key: 'group-1' }),
+    makeObject({ id: 'loose', x: 500, y: 500 }),
+  ]
+
+  it("returns the WHOLE group's union bbox for a single selected grouped member (member-mode cue)", () => {
+    expect(resolveMemberModeGroupBox(['a'], grouped)).toEqual({
+      x: 0,
+      y: 0,
+      width: 140,
+      height: 100,
+    })
+  })
+
+  it('returns null for an ungrouped single selection', () => {
+    expect(resolveMemberModeGroupBox(['loose'], grouped)).toBeNull()
+  })
+
+  it('returns null for any multi-selection (the transformer border owns that cue)', () => {
+    expect(resolveMemberModeGroupBox(['a', 'b'], grouped)).toBeNull()
+  })
+
+  it('returns null for an empty selection and for a degenerate one-member group', () => {
+    expect(resolveMemberModeGroupBox([], grouped)).toBeNull()
+    expect(
+      resolveMemberModeGroupBox(['solo'], [makeObject({ id: 'solo', group_key: 'group-lonely' })]),
+    ).toBeNull()
   })
 })
 

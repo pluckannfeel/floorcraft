@@ -92,4 +92,39 @@ describe("resolveCanvasShortcut", () => {
       null,
     );
   });
+
+  // U4: Ctrl/Cmd+G groups the selection, Ctrl/Cmd+Shift+G ungroups it —
+  // both behind the same editable-target guard as undo/redo (they act on
+  // the canvas selection; typing contexts must keep the key).
+  it("returns group for Ctrl+G", () => {
+    expect(resolveCanvasShortcut("g", true, false, undefined, false)).toBe(
+      "group",
+    );
+  });
+
+  it("returns ungroup for Ctrl+Shift+G", () => {
+    expect(resolveCanvasShortcut("g", true, true, undefined, false)).toBe(
+      "ungroup",
+    );
+  });
+
+  it("is case-insensitive on the key for group/ungroup (Shift+G reports 'G')", () => {
+    expect(resolveCanvasShortcut("G", true, true, undefined, false)).toBe(
+      "ungroup",
+    );
+  });
+
+  it("returns null for a bare G without a modifier", () => {
+    expect(resolveCanvasShortcut("g", false, false, undefined, false)).toBe(
+      null,
+    );
+  });
+
+  it("ignores Ctrl+G while focused in an INPUT (editable-target guard)", () => {
+    expect(resolveCanvasShortcut("g", true, false, "INPUT", false)).toBe(null);
+  });
+
+  it("ignores Ctrl+Shift+G while focused in a contentEditable element", () => {
+    expect(resolveCanvasShortcut("g", true, true, "DIV", true)).toBe(null);
+  });
 });

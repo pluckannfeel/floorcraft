@@ -72,6 +72,13 @@ interface ObjectShapeProps {
   object: CanvasObject
   isSelected?: boolean
   onSelect?: (id: CanvasObject['id'], modifiers?: SelectionClickModifiers) => void
+  /** U4: double-click/tap relay — `CanvasStage` narrows a double-clicked
+   * GROUP MEMBER's selection to just that member (member-mode). Like
+   * `onSelect`, ObjectShape stays selection-policy-free and only reports
+   * which object was double-clicked; the constituent single clicks still
+   * fire `onSelect` first (browser click/click/dblclick ordering), which
+   * the routing in CanvasStage expects. */
+  onDoubleClick?: (id: CanvasObject['id']) => void
   /** Registers/unregisters this node's Konva ref with a parent-owned
    * `Map<id, Konva.Node>` — used by U8's SelectionTransformer. Optional so
    * this unit doesn't need that machinery yet. */
@@ -131,6 +138,7 @@ export function ObjectShape({
   object,
   isSelected = false,
   onSelect,
+  onDoubleClick,
   shapeRef,
   gridSize,
   canvasWidth,
@@ -180,6 +188,8 @@ export function ObjectShape({
         onTap={(event) =>
           onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
         }
+        onDblClick={() => onDoubleClick?.(object.id)}
+        onDblTap={() => onDoubleClick?.(object.id)}
         onDragMove={groupDrag ? (event) => groupDrag.onDragMove(object.id, event.target) : undefined}
         onDragEnd={groupDrag ? (event) => groupDrag.onDragEnd(object.id, event.target) : undefined}
       />
@@ -232,6 +242,8 @@ export function ObjectShape({
       onTap={(event) =>
         onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
       }
+      onDblClick={() => onDoubleClick?.(object.id)}
+      onDblTap={() => onDoubleClick?.(object.id)}
       onDragMove={groupDrag ? (event) => groupDrag.onDragMove(object.id, event.target) : undefined}
       onDragEnd={(event) => {
         const node = event.target

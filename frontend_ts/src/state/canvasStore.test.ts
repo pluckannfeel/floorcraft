@@ -1030,3 +1030,216 @@ describe('canvasStore selection set + batched mutations (U1)', () => {
     })
   })
 })
+
+// U4: persistent flat groups — groupSelection/ungroupSelection stamp/clear
+// the client-generated `group_key` in ONE tracked set() each, and
+// toggleIdsInSelection is the group-aware ctrl+click's atomic set-toggle.
+// (The shared expansion helper `expandIdsByGroup` is exercised in
+// CanvasStage.test.ts alongside the click/marquee routing that consumes it.)
+describe('canvasStore persistent groups (U4)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({ items: [], selectedItemIds: [], activeTool: 'select', dirty: false })
+    useCanvasStore.temporal.getState().clear()
+  })
+
+  function keyOf(id: CanvasObject['id']): string | null | undefined {
+    return useCanvasStore.getState().items.find((item) => item.id === id)?.group_key
+  }
+
+  describe('groupSelection', () => {
+    it('stamps ONE fresh group- key on every selected item in ONE history entry, setting dirty', () => {
+      useCanvasStore.setState({
+        items: [makeItem({ id: 'a' }), makeItem({ id: 'b' }), makeItem({ id: 'bystander' })],
+        selectedItemIds: ['a', 'b'],
+      })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().groupSelection()
+
+      const key = keyOf('a')
+      expect(key).toMatch(/^group-/)
+      expect(keyOf('b')).toBe(key)
+      expect(keyOf('bystander')).toBeUndefined()
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+      expect(useCanvasStore.getState().dirty).toBe(true)
+    })
+
+    it('grouping a selection containing an existing group merges into ONE flat key (R9)', () => {
+      useCanvasStore.setState({
+        items: [
+          makeItem({ id: 'a', group_key: 'group-old' }),
+          makeItem({ id: 'b', group_key: 'group-old' }),
+          makeItem({ id: 'loose' }),
+        ],
+        selectedItemIds: ['a', 'b', 'loose'],
+      })
+
+      useCanvasStore.getState().groupSelection()
+
+      const key = keyOf('a')
+      expect(key).toMatch(/^group-/)
+      expect(key).not.toBe('group-old')
+      expect(keyOf('b')).toBe(key)
+      expect(keyOf('loose')).toBe(key)
+      // Flat: no item anywhere still carries the swallowed key.
+      expect(useCanvasStore.getState().items.some((item) => item.group_key === 'group-old')).toBe(
+        false,
+      )
+    })
+
+    it('mints a DIFFERENT key per group action (two groups never collide)', () => {
+      useCanvasStore.setState({
+        items: [makeItem({ id: 'a' }), makeItem({ id: 'b' }), makeItem({ id: 'c' }), makeItem({ id: 'd' })],
+        selectedItemIds: ['a', 'b'],
+      })
+      useCanvasStore.getState().groupSelection()
+      const firstKey = keyOf('a')
+
+      useCanvasStore.getState().replaceSelection(['c', 'd'])
+      useCanvasStore.getState().groupSelection()
+
+      expect(keyOf('c')).toMatch(/^group-/)
+      expect(keyOf('c')).not.toBe(firstKey)
+    })
+
+    it('no-ops (no history entry, dirty untouched) with fewer than 2 selected members', () => {
+      const original = [makeItem({ id: 'a' }), makeItem({ id: 'b' })]
+      useCanvasStore.setState({ items: original, selectedItemIds: ['a'] })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().groupSelection()
+
+      expect(useCanvasStore.getState().items).toBe(original)
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+      expect(useCanvasStore.getState().dirty).toBe(false)
+    })
+
+    it('no-ops when the selection ids do not match at least 2 real items (stale ids)', () => {
+      const original = [makeItem({ id: 'a' })]
+      useCanvasStore.setState({ items: original, selectedItemIds: ['a', 'ghost'] })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().groupSelection()
+
+      expect(useCanvasStore.getState().items).toBe(original)
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+    })
+
+    it('undo of a group is ONE entry restoring prior keys; redo restores the group', () => {
+      useCanvasStore.setState({
+        items: [makeItem({ id: 'a', group_key: 'group-old' }), makeItem({ id: 'b' })],
+        selectedItemIds: ['a', 'b'],
+      })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().groupSelection()
+      const mintedKey = keyOf('a')
+
+      undo()
+      expect(keyOf('a')).toBe('group-old')
+      expect(keyOf('b')).toBeUndefined()
+
+      redo()
+      expect(keyOf('a')).toBe(mintedKey)
+      expect(keyOf('b')).toBe(mintedKey)
+    })
+  })
+
+  describe('ungroupSelection', () => {
+    it('mixed selection dissolves ALL groups present in ONE entry; loose items unaffected; everything stays selected', () => {
+      useCanvasStore.setState({
+        items: [
+          makeItem({ id: 'a', group_key: 'group-1' }),
+          makeItem({ id: 'b', group_key: 'group-1' }),
+          makeItem({ id: 'c', group_key: 'group-2' }),
+          makeItem({ id: 'loose' }),
+          makeItem({ id: 'unselected', group_key: 'group-3' }),
+        ],
+        selectedItemIds: ['a', 'b', 'c', 'loose'],
+      })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().ungroupSelection()
+
+      expect(keyOf('a')).toBeNull()
+      expect(keyOf('b')).toBeNull()
+      expect(keyOf('c')).toBeNull()
+      // Loose member untouched (never grouped — key stays absent, not null).
+      expect(keyOf('loose')).toBeUndefined()
+      // Unselected groups are none of this action's business.
+      expect(keyOf('unselected')).toBe('group-3')
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['a', 'b', 'c', 'loose'])
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+      expect(useCanvasStore.getState().dirty).toBe(true)
+    })
+
+    it('no-ops (no history entry, dirty untouched) when no selected member is grouped', () => {
+      const original = [makeItem({ id: 'a' }), makeItem({ id: 'b' })]
+      useCanvasStore.setState({ items: original, selectedItemIds: ['a', 'b'] })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().ungroupSelection()
+
+      expect(useCanvasStore.getState().items).toBe(original)
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+      expect(useCanvasStore.getState().dirty).toBe(false)
+    })
+
+    it('undo of an ungroup is ONE entry restoring the keys', () => {
+      useCanvasStore.setState({
+        items: [
+          makeItem({ id: 'a', group_key: 'group-1' }),
+          makeItem({ id: 'b', group_key: 'group-1' }),
+        ],
+        selectedItemIds: ['a', 'b'],
+      })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().ungroupSelection()
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+
+      undo()
+      expect(keyOf('a')).toBe('group-1')
+      expect(keyOf('b')).toBe('group-1')
+    })
+  })
+
+  describe('toggleIdsInSelection', () => {
+    it('appends the missing ids at the end when the set is not fully selected (completes a partial group)', () => {
+      useCanvasStore.setState({ selectedItemIds: ['x', 'a'] })
+
+      useCanvasStore.getState().toggleIdsInSelection(['a', 'b'])
+
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['x', 'a', 'b'])
+    })
+
+    it('removes the whole set when every id is already selected', () => {
+      useCanvasStore.setState({ selectedItemIds: ['x', 'a', 'b'] })
+
+      useCanvasStore.getState().toggleIdsInSelection(['a', 'b'])
+
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['x'])
+    })
+
+    it('a one-element set behaves exactly like toggleInSelection', () => {
+      useCanvasStore.setState({ selectedItemIds: ['a'] })
+
+      useCanvasStore.getState().toggleIdsInSelection(['b'])
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['a', 'b'])
+
+      useCanvasStore.getState().toggleIdsInSelection(['b'])
+      expect(useCanvasStore.getState().selectedItemIds).toEqual(['a'])
+    })
+
+    it('never creates history entries or sets dirty (selection is untracked)', () => {
+      useCanvasStore.setState({ items: [makeItem({ id: 'a' })] })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().toggleIdsInSelection(['a'])
+      useCanvasStore.getState().toggleIdsInSelection(['a'])
+
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+      expect(useCanvasStore.getState().dirty).toBe(false)
+    })
+  })
+})

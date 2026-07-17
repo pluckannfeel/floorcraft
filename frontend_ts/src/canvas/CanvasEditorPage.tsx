@@ -94,7 +94,11 @@ export function CanvasEditorPage() {
   const setItems = useCanvasStore((state) => state.setItems);
   const createItemLocal = useCanvasStore((state) => state.createItemLocal);
   const replaceSelection = useCanvasStore((state) => state.replaceSelection);
-  const toggleInSelection = useCanvasStore((state) => state.toggleInSelection);
+  // U4: ctrl+click routing is group-aware — CanvasStage expands the clicked
+  // member's group and toggles the whole id set atomically.
+  const toggleIdsInSelection = useCanvasStore(
+    (state) => state.toggleIdsInSelection,
+  );
   const clearSelection = useCanvasStore((state) => state.clearSelection);
   const updateItemGeometry = useCanvasStore(
     (state) => state.updateItemGeometry,
@@ -448,7 +452,7 @@ export function CanvasEditorPage() {
             objects={items}
             selectedItemIds={selectedItemIds}
             onReplaceSelection={replaceSelection}
-            onToggleInSelection={toggleInSelection}
+            onToggleIdsInSelection={toggleIdsInSelection}
             onClearSelection={clearSelection}
             onGeometryChange={updateItemGeometry}
             onItemsGeometryChange={updateItemsGeometry}

@@ -331,6 +331,72 @@ class SyncIdMapTests(SyncEndpointTestCase):
         self.assertEqual(response.json()['id_map'], {})
 
 
+class SyncGroupKeyTests(SyncEndpointTestCase):
+    """U4 (canvas-tools): `group_key` is an opaque CLIENT-generated grouping
+    tag (`group-<uuid>`) and a plain writable passthrough on the serializer —
+    the sync endpoint must round-trip it (persist AND return it), while
+    payloads that omit it or send an explicit null stay valid (ungrouped
+    objects simply carry NULL). This is what lets grouped objects survive
+    save + reload as a group (AE3).
+    """
+
+    def test_group_key_round_trips_through_sync(self):
+        self.login_as()
+        key = 'group-2f1f8a44-9c4e-4f6b-8d5e-0a1b2c3d4e5f'
+
+        response = self.sync(self.floor_plan.id, [
+            object_payload(id='local-a', name='Member A', group_key=key),
+            object_payload(id='local-b', name='Member B', group_key=key),
+            object_payload(id='local-c', name='Loose'),
+        ])
+
+        self.assertEqual(response.status_code, 200)
+        by_name = {row['name']: row for row in response.json()['objects']}
+        self.assertEqual(by_name['Member A']['group_key'], key)
+        self.assertEqual(by_name['Member B']['group_key'], key)
+        self.assertIsNone(by_name['Loose']['group_key'])
+
+        # Persisted, not just echoed back: the rows carry the key in the DB,
+        # so the next GET (a reload) returns the group intact.
+        self.assertEqual(
+            Objects.objects.filter(floor_plan=self.floor_plan, group_key=key).count(), 2,
+        )
+
+    def test_absent_and_null_group_key_are_both_allowed(self):
+        self.login_as()
+
+        response = self.sync(self.floor_plan.id, [
+            object_payload(name='No key at all'),
+            object_payload(name='Explicit null', group_key=None),
+        ])
+
+        self.assertEqual(response.status_code, 200)
+        for row in response.json()['objects']:
+            self.assertIsNone(row['group_key'])
+        self.assertEqual(
+            Objects.objects.filter(floor_plan=self.floor_plan, group_key__isnull=True).count(), 2,
+        )
+
+    def test_sync_clears_an_existing_group_key(self):
+        """The ungroup-then-save flow: an update item sent with
+        group_key=null must clear the stored key, not silently keep it.
+        """
+        self.login_as()
+        row = Objects.objects.create(
+            floor_plan=self.floor_plan, type=Objects.ObjectType.TABLES,
+            name='Formerly grouped', x=0, y=0, group_key='group-old',
+        )
+
+        response = self.sync(self.floor_plan.id, [
+            object_payload(id=row.id, name='Formerly grouped', group_key=None),
+        ])
+
+        self.assertEqual(response.status_code, 200)
+        row.refresh_from_db()
+        self.assertIsNone(row.group_key)
+        self.assertIsNone(response.json()['objects'][0]['group_key'])
+
+
 class SyncAuthenticationTests(SyncEndpointTestCase):
     """Matches the existing endpoints' behavior: without a session the
     request is rejected (401/403, per SessionAuthentication + the global
