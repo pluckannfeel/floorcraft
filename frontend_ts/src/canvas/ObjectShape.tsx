@@ -54,18 +54,29 @@ export interface SelectionClickModifiers {
 }
 
 /**
- * U3: the group-drag relay a multi-selected member's drag events dispatch
+ * U3: the group-drag relay a selected member's drag events dispatch
  * into. `CanvasStage` owns the actual policy (delta computation, snapping
  * with the whole selection excluded, COLLECTIVE bounds clamping, imperative
  * co-member movement via its node registry, and the single batched
  * `updateItemsGeometry` commit) — ObjectShape only relays which member is
  * being dragged and its live node, exactly like `onSelect` relays clicks.
- * Passed ONLY while this object is part of a 2+ selection; when absent,
- * the pre-U3 single-drag behavior below is untouched.
+ * Passed while this object is part of the SELECTION (U6 widened U3's
+ * 2+-only condition so a sole-selected box object shares the same
+ * dragstart-capture/Alt-at-release pipeline; a sole-selected Line still
+ * never gets the relay — anchor-only editing, U17); when absent, the
+ * pre-U3 single-drag behavior below is untouched.
+ *
+ * U6: `onDragStart` lets `CanvasStage` capture every selected node's
+ * pre-drag position (and Line points) for the Alt-drop duplicate's
+ * IMPERATIVE revert, and `onDragEnd` carries the release event's `altKey`
+ * — Alt is sampled at RELEASE (plan's interaction default), so ObjectShape
+ * itself stays policy-free and only reports what the event carried,
+ * exactly like `SelectionClickModifiers`.
  */
 export interface GroupDragHandlers {
+  onDragStart: (id: CanvasObject['id'], node: Konva.Node) => void
   onDragMove: (id: CanvasObject['id'], node: Konva.Node) => void
-  onDragEnd: (id: CanvasObject['id'], node: Konva.Node) => void
+  onDragEnd: (id: CanvasObject['id'], node: Konva.Node, altKey: boolean) => void
 }
 
 interface ObjectShapeProps {
@@ -190,8 +201,13 @@ export function ObjectShape({
         }
         onDblClick={() => onDoubleClick?.(object.id)}
         onDblTap={() => onDoubleClick?.(object.id)}
+        onDragStart={groupDrag ? (event) => groupDrag.onDragStart(object.id, event.target) : undefined}
         onDragMove={groupDrag ? (event) => groupDrag.onDragMove(object.id, event.target) : undefined}
-        onDragEnd={groupDrag ? (event) => groupDrag.onDragEnd(object.id, event.target) : undefined}
+        onDragEnd={
+          groupDrag
+            ? (event) => groupDrag.onDragEnd(object.id, event.target, event.evt.altKey)
+            : undefined
+        }
       />
     )
   }
@@ -244,14 +260,16 @@ export function ObjectShape({
       }
       onDblClick={() => onDoubleClick?.(object.id)}
       onDblTap={() => onDoubleClick?.(object.id)}
+      onDragStart={groupDrag ? (event) => groupDrag.onDragStart(object.id, event.target) : undefined}
       onDragMove={groupDrag ? (event) => groupDrag.onDragMove(object.id, event.target) : undefined}
       onDragEnd={(event) => {
         const node = event.target
-        // U3: a multi-selected member's drag commits through the group
-        // relay (ONE batched store entry for the whole selection) instead
-        // of the single-object commit below.
+        // U3: a selected member's drag commits through the group relay
+        // (ONE batched store entry for the whole selection) instead of the
+        // single-object commit below. U6: the release event's altKey rides
+        // along — Alt held at release turns the drop into a duplicate.
         if (groupDrag) {
-          groupDrag.onDragEnd(object.id, node)
+          groupDrag.onDragEnd(object.id, node, event.evt.altKey)
           return
         }
         onGeometryChange?.(object.id, { x: node.x(), y: node.y() })

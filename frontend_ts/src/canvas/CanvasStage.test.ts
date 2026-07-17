@@ -1,10 +1,12 @@
 import { act, renderHook } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   applyMarqueeSelection,
   buildGroupDragPatches,
+  captureDragSnapshot,
   MARQUEE_CLICK_THRESHOLD_PX,
   resolveContextMenuSelection,
+  resolveDragEndAction,
   resolveGroupDragUpdate,
   resolveMarqueeCommit,
   resolveMemberModeGroupBox,
@@ -12,7 +14,8 @@ import {
   sortObjectsByZIndex,
   useMarquee,
 } from './CanvasStage'
-import { expandIdsByGroup } from '../state/canvasStore'
+import { mintClipboardItems } from './clipboard'
+import { expandIdsByGroup, undo, useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject } from './types'
 
 /**
@@ -534,6 +537,278 @@ describe('buildGroupDragPatches (U3 dragend commit)', () => {
     const emptyPatch = patches.find((patch) => patch.id === 'empty')?.patch
     expect(emptyPatch?.points).toEqual([])
     expect(emptyPatch?.x).toBeUndefined()
+  })
+})
+
+/**
+ * U6: the Alt-drop duplicate's pure pipeline. Same jsdom constraint as U3's
+ * suites above — the drag gesture itself can't run here, so the dragend
+ * decision (`resolveDragEndAction`) and the imperative revert's snapshot
+ * (`captureDragSnapshot`) are pure, and `CanvasStage`'s handlers only plumb
+ * node positions/`evt.altKey` into them.
+ */
+describe('captureDragSnapshot (U6 pre-drag revert state)', () => {
+  it('captures a box member as its store position (the node position at dragstart)', () => {
+    const objects = [
+      makeObject({ id: 'a', x: 100, y: 100 }),
+      makeObject({ id: 'bystander', x: 400, y: 400 }),
+    ]
+
+    expect(captureDragSnapshot(objects, ['a'])).toEqual([
+      { id: 'a', position: { x: 100, y: 100 }, points: null },
+    ])
+  })
+
+  it('captures a LINE member as its absolute points plus a ZERO position (the dragged-line offset reset)', () => {
+    const objects = [
+      makeObject({ id: 'box', x: 10, y: 20 }),
+      makeObject({
+        id: 'wall',
+        type: 'line_straight',
+        properties: { points: [{ x: 300, y: 300 }, { x: 400, y: 350 }] },
+      }),
+    ]
+
+    expect(captureDragSnapshot(objects, ['box', 'wall'])).toEqual([
+      { id: 'box', position: { x: 10, y: 20 }, points: null },
+      {
+        id: 'wall',
+        position: { x: 0, y: 0 },
+        points: [
+          { x: 300, y: 300 },
+          { x: 400, y: 350 },
+        ],
+      },
+    ])
+  })
+
+  it('covers only selected members, in items order', () => {
+    const objects = [
+      makeObject({ id: 'a', x: 1 }),
+      makeObject({ id: 'b', x: 2 }),
+      makeObject({ id: 'c', x: 3 }),
+    ]
+
+    expect(captureDragSnapshot(objects, ['c', 'a']).map((member) => member.id)).toEqual(['a', 'c'])
+  })
+})
+
+describe('resolveDragEndAction (U6 Alt sampled at release)', () => {
+  function twoSelected() {
+    return [
+      makeObject({ id: 'a', x: 100, y: 100 }),
+      makeObject({ id: 'b', x: 200, y: 150 }),
+      makeObject({ id: 'bystander', x: 500, y: 500 }),
+    ]
+  }
+
+  it('without Alt at release it is a plain MOVE — U3 patches, byte-identical inputs untouched', () => {
+    const objects = twoSelected()
+    const before = structuredClone(objects)
+
+    const action = resolveDragEndAction({
+      draggedId: 'a',
+      nodePosition: { x: 140, y: 120 },
+      altKey: false,
+      objects,
+      selectedItemIds: ['a', 'b'],
+    })
+
+    expect(action).toEqual({
+      kind: 'move',
+      patches: [
+        { id: 'a', patch: { x: 140, y: 120 } },
+        { id: 'b', patch: { x: 240, y: 170 } },
+      ],
+    })
+    expect(objects).toEqual(before)
+  })
+
+  it('Alt pressed mid-drag but released before drop is the SAME plain move (the decision reads only the release-time altKey)', () => {
+    // Alt "was held earlier" leaves no trace anywhere — the decision's only
+    // Alt input is the flag the release event carried, so a false flag IS
+    // the sampled-at-release contract.
+    const action = resolveDragEndAction({
+      draggedId: 'a',
+      nodePosition: { x: 140, y: 120 },
+      altKey: false,
+      objects: twoSelected(),
+      selectedItemIds: ['a', 'b'],
+    })
+
+    expect(action?.kind).toBe('move')
+  })
+
+  it('Alt held at release DUPLICATES: no move patches, payload from the selection, drop point at the dragged-to bbox origin', () => {
+    const objects = twoSelected()
+    const before = structuredClone(objects)
+
+    // Selection bbox origin is (100, 100); the drag moved 'a' by (40, 20).
+    const action = resolveDragEndAction({
+      draggedId: 'a',
+      nodePosition: { x: 140, y: 120 },
+      altKey: true,
+      objects,
+      selectedItemIds: ['a', 'b'],
+    })
+
+    expect(action?.kind).toBe('duplicate')
+    if (action?.kind !== 'duplicate') throw new Error('expected duplicate')
+    expect(action.dropPoint).toEqual({ x: 140, y: 120 })
+    // The payload is the U5 clipboard shape: offsets relative to the set's
+    // bbox origin, no ids, no group keys.
+    expect(action.payload.entries.map((entry) => entry.offset)).toEqual([
+      { x: 0, y: 0 },
+      { x: 100, y: 50 },
+    ])
+    // The originals' store objects are byte-identical — nothing was
+    // committed or mutated for them (the node revert is imperative, and
+    // the store never changed during the drag to begin with).
+    expect(objects).toEqual(before)
+  })
+
+  it('minting the duplicate at the drop point reproduces the arrangement where the drag preview showed it', () => {
+    const objects = twoSelected()
+    const action = resolveDragEndAction({
+      draggedId: 'b',
+      nodePosition: { x: 230, y: 100 }, // 'b' from (200,150) → delta (30,-50)
+      altKey: true,
+      objects,
+      selectedItemIds: ['a', 'b'],
+    })
+    if (action?.kind !== 'duplicate') throw new Error('expected duplicate')
+
+    const minted = mintClipboardItems(action.payload, action.dropPoint, 1, 10)
+
+    // Every duplicate sits exactly at original + delta, fresh local ids.
+    expect(minted.map((item) => ({ x: item.x, y: item.y }))).toEqual([
+      { x: 130, y: 50 },
+      { x: 230, y: 100 },
+    ])
+    expect(minted.every((item) => String(item.id).startsWith('local-'))).toBe(true)
+  })
+
+  it('Alt-dropping a selection containing a LINE puts the duplicate line\'s points at the drop position', () => {
+    const objects = [
+      makeObject({ id: 'box', x: 100, y: 100 }),
+      makeObject({
+        id: 'wall',
+        type: 'line_straight',
+        x: 300,
+        y: 300,
+        width: 100,
+        height: 50,
+        properties: { points: [{ x: 300, y: 300 }, { x: 400, y: 350 }], curve_style: 'straight' },
+      }),
+    ]
+
+    // Dragging 'box' by (50, 10); selection bbox origin is (100, 100).
+    const action = resolveDragEndAction({
+      draggedId: 'box',
+      nodePosition: { x: 150, y: 110 },
+      altKey: true,
+      objects,
+      selectedItemIds: ['box', 'wall'],
+    })
+    if (action?.kind !== 'duplicate') throw new Error('expected duplicate')
+
+    const minted = mintClipboardItems(action.payload, action.dropPoint, 1, 10)
+    const mintedWall = minted.find((item) => item.type === 'line_straight')
+
+    expect(mintedWall?.properties.points).toEqual([
+      { x: 350, y: 310 },
+      { x: 450, y: 360 },
+    ])
+    // Descriptive metadata recomputed at the new position.
+    expect(mintedWall).toMatchObject({ x: 350, y: 310, width: 100, height: 50 })
+    // The ORIGINAL wall's stored points are untouched.
+    expect(objects[1].properties.points).toEqual([
+      { x: 300, y: 300 },
+      { x: 400, y: 350 },
+    ])
+  })
+
+  it('a sole-selected object Alt-drops a one-item duplicate at its dragged-to position', () => {
+    const objects = [makeObject({ id: 'only', x: 100, y: 100 })]
+
+    const action = resolveDragEndAction({
+      draggedId: 'only',
+      nodePosition: { x: 260, y: 180 },
+      altKey: true,
+      objects,
+      selectedItemIds: ['only'],
+    })
+    if (action?.kind !== 'duplicate') throw new Error('expected duplicate')
+
+    const minted = mintClipboardItems(action.payload, action.dropPoint, 1, 1)
+    expect(minted).toHaveLength(1)
+    expect(minted[0]).toMatchObject({ x: 260, y: 180 })
+  })
+
+  it('an Alt release whose selection matches no items falls back to a move; an unknown dragged id is null', () => {
+    const objects = [makeObject({ id: 'a', x: 100, y: 100 })]
+
+    const fallback = resolveDragEndAction({
+      draggedId: 'a',
+      nodePosition: { x: 140, y: 100 },
+      altKey: true,
+      objects,
+      selectedItemIds: ['ghost'],
+    })
+    expect(fallback?.kind).toBe('move')
+
+    expect(
+      resolveDragEndAction({
+        draggedId: 'ghost',
+        nodePosition: { x: 0, y: 0 },
+        altKey: true,
+        objects,
+        selectedItemIds: ['ghost'],
+      }),
+    ).toBeNull()
+  })
+})
+
+describe('Alt-drop duplicate commit granularity (U6)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({ items: [], selectedItemIds: [] })
+    useCanvasStore.temporal.getState().clear()
+  })
+
+  it('a single undo removes ALL duplicates (one createItemsLocal entry) and leaves the originals byte-identical', () => {
+    const originals = [
+      makeObject({ id: 'a', x: 100, y: 100 }),
+      makeObject({ id: 'b', x: 200, y: 150 }),
+    ]
+    useCanvasStore.setState({ items: originals })
+    useCanvasStore.temporal.getState().clear()
+
+    const action = resolveDragEndAction({
+      draggedId: 'a',
+      nodePosition: { x: 140, y: 120 },
+      altKey: true,
+      objects: useCanvasStore.getState().items,
+      selectedItemIds: ['a', 'b'],
+    })
+    if (action?.kind !== 'duplicate') throw new Error('expected duplicate')
+
+    // The CanvasEditorPage commit path: mint → ONE tracked createItemsLocal
+    // → duplicates become the selection.
+    const minted = mintClipboardItems(action.payload, action.dropPoint, 1, 2)
+    useCanvasStore.getState().createItemsLocal(minted)
+    useCanvasStore.getState().replaceSelection(minted.map((item) => item.id))
+
+    expect(useCanvasStore.getState().items).toHaveLength(4)
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+    expect(useCanvasStore.getState().selectedItemIds).toEqual(minted.map((item) => item.id))
+
+    undo()
+
+    const after = useCanvasStore.getState()
+    expect(after.items).toEqual(originals)
+    // The undo pruned the (now nonexistent) duplicate ids from the
+    // selection — U1's pruning contract.
+    expect(after.selectedItemIds).toEqual([])
   })
 })
 

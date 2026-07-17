@@ -1,7 +1,20 @@
 import type Konva from 'konva'
+import {
+  AlignCenterHorizontal,
+  AlignCenterVertical,
+  AlignEndHorizontal,
+  AlignEndVertical,
+  AlignHorizontalDistributeCenter,
+  AlignStartHorizontal,
+  AlignStartVertical,
+  AlignVerticalDistributeCenter,
+} from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import { useStore } from 'zustand'
 import { Button } from '@/components/ui/button'
 import { redo, undo, useCanvasStore } from '../state/canvasStore'
+import { resolveAlignmentAvailability } from './alignment'
+import type { AlignKind, DistributeAxis } from './alignment'
 import { exportStageToPng } from './export'
 import type { CanvasObject, LineType, ShapeType } from './types'
 
@@ -18,6 +31,29 @@ const LINE_TOOLS: { type: LineType; label: string }[] = [
   { type: 'line_curved', label: 'Curved Line' },
   { type: 'line_s_curve', label: 'S-Curve Line' },
 ]
+
+/** U6's six align actions, in the conventional left→right then top→bottom
+ * order, with lucide's object-alignment icons ("start/end vertical" = the
+ * vertical reference edge objects align their left/right sides to, etc.). */
+const ALIGN_ACTIONS: { kind: AlignKind; label: string; Icon: LucideIcon }[] = [
+  { kind: 'left', label: 'Align left', Icon: AlignStartVertical },
+  { kind: 'centerH', label: 'Align horizontal center', Icon: AlignCenterVertical },
+  { kind: 'right', label: 'Align right', Icon: AlignEndVertical },
+  { kind: 'top', label: 'Align top', Icon: AlignStartHorizontal },
+  { kind: 'middleV', label: 'Align vertical middle', Icon: AlignCenterHorizontal },
+  { kind: 'bottom', label: 'Align bottom', Icon: AlignEndHorizontal },
+]
+
+/** U6's two distribute actions. */
+const DISTRIBUTE_ACTIONS: { axis: DistributeAxis; label: string; Icon: LucideIcon }[] = [
+  { axis: 'horizontal', label: 'Distribute horizontally', Icon: AlignHorizontalDistributeCenter },
+  { axis: 'vertical', label: 'Distribute vertically', Icon: AlignVerticalDistributeCenter },
+]
+
+/** The disabled distribute buttons' tooltip (U6): distributing spaces box
+ * CENTERS between the two extremes, so it needs at least 3 boxes — a group
+ * counts as ONE box, matching `resolveAlignmentAvailability`. */
+const DISTRIBUTE_DISABLED_TOOLTIP = 'needs 3+ objects'
 
 /** Thin vertical rule separating the toolbar's control groups. */
 function ToolbarDivider() {
@@ -56,9 +92,22 @@ interface ToolbarProps {
    * matching how `onGeometryChange`/`onDeleteSelected` delegate their
    * store writes from `CanvasStage.tsx`. */
   onReorderZIndex: (ids: CanvasObject['id'][], direction: 'front' | 'back') => void
+  /** U6: aligns the current selection (one batched `updateItemsGeometry`
+   * entry — see `alignment.ts`'s `buildAlignPatches`). Thin delegation like
+   * `onReorderZIndex`. */
+  onAlignSelection: (kind: AlignKind) => void
+  /** U6: distributes the current selection's boxes (one batched entry —
+   * `buildDistributePatches`). */
+  onDistributeSelection: (axis: DistributeAxis) => void
 }
 
-export function Toolbar({ getStage, selectedItemIds, onReorderZIndex }: ToolbarProps) {
+export function Toolbar({
+  getStage,
+  selectedItemIds,
+  onReorderZIndex,
+  onAlignSelection,
+  onDistributeSelection,
+}: ToolbarProps) {
   const canUndo = useStore(useCanvasStore.temporal, (state) => state.pastStates.length > 0)
   const canRedo = useStore(useCanvasStore.temporal, (state) => state.futureStates.length > 0)
   const activeTool = useCanvasStore((state) => state.activeTool)
@@ -68,6 +117,11 @@ export function Toolbar({ getStage, selectedItemIds, onReorderZIndex }: ToolbarP
   const zoomOut = useCanvasStore((state) => state.zoomOut)
   const resetZoom = useCanvasStore((state) => state.resetZoom)
   const clearSelection = useCanvasStore((state) => state.clearSelection)
+  // U6: the align section's gating needs the items themselves (a group
+  // collapses to ONE distribute box, and ghost selection ids must not
+  // count) — read straight off the store like `activeTool`/`zoom` above.
+  const items = useCanvasStore((state) => state.items)
+  const alignment = resolveAlignmentAvailability(selectedItemIds, items)
 
   // U12: clears selection (detaching Transformer/anchor handles), waits for
   // that to actually redraw, then downloads a PNG snapshot — see
@@ -185,6 +239,52 @@ export function Toolbar({ getStage, selectedItemIds, onReorderZIndex }: ToolbarP
       >
         Send to Back
       </Button>
+
+      {/* U6: align/distribute. The whole section renders only for 2+
+          selected items (plan: no point showing alignment for 0-1
+          objects); within it, the distribute buttons use the shadcn
+          disabled treatment until the selection partitions into 3+ BOXES
+          (a persistent group counts as one box) — the same
+          disabled-not-hidden convention the context menu's entries follow.
+          The tooltip rides a wrapping span because the Button's disabled
+          state includes pointer-events-none, which would swallow a title
+          set on the button itself. */}
+      {alignment.canAlign && (
+        <>
+          <ToolbarDivider />
+          {ALIGN_ACTIONS.map(({ kind, label, Icon }) => (
+            <Button
+              key={kind}
+              type="button"
+              variant="outline"
+              size="icon-sm"
+              aria-label={label}
+              title={label}
+              onClick={() => onAlignSelection(kind)}
+            >
+              <Icon />
+            </Button>
+          ))}
+          {DISTRIBUTE_ACTIONS.map(({ axis, label, Icon }) => (
+            <span
+              key={axis}
+              className="inline-flex"
+              title={alignment.canDistribute ? label : DISTRIBUTE_DISABLED_TOOLTIP}
+            >
+              <Button
+                type="button"
+                variant="outline"
+                size="icon-sm"
+                aria-label={label}
+                disabled={!alignment.canDistribute}
+                onClick={() => onDistributeSelection(axis)}
+              >
+                <Icon />
+              </Button>
+            </span>
+          ))}
+        </>
+      )}
     </div>
   )
 }

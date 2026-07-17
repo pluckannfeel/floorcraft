@@ -1,4 +1,6 @@
 import { useEffect, useRef } from 'react'
+import { resolveAlignmentAvailability } from './alignment'
+import type { AlignKind, DistributeAxis } from './alignment'
 import type { CanvasObject, Point } from './types'
 
 /**
@@ -38,6 +40,11 @@ export interface ContextMenuAvailability {
   canPaste: boolean
   canGroup: boolean
   canUngroup: boolean
+  /** U6: align entries need 2+ selected items. */
+  canAlign: boolean
+  /** U6: distribute entries need 3+ BOXES — a group collapses to one box
+   * (2 groups + 1 loose item = 3), per `resolveAlignmentAvailability`. */
+  canDistribute: boolean
 }
 
 /**
@@ -53,6 +60,10 @@ export interface ContextMenuAvailability {
  *   meaningful again — it merges everything into one flat group, R9).
  * - Ungroup needs at least one grouped member in the selection (mirrors
  *   `ungroupSelection`'s own no-op guard).
+ * - Align/Distribute (U6) share the Toolbar section's policy via
+ *   `resolveAlignmentAvailability` — the plan's "same availability rules"
+ *   across both surfaces: align needs 2+ selected items, distribute needs
+ *   3+ boxes (groups collapse to one box each).
  */
 // Non-component export colocated with the menu it gates — same convention as
 // `CanvasStage.tsx`'s pure helpers.
@@ -69,14 +80,36 @@ export function resolveContextMenuAvailability(
   const keys = new Set(selected.map((item) => item.group_key ?? null))
   const isExactlyOneGroup = selected.length >= 2 && keys.size === 1 && !keys.has(null)
 
+  const alignment = resolveAlignmentAvailability(selectedItemIds, items)
+
   return {
     canCopy: hasSelection,
     canCut: hasSelection,
     canPaste: clipboardHasContent,
     canGroup: selected.length >= 2 && !isExactlyOneGroup,
     canUngroup: selected.some((item) => item.group_key != null),
+    canAlign: alignment.canAlign,
+    canDistribute: alignment.canDistribute,
   }
 }
+
+/** U6: the align entries, FLAT (the plan explicitly allows flat over a
+ * submenu — the menu's shape stays a single learnable list). Labels match
+ * the Toolbar's aria-labels so both surfaces speak one language. */
+const ALIGN_MENU_ENTRIES: { kind: AlignKind; label: string }[] = [
+  { kind: 'left', label: 'Align left' },
+  { kind: 'centerH', label: 'Align horizontal center' },
+  { kind: 'right', label: 'Align right' },
+  { kind: 'top', label: 'Align top' },
+  { kind: 'middleV', label: 'Align vertical middle' },
+  { kind: 'bottom', label: 'Align bottom' },
+]
+
+/** U6: the distribute entries (flat, like the align entries). */
+const DISTRIBUTE_MENU_ENTRIES: { axis: DistributeAxis; label: string }[] = [
+  { axis: 'horizontal', label: 'Distribute horizontally' },
+  { axis: 'vertical', label: 'Distribute vertically' },
+]
 
 interface ContextMenuProps {
   /** Where to place the menu's top-left corner, in CLIENT (viewport)
@@ -89,6 +122,11 @@ interface ContextMenuProps {
   onPaste: () => void
   onGroup: () => void
   onUngroup: () => void
+  /** U6: align/distribute the selection — same thin delegation as the
+   * Toolbar's `onAlignSelection`/`onDistributeSelection` (both surfaces
+   * dispatch into the same page-level handlers). */
+  onAlign: (kind: AlignKind) => void
+  onDistribute: (axis: DistributeAxis) => void
   /** Close request: click-away or Escape. Action entries close themselves
    * by calling their handler AND this. */
   onClose: () => void
@@ -131,6 +169,8 @@ export function ContextMenu({
   onPaste,
   onGroup,
   onUngroup,
+  onAlign,
+  onDistribute,
   onClose,
 }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement | null>(null)
@@ -186,6 +226,27 @@ export function ContextMenu({
         disabled={!availability.canUngroup}
         onSelect={select(onUngroup)}
       />
+      <div role="separator" aria-orientation="horizontal" className="-mx-1 my-1 h-px bg-border" />
+      {/* U6: align/distribute, flat entries under the same availability
+          rules as the Toolbar section (one policy —
+          `resolveAlignmentAvailability`). Like every other entry they
+          always render and merely disable when unavailable. */}
+      {ALIGN_MENU_ENTRIES.map(({ kind, label }) => (
+        <MenuItem
+          key={kind}
+          label={label}
+          disabled={!availability.canAlign}
+          onSelect={select(() => onAlign(kind))}
+        />
+      ))}
+      {DISTRIBUTE_MENU_ENTRIES.map(({ axis, label }) => (
+        <MenuItem
+          key={axis}
+          label={label}
+          disabled={!availability.canDistribute}
+          onSelect={select(() => onDistribute(axis))}
+        />
+      ))}
     </div>
   )
 }

@@ -19,6 +19,8 @@ import {
   unionBoundingBoxes,
 } from './coordinates'
 import type { BoundingBox, ZoomPanState } from './coordinates'
+import { buildClipboardPayload } from './clipboard'
+import type { ClipboardPayload } from './clipboard'
 import { LineAnchorHandles } from './LineAnchorHandles'
 import {
   computeLineBoundingBox,
@@ -127,6 +129,15 @@ interface CanvasStageProps {
    * context-menu Paste's paste point); `clientPosition` is the raw viewport
    * point the DOM menu is positioned at. */
   onOpenContextMenu?: (request: ContextMenuRequest) => void
+  /** U6: an Alt-drop wants the selection DUPLICATED at `dropPoint` (the
+   * dragged-to position of the selection's bbox origin). The caller mints
+   * via U5's `mintClipboardItems` and commits through ONE tracked
+   * `createItemsLocal` (one undo entry removes every duplicate), then
+   * selects the minted set — the same mint-and-commit path a paste uses,
+   * fed by this payload instead of the clipboard (the clipboard itself is
+   * never touched by an Alt-drop). Optional: without it, Alt-drags commit
+   * as ordinary moves. */
+  onDuplicateSelection?: (payload: ClipboardPayload, dropPoint: Point) => void
 }
 
 /** What `onOpenContextMenu` reports up — see the prop's doc above. */
@@ -417,6 +428,120 @@ export function buildGroupDragPatches(
   return patches
 }
 
+/**
+ * U6: one selected member's pre-drag node state, captured at dragstart for
+ * the Alt-drop duplicate's IMPERATIVE revert. Box members restore
+ * `node.position(position)`; Line members restore their absolute `points`
+ * AND a zero `position` (a dragged Line moves via its node's position
+ * offset — Konva's own drag — while co-moved Lines move via rewritten
+ * points; restoring both covers either role, and a co-moved Line's
+ * position was zero all along so re-setting it is harmless).
+ */
+export interface PreDragMemberState {
+  id: CanvasObject['id']
+  position: Point
+  points: Point[] | null
+}
+
+/**
+ * U6: captures every selected member's pre-drag state (see
+ * `PreDragMemberState`). Called at dragstart — the store's geometry IS the
+ * pre-drag truth at that instant (geometry commits on release, so nothing
+ * store-side moves during the drag), which is exactly why the Alt-drop
+ * revert must be imperative in the first place: on release the originals'
+ * store x/y never changed, so a store write would be a no-op and
+ * react-konva would never reset value-identical props. This snapshot is
+ * what `CanvasStage` plays back onto the live nodes instead.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function captureDragSnapshot(
+  objects: CanvasObject[],
+  selectedItemIds: CanvasObject['id'][],
+): PreDragMemberState[] {
+  const selectedIdSet = new Set(selectedItemIds)
+  const snapshot: PreDragMemberState[] = []
+  for (const object of objects) {
+    if (!selectedIdSet.has(object.id)) continue
+    if (isLineTool(object.type)) {
+      snapshot.push({ id: object.id, position: { x: 0, y: 0 }, points: parseLinePoints(object.properties) })
+    } else {
+      snapshot.push({ id: object.id, position: { x: object.x, y: object.y }, points: null })
+    }
+  }
+  return snapshot
+}
+
+/**
+ * U6: what releasing a selection drag commits — an ordinary MOVE (U3's
+ * batched geometry patches) or, with Alt held at release, a DUPLICATE:
+ * the originals stay untouched (the caller reverts their nodes
+ * imperatively and commits NOTHING for them) and a payload minted from the
+ * selection lands at `dropPoint` via the U5 clipboard helpers.
+ * `dropPoint` is the selection's collective bbox origin translated by the
+ * gesture's final delta, so `mintClipboardItems(payload, dropPoint, …)` —
+ * whose entries store offsets relative to that same bbox origin —
+ * reproduces every member (Line re-absolutization included) exactly where
+ * the drag preview showed it.
+ */
+export type DragEndAction =
+  | { kind: 'move'; patches: Array<{ id: CanvasObject['id']; patch: ItemGeometryPatch }> }
+  | { kind: 'duplicate'; payload: ClipboardPayload; dropPoint: Point }
+
+export interface ResolveDragEndActionArgs {
+  draggedId: CanvasObject['id']
+  /** The dragged node's final MODEL-space position at release (same
+   * convention as `ResolveGroupDragUpdateArgs.nodePosition`: a dragged
+   * LINE's position is its translation offset). */
+  nodePosition: Point
+  /** Alt sampled AT RELEASE — the plan's interaction default. Alt pressed
+   * only mid-drag but released before the drop is a plain move; Alt held
+   * at release duplicates even if it was pressed mid-drag. */
+  altKey: boolean
+  objects: CanvasObject[]
+  selectedItemIds: CanvasObject['id'][]
+}
+
+/**
+ * U6's pure dragend decision (the Konva-free core of the Alt-drop
+ * duplicate, testable in jsdom like U3's `buildGroupDragPatches`). Returns
+ * `null` when the dragged id isn't in `objects` (mid-delete race). A
+ * degenerate Alt release whose selection matches no items falls back to
+ * the move commit rather than dropping the gesture on the floor.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveDragEndAction({
+  draggedId,
+  nodePosition,
+  altKey,
+  objects,
+  selectedItemIds,
+}: ResolveDragEndActionArgs): DragEndAction | null {
+  const dragged = objects.find((object) => object.id === draggedId)
+  if (!dragged) return null
+  // The dragged node sits at its final (already snapped/clamped — every
+  // dragmove frame went through `resolveGroupDragUpdate`) position; the
+  // final shared delta falls straight out of it.
+  const origin: Point = isLineTool(dragged.type) ? { x: 0, y: 0 } : { x: dragged.x, y: dragged.y }
+  const delta: Point = { x: nodePosition.x - origin.x, y: nodePosition.y - origin.y }
+
+  if (altKey) {
+    const payload = buildClipboardPayload(selectedItemIds, objects)
+    const selectedIdSet = new Set(selectedItemIds)
+    const setBox = unionBoundingBoxes(
+      objects.filter((object) => selectedIdSet.has(object.id)).map(boundingBoxForObject),
+    )
+    if (payload && setBox) {
+      return {
+        kind: 'duplicate',
+        payload,
+        dropPoint: { x: setBox.x + delta.x, y: setBox.y + delta.y },
+      }
+    }
+  }
+
+  return { kind: 'move', patches: buildGroupDragPatches(delta, objects, selectedItemIds) }
+}
+
 /** What a right-click must do to the selection BEFORE the context menu
  * opens — see `resolveContextMenuSelection`. */
 export type ContextMenuSelectionAction =
@@ -590,6 +715,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onZoomChange,
     onPanEnd,
     onOpenContextMenu,
+    onDuplicateSelection,
   },
   ref,
 ) {
@@ -814,9 +940,10 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
 
   // U3: group drag — dragging any member of a 2+ selection moves the whole
   // selection as one. `ObjectShape` relays the dragged member's
-  // dragmove/dragend here (see `GroupDragHandlers`); these handlers are the
+  // dragstart/dragmove/dragend here (see `GroupDragHandlers`); these
+  // handlers are the
   // thin Konva plumbing around the pure policy in `resolveGroupDragUpdate`/
-  // `buildGroupDragPatches` above: per frame, force the dragged node to its
+  // `resolveDragEndAction` above: per frame, force the dragged node to its
   // snapped+collectively-clamped position and apply the SAME delta to every
   // co-selected node imperatively via `shapeNodesRef` (never a Konva.Group
   // re-parent, never `shouldOverdrawWholeArea` — the plan's Key Technical
@@ -825,7 +952,45 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // by rewriting their `points` (the `LineAnchorHandles` onDragMove
   // pattern), never via node.x()/y() — a Line's position isn't a React
   // prop, so an offset would survive the commit and double the translation.
-  const groupDragActive = selectedItemIds.length >= 2
+  //
+  // U6: the relay also covers a SOLE-selected box object (not just 2+
+  // selections), so "Alt-dragging a selection drops a duplicate" has ONE
+  // code path whatever the selection size: dragstart captures the
+  // imperative-revert snapshot, dragmove runs the same snap/clamp policy
+  // (identical to the old per-node `dragBoundFunc` for a 1-selection:
+  // snapping excludes exactly the object itself, and the collective bbox
+  // IS its own bbox), and dragend samples Alt at release. A sole-selected
+  // LINE still gets no relay — it stays non-draggable, anchor-only (U17);
+  // dragging an UNSELECTED object keeps the plain `dragBoundFunc` +
+  // `onGeometryChange` path (a drag never selects, so Alt-dragging an
+  // unselected object is an ordinary move — the duplicate source is
+  // always THE SELECTION, mirroring what the context menu acts on).
+  const dragRelayFor = (object: CanvasObject): GroupDragHandlers | undefined =>
+    selectedItemIds.includes(object.id) &&
+    (selectedItemIds.length >= 2 || !isLineTool(object.type))
+      ? groupDragHandlers
+      : undefined
+
+  // U6: the pre-drag snapshot for the Alt-drop revert, captured at
+  // dragstart. A ref (not state): it's per-gesture bookkeeping no render
+  // depends on — same rationale as `pinchRef`.
+  const preDragSnapshotRef = useRef<PreDragMemberState[] | null>(null)
+
+  // U6: plays a pre-drag snapshot back onto the live nodes — the
+  // IMPERATIVE revert (see `captureDragSnapshot`'s doc for why a store
+  // write can't do this). Line members restore points first, then
+  // position; box members restore position (React re-applies the same
+  // values harmlessly on the next render since they equal the store's).
+  const restoreDragSnapshot = (snapshot: PreDragMemberState[]) => {
+    for (const member of snapshot) {
+      const memberNode = shapeNodesRef.current.get(member.id)
+      if (!memberNode) continue
+      if (member.points) {
+        ;(memberNode as Konva.Line).points(flattenPoints(member.points))
+      }
+      memberNode.position(member.position)
+    }
+  }
 
   const applyGroupDelta = (draggedId: CanvasObject['id'], delta: Point) => {
     for (const member of objects) {
@@ -843,6 +1008,12 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   }
 
   const groupDragHandlers: GroupDragHandlers = {
+    onDragStart: () => {
+      // U6: capture every selected member's pre-drag state for the
+      // Alt-drop revert. The dragged id is always selected (the relay is
+      // only passed to selected members), so it's in the snapshot too.
+      preDragSnapshotRef.current = captureDragSnapshot(objects, selectedItemIds)
+    },
     onDragMove: (draggedId, node) => {
       const update = resolveGroupDragUpdate({
         draggedId,
@@ -860,29 +1031,55 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
       applyGroupDelta(draggedId, update.delta)
       node.getLayer()?.batchDraw()
     },
-    onDragEnd: (draggedId, node) => {
+    onDragEnd: (draggedId, node, altKey) => {
       setGuides(NO_GUIDES)
-      const dragged = objects.find((object) => object.id === draggedId)
-      if (!dragged) return
-      // The dragged node sits at its final (already snapped/clamped — every
-      // dragmove frame went through `resolveGroupDragUpdate`) position; the
-      // final shared delta falls straight out of it.
-      const origin: Point = isLineTool(dragged.type) ? { x: 0, y: 0 } : { x: dragged.x, y: dragged.y }
-      const delta: Point = { x: node.x() - origin.x, y: node.y() - origin.y }
-      const patches = buildGroupDragPatches(delta, objects, selectedItemIds)
+      const snapshot = preDragSnapshotRef.current
+      preDragSnapshotRef.current = null
+      // U6: the whole release decision is pure (`resolveDragEndAction`).
+      // Alt is sampled HERE, from the release event — Alt pressed mid-drag
+      // but released before the drop is a plain move; Alt held at release
+      // duplicates. The duplicate path is gated on the caller actually
+      // wiring `onDuplicateSelection` so Alt-drags stay ordinary moves for
+      // callers/tests that don't.
+      const action = resolveDragEndAction({
+        draggedId,
+        nodePosition: { x: node.x(), y: node.y() },
+        altKey: altKey && onDuplicateSelection != null,
+        objects,
+        selectedItemIds,
+      })
+      if (!action) return
+
+      if (action.kind === 'duplicate') {
+        // U6 Alt-drop, in the plan's mandated order: (a) IMPERATIVELY
+        // restore every selected node to its pre-drag state (the store
+        // never changed during the drag, so only the nodes are out of
+        // place — see `captureDragSnapshot`); (b) commit NOTHING for the
+        // originals (the U3 move commit below is skipped entirely);
+        // (c) hand the payload+drop point up — the caller mints fresh
+        // items in ONE tracked entry and selects them. The dragstart
+        // snapshot is always present in practice; the store-derived
+        // fallback is byte-identical since geometry commits on release.
+        restoreDragSnapshot(snapshot ?? captureDragSnapshot(objects, selectedItemIds))
+        node.getLayer()?.batchDraw()
+        onDuplicateSelection?.(action.payload, action.dropPoint)
+        return
+      }
+
       // A dragged LINE moved via its node's position offset (Konva's own
       // drag) — bake the translation into its points and zero the offset in
       // this same dragend, BEFORE the store commit re-renders: the
       // committed points already carry the translation, and a surviving
       // offset would apply it twice (Line x/y aren't React-controlled).
-      if (isLineTool(dragged.type)) {
-        const committedPoints = patches.find((patch) => patch.id === draggedId)?.patch.points
+      const dragged = objects.find((object) => object.id === draggedId)
+      if (dragged && isLineTool(dragged.type)) {
+        const committedPoints = action.patches.find((patch) => patch.id === draggedId)?.patch.points
         if (committedPoints) (node as Konva.Line).points(flattenPoints(committedPoints))
         node.position({ x: 0, y: 0 })
       }
       // ONE batched store action for the whole gesture — a single undo
       // entry restores every member (AE2).
-      onItemsGeometryChange?.(patches)
+      onItemsGeometryChange?.(action.patches)
     },
   }
 
@@ -1209,13 +1406,12 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             allObjects={objects}
             zoom={zoom}
             onAlignmentGuidesChange={setGuides}
-            // U3: members of a 2+ selection drag as a group — the relay is
-            // passed ONLY to selected members, so unselected objects (and
-            // any object under a single selection) keep the pre-U3
-            // single-drag path bit-for-bit.
-            groupDrag={
-              groupDragActive && selectedItemIds.includes(object.id) ? groupDragHandlers : undefined
-            }
+            // U3/U6: selected members drag through the relay (group-move
+            // for 2+ selections, and — since U6 — the sole-selected box
+            // case too, so Alt-drop duplication has one code path).
+            // Unselected objects, and a sole-selected LINE, keep the plain
+            // single-drag path bit-for-bit (see `dragRelayFor`).
+            groupDrag={dragRelayFor(object)}
             shapeRef={(node) => {
               if (node) {
                 shapeNodesRef.current.set(object.id, node)

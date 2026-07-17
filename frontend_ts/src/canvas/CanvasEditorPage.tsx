@@ -10,6 +10,11 @@ import { useAuth } from "../auth/AuthContext";
 import { useObjects, useSaveObjects } from "../hooks/useObjects";
 import { useCanvasStore } from "../state/canvasStore";
 import { useCanvasShortcuts } from "../hooks/useCanvasShortcuts";
+import {
+  buildAlignPatches,
+  buildDistributePatches,
+} from "./alignment";
+import type { AlignKind, DistributeAxis } from "./alignment";
 import { CanvasStage } from "./CanvasStage";
 import type { ContextMenuRequest } from "./CanvasStage";
 import {
@@ -20,6 +25,7 @@ import {
   resolvePastePoint,
   setClipboard,
 } from "./clipboard";
+import type { ClipboardPayload } from "./clipboard";
 import { ContextMenu, resolveContextMenuAvailability } from "./ContextMenu";
 import { FloorPlanNameEditor } from "./FloorPlanNameEditor";
 import { computeLineBoundingBox, curveStyleForType } from "./LineTool";
@@ -182,17 +188,17 @@ export function CanvasEditorPage() {
     deleteItems(selectedItemIds);
   }, [deleteItems]);
 
-  // U5: paste at a MODEL-space point — the context menu passes its
-  // right-click stage point, Ctrl+V goes through `handlePasteShortcut`
-  // below. Minting + committing follow the stable-id invariants: fresh
-  // `local-` ids and fresh `group-` keys every time, one batched tracked
-  // set() (one undo entry removes the whole pasted set), then the pasted
-  // set becomes the selection.
-  const handlePasteAt = useCallback(
-    (point: Point) => {
-      const payload = getClipboard();
+  // U5/U6: mints a payload's items at a MODEL-space point and commits them
+  // — the shared tail of BOTH paste (clipboard payload) and Alt-drop
+  // duplicate (payload built from the dragged selection; the clipboard is
+  // never touched). Minting + committing follow the stable-id invariants:
+  // fresh `local-` ids and fresh `group-` keys every time, one batched
+  // tracked set() (one undo entry removes the whole minted set), then the
+  // minted set becomes the selection.
+  const commitPayloadAt = useCallback(
+    (payload: ClipboardPayload, point: Point) => {
       const floorPlan = floorPlanQuery.data;
-      if (!payload || !floorPlan) return;
+      if (!floorPlan) return;
       const { items: currentItems } = useCanvasStore.getState();
       const maxZIndex = currentItems.reduce(
         (max, item) => Math.max(max, item.z_index),
@@ -208,6 +214,42 @@ export function CanvasEditorPage() {
       replaceSelection(minted.map((item) => item.id));
     },
     [floorPlanQuery.data, createItemsLocal, replaceSelection],
+  );
+
+  // U5: paste at a MODEL-space point — the context menu passes its
+  // right-click stage point, Ctrl+V goes through `handlePasteShortcut`
+  // below.
+  const handlePasteAt = useCallback(
+    (point: Point) => {
+      const payload = getClipboard();
+      if (!payload) return;
+      commitPayloadAt(payload, point);
+    },
+    [commitPayloadAt],
+  );
+
+  // U6: align/distribute — pure patch math over the CURRENT store state
+  // (getState, so the handlers stay referentially stable), committed via
+  // ONE batched updateItemsGeometry call each: one history entry per
+  // action, a single undo reverts the whole alignment. An empty patch
+  // list (nothing to move) is skipped outright so no-op clicks can't even
+  // reach the store.
+  const handleAlignSelection = useCallback(
+    (kind: AlignKind) => {
+      const { items, selectedItemIds } = useCanvasStore.getState();
+      const patches = buildAlignPatches(kind, selectedItemIds, items);
+      if (patches.length > 0) updateItemsGeometry(patches);
+    },
+    [updateItemsGeometry],
+  );
+
+  const handleDistributeSelection = useCallback(
+    (axis: DistributeAxis) => {
+      const { items, selectedItemIds } = useCanvasStore.getState();
+      const patches = buildDistributePatches(axis, selectedItemIds, items);
+      if (patches.length > 0) updateItemsGeometry(patches);
+    },
+    [updateItemsGeometry],
   );
 
   // U5: last observed pointer position (viewport coords) for Ctrl+V's
@@ -565,6 +607,8 @@ export function CanvasEditorPage() {
         getStage={getStage}
         selectedItemIds={selectedItemIds}
         onReorderZIndex={reorderZIndexItems}
+        onAlignSelection={handleAlignSelection}
+        onDistributeSelection={handleDistributeSelection}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -598,6 +642,7 @@ export function CanvasEditorPage() {
             onZoomChange={setZoomAndPosition}
             onPanEnd={setStagePosition}
             onOpenContextMenu={openContextMenu}
+            onDuplicateSelection={commitPayloadAt}
           />
         </div>
         <PropertyPanel />
@@ -622,6 +667,8 @@ export function CanvasEditorPage() {
           onPaste={() => handlePasteAt(activeContextMenu.stagePoint)}
           onGroup={groupSelection}
           onUngroup={ungroupSelection}
+          onAlign={handleAlignSelection}
+          onDistribute={handleDistributeSelection}
           onClose={closeContextMenu}
         />
       )}
