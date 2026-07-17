@@ -127,4 +127,58 @@ describe("resolveCanvasShortcut", () => {
   it("ignores Ctrl+Shift+G while focused in a contentEditable element", () => {
     expect(resolveCanvasShortcut("g", true, true, "DIV", true)).toBe(null);
   });
+
+  // U5: Ctrl/Cmd+C/X/V drive the app-level canvas clipboard — behind the
+  // same editable-target guard (typing contexts keep the browser's NATIVE
+  // text copy/cut/paste), and only without Shift (Ctrl+Shift+C is the
+  // browser's inspect-element, Ctrl+Shift+V paste-without-formatting).
+  it("returns copy for Ctrl+C", () => {
+    expect(resolveCanvasShortcut("c", true, false, undefined, false)).toBe(
+      "copy",
+    );
+  });
+
+  it("returns cut for Ctrl+X", () => {
+    expect(resolveCanvasShortcut("x", true, false, undefined, false)).toBe(
+      "cut",
+    );
+  });
+
+  it("returns paste for Ctrl+V", () => {
+    expect(resolveCanvasShortcut("v", true, false, undefined, false)).toBe(
+      "paste",
+    );
+  });
+
+  it("is case-insensitive on the clipboard keys", () => {
+    expect(resolveCanvasShortcut("C", true, false, undefined, false)).toBe(
+      "copy",
+    );
+  });
+
+  it("returns null for Ctrl+Shift+C/X/V (browser-owned combos stay native)", () => {
+    expect(resolveCanvasShortcut("c", true, true, undefined, false)).toBe(null);
+    expect(resolveCanvasShortcut("x", true, true, undefined, false)).toBe(null);
+    expect(resolveCanvasShortcut("v", true, true, undefined, false)).toBe(null);
+  });
+
+  it("returns null for bare c/x/v without a modifier", () => {
+    expect(resolveCanvasShortcut("c", false, false, undefined, false)).toBe(null);
+    expect(resolveCanvasShortcut("x", false, false, undefined, false)).toBe(null);
+    expect(resolveCanvasShortcut("v", false, false, undefined, false)).toBe(null);
+  });
+
+  it("ignores Ctrl+C while focused in an INPUT (native text copy preserved)", () => {
+    expect(resolveCanvasShortcut("c", true, false, "INPUT", false)).toBe(null);
+  });
+
+  it("ignores Ctrl+X while focused in a TEXTAREA (native text cut preserved)", () => {
+    expect(resolveCanvasShortcut("x", true, false, "TEXTAREA", false)).toBe(
+      null,
+    );
+  });
+
+  it("ignores Ctrl+V while focused in a contentEditable element (native paste preserved)", () => {
+    expect(resolveCanvasShortcut("v", true, false, "DIV", true)).toBe(null);
+  });
 });

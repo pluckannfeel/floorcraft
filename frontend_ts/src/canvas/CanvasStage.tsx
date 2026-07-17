@@ -119,6 +119,20 @@ interface CanvasStageProps {
   /** Commits a drag-to-pan gesture's final position on `dragend` (U11),
    * mirroring `onGeometryChange`'s commit-on-release convention. */
   onPanEnd?: (position: Point) => void
+  /** U5: a right-click on the canvas wants the context menu opened. Fired
+   * AFTER the right-click selection rule has been applied (see
+   * `resolveContextMenuSelection`), so by the time the caller renders the
+   * menu the store's selection already matches what the user visually
+   * targeted. `stagePoint` is the click in MODEL coordinates (the
+   * context-menu Paste's paste point); `clientPosition` is the raw viewport
+   * point the DOM menu is positioned at. */
+  onOpenContextMenu?: (request: ContextMenuRequest) => void
+}
+
+/** What `onOpenContextMenu` reports up — see the prop's doc above. */
+export interface ContextMenuRequest {
+  stagePoint: Point
+  clientPosition: Point
 }
 
 /** Builds the static grid line coordinates for a `width` x `height` canvas
@@ -403,6 +417,39 @@ export function buildGroupDragPatches(
   return patches
 }
 
+/** What a right-click must do to the selection BEFORE the context menu
+ * opens — see `resolveContextMenuSelection`. */
+export type ContextMenuSelectionAction =
+  | { kind: 'keep' }
+  | { kind: 'replace'; ids: CanvasObject['id'][] }
+  | { kind: 'clear' }
+
+/**
+ * U5's right-click selection rule (plan Key Technical Decision), pure for
+ * jsdom tests: the menu must always act on what the user visually targeted.
+ *
+ * - Right-click on an object that is NOT selected → the selection becomes
+ *   that object's group-expanded operand set (same `expandIdsByGroup`
+ *   boundary as click/marquee routing — a grouped member targets its whole
+ *   group), REPLACING whatever was selected before.
+ * - Right-click on an already-selected member (of any selection shape,
+ *   including member-mode's lone grouped id) → the existing selection is
+ *   kept exactly as-is; the menu acts on all of it.
+ * - Right-click on empty canvas → the selection clears (the menu is
+ *   effectively Paste-only: Copy/Cut/Group/Ungroup all disable without a
+ *   selection).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveContextMenuSelection(
+  targetId: CanvasObject['id'] | null,
+  selectedItemIds: CanvasObject['id'][],
+  objects: CanvasObject[],
+): ContextMenuSelectionAction {
+  if (targetId == null) return { kind: 'clear' }
+  if (selectedItemIds.includes(targetId)) return { kind: 'keep' }
+  return { kind: 'replace', ids: expandIdsByGroup([targetId], objects) }
+}
+
 /**
  * U4's member-mode cue, pure for jsdom tests: when the selection is exactly
  * ONE grouped member (the double-click "member-mode" state — a plain one-id
@@ -542,6 +589,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     stagePosition = { x: 0, y: 0 },
     onZoomChange,
     onPanEnd,
+    onOpenContextMenu,
   },
   ref,
 ) {
@@ -739,6 +787,22 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // SelectionTransformer's `.nodes([ref])` attach — populated/cleared by
   // each ObjectShape's `shapeRef` callback as items mount/unmount.
   const shapeNodesRef = useRef(new Map<CanvasObject['id'], Konva.Node>())
+
+  // U5: which Object a right-click landed on. Konva reports the innermost
+  // hit node (an ObjectShape Group's child Rect/Text, or a Line node
+  // itself), so walk up the parent chain until a node registered in
+  // `shapeNodesRef` is found — the same registry every other node-to-id
+  // need already uses. Returns null for the stage/grid (empty canvas).
+  const findObjectIdForNode = (target: Konva.Node, stage: Konva.Stage): CanvasObject['id'] | null => {
+    let node: Konva.Node | null = target
+    while (node && node !== stage) {
+      for (const [id, candidate] of shapeNodesRef.current) {
+        if (candidate === node) return id
+      }
+      node = node.getParent()
+    }
+    return null
+  }
 
   // U19: the currently-matched alignment guide(s), reported up by whichever
   // ObjectShape is being dragged or by SelectionTransformer during a resize,
@@ -1082,6 +1146,31 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
       onDblClick={() => {
         if (!drawingLine) return
         lineTool.finishDraw()
+      }}
+      onContextMenu={(event) => {
+        // U5: suppress the BROWSER menu and open ours instead. Konva only
+        // dispatches this handler for events on the stage's own canvas
+        // element, so DOM inputs (the property panel today, U7's text
+        // overlay later) are never intercepted — their native context menu
+        // stays, per the plan's text-editing rule.
+        event.evt.preventDefault()
+        const stage = event.target.getStage()
+        if (!stage) return
+        // Right-click selection rule FIRST (plan Key Technical Decision),
+        // so the menu always acts on what the user visually targeted; then
+        // report the click point up in both spaces (model for Paste's
+        // paste point, viewport for positioning the DOM menu).
+        const targetId = event.target === stage ? null : findObjectIdForNode(event.target, stage)
+        const action = resolveContextMenuSelection(targetId, selectedItemIds, objects)
+        if (action.kind === 'replace') {
+          onReplaceSelection(action.ids)
+        } else if (action.kind === 'clear') {
+          onClearSelection()
+        }
+        onOpenContextMenu?.({
+          stagePoint: screenToStagePoint(stage, event.evt.clientX, event.evt.clientY),
+          clientPosition: { x: event.evt.clientX, y: event.evt.clientY },
+        })
       }}
     >
       {/* Grid/background layer: static, non-interactive. */}

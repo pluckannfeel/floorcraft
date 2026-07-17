@@ -3,6 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { apiClient } from '../api/client'
+import {
+  buildClipboardPayload,
+  clearClipboard,
+  mintClipboardItems,
+  setClipboard,
+} from '../canvas/clipboard'
 import * as ToastContextModule from '../notifications/ToastContext'
 import { redo, undo, useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject } from '../canvas/types'
@@ -61,6 +67,7 @@ beforeEach(() => {
     serverIdMap: {},
   })
   useCanvasStore.temporal.getState().clear()
+  clearClipboard()
   showError.mockClear()
   vi.spyOn(ToastContextModule, 'useToast').mockReturnValue({
     toasts: [],
@@ -320,6 +327,70 @@ describe('useSaveObjects', () => {
       groupKey,
       groupKey,
     ])
+  })
+
+  it('paste → save → undo → save follows the stable-id invariants (pasted item translates through serverIdMap on save #2) (U5)', async () => {
+    // The chain-repair suite, extended to PASTED objects: a paste mints a
+    // fresh `local-` id (never reusing the copied item's identity), save #1
+    // creates its row and maps the local id, and after an undo the second
+    // save must send the pasted item under its MAPPED server id (an
+    // update) — never a duplicate create.
+    const source = makeObject({ id: 10, name: 'Source', x: 0, y: 0 })
+    useCanvasStore.setState({ items: [source] })
+    useCanvasStore.temporal.getState().clear()
+
+    // Copy the source, paste it at (100, 100) — mirrors handleCopy +
+    // handlePasteAt (batched create, then select).
+    const payload = buildClipboardPayload([10], [source])!
+    setClipboard(payload)
+    const minted = mintClipboardItems(payload, { x: 100, y: 100 }, 7, 1)
+    act(() => {
+      useCanvasStore.getState().createItemsLocal(minted)
+      useCanvasStore.getState().replaceSelection(minted.map((item) => item.id))
+    })
+    const pastedId = minted[0].id
+    expect(String(pastedId)).toMatch(/^local-/)
+
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: {
+        objects: [source, makeObject({ id: 55, name: 'Source', x: 100, y: 100 })],
+        id_map: { [String(pastedId)]: 55 },
+      },
+    } as never)
+
+    // Save #1: the pasted item goes out under its local id (a create).
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const firstBody = putSpy.mock.calls[0][1] as {
+      objects: Record<string, unknown>[]
+    }
+    expect(firstBody.objects.map((o) => o.id)).toEqual([10, pastedId])
+    expect(useCanvasStore.getState().serverIdMap).toEqual({
+      [String(pastedId)]: 55,
+    })
+
+    // Post-save edit, then undo it — the pasted item keeps its client-side
+    // local id through the whole traversal (ids in snapshots stay valid all
+    // session; translation happens only at the save boundary).
+    act(() => {
+      useCanvasStore.getState().updateItemGeometry(pastedId, { x: 300 })
+    })
+    act(() => undo())
+    expect(
+      useCanvasStore.getState().items.map((item) => item.id),
+    ).toEqual([10, pastedId])
+    expect(useCanvasStore.getState().items[1].x).toBe(100)
+    expect(useCanvasStore.getState().dirty).toBe(true)
+
+    // Save #2: the pasted item translates through serverIdMap — sent as
+    // row 55 (an update), not re-created under a fresh id.
+    act(() => result.current.mutate())
+    await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(2))
+    const secondBody = putSpy.mock.calls[1][1] as {
+      objects: Record<string, unknown>[]
+    }
+    expect(secondBody.objects.map((o) => o.id)).toEqual([10, 55])
   })
 
   it('keeps dirty set when the user edited while the PUT was in flight', async () => {

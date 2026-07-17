@@ -68,7 +68,8 @@ export type ItemGeometryPatch = Partial<
  *   `clearSelection`, `setActiveTool`, `markSaved`, the zoom/pan actions)
  *   only ever `set()`s
  *   keys other than `items`, so `items` keeps the same reference across
- *   those calls and no history entry is created. `createItemLocal`,
+ *   those calls and no history entry is created. `createItemLocal`/
+ *   `createItemsLocal`,
  *   `updateItemGeometry`/`updateItemsGeometry`, `deleteItem`/`deleteItems`,
  *   `reorderZIndex`/`reorderZIndexItems`, `updateLinePoints`, and U4's
  *   `groupSelection`/`ungroupSelection` all
@@ -186,6 +187,20 @@ export interface CanvasState {
    * the next explicit save round-trips it through the backend.
    */
   createItemLocal: (item: CanvasObject) => void
+
+  /**
+   * U5: batched multi-item variant of `createItemLocal` — appends every
+   * minted item in ONE `set()` (one history entry for a whole paste,
+   * however many items the clipboard held; a single undo removes the whole
+   * pasted set, AE4). The items arrive fully formed from
+   * `clipboard.ts`'s `mintClipboardItems` (fresh `local-` ids, fresh
+   * `group-` keys, absolute geometry, top-of-stack z_indexes) — this action
+   * only commits them. A no-op (same `items` reference, so no history
+   * entry, `dirty` untouched) for an empty list. Selecting the pasted set
+   * is the caller's follow-up `replaceSelection` (untracked, so the pair
+   * still yields exactly one history entry).
+   */
+  createItemsLocal: (items: CanvasObject[]) => void
 
   /**
    * U1: replaces the selection wholesale with `ids` — the plain-click
@@ -516,6 +531,16 @@ export const useCanvasStore = create<CanvasState>()(
           dirty: true,
         })),
 
+      createItemsLocal: (items) =>
+        set((state) =>
+          items.length === 0
+            ? {}
+            : {
+                items: [...state.items, ...items],
+                dirty: true,
+              },
+        ),
+
       replaceSelection: (ids) => set({ selectedItemIds: ids }),
 
       toggleInSelection: (id) =>
@@ -711,7 +736,8 @@ export const useCanvasStore = create<CanvasState>()(
       // setActiveTool, markSaved, and
       // the zoom/pan actions never reassign `items`, so its reference is
       // unchanged across those calls and no entry is created.
-      // createItemLocal, updateItemGeometry/updateItemsGeometry,
+      // createItemLocal/createItemsLocal (U5's batched paste commit),
+      // updateItemGeometry/updateItemsGeometry,
       // deleteItem/deleteItems, reorderZIndex/reorderZIndexItems,
       // updateLinePoints, and groupSelection/ungroupSelection (U4)
       // always build a new `items` array, so those do

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { AxiosError } from "axios";
@@ -11,6 +11,16 @@ import { useObjects, useSaveObjects } from "../hooks/useObjects";
 import { useCanvasStore } from "../state/canvasStore";
 import { useCanvasShortcuts } from "../hooks/useCanvasShortcuts";
 import { CanvasStage } from "./CanvasStage";
+import type { ContextMenuRequest } from "./CanvasStage";
+import {
+  buildClipboardPayload,
+  getClipboard,
+  hasClipboardContent,
+  mintClipboardItems,
+  resolvePastePoint,
+  setClipboard,
+} from "./clipboard";
+import { ContextMenu, resolveContextMenuAvailability } from "./ContextMenu";
 import { FloorPlanNameEditor } from "./FloorPlanNameEditor";
 import { computeLineBoundingBox, curveStyleForType } from "./LineTool";
 import { PropertyPanel } from "./PropertyPanel";
@@ -93,6 +103,9 @@ export function CanvasEditorPage() {
   const dirty = useCanvasStore((state) => state.dirty);
   const setItems = useCanvasStore((state) => state.setItems);
   const createItemLocal = useCanvasStore((state) => state.createItemLocal);
+  // U5: the batched paste commit — one tracked set() per paste, one undo
+  // entry however many items the clipboard held.
+  const createItemsLocal = useCanvasStore((state) => state.createItemsLocal);
   const replaceSelection = useCanvasStore((state) => state.replaceSelection);
   // U4: ctrl+click routing is group-aware — CanvasStage expands the clicked
   // member's group and toggles the whole id set atomically.
@@ -111,6 +124,10 @@ export function CanvasEditorPage() {
   const reorderZIndexItems = useCanvasStore(
     (state) => state.reorderZIndexItems,
   );
+  // U5: the context menu's Group/Ungroup entries dispatch straight to the
+  // same store actions Ctrl+G/Ctrl+Shift+G use (both no-op appropriately).
+  const groupSelection = useCanvasStore((state) => state.groupSelection);
+  const ungroupSelection = useCanvasStore((state) => state.ungroupSelection);
   const setActiveTool = useCanvasStore((state) => state.setActiveTool);
   const setZoomAndPosition = useCanvasStore(
     (state) => state.setZoomAndPosition,
@@ -142,9 +159,124 @@ export function CanvasEditorPage() {
     });
   }, [saveObjects]);
 
-  // Keyboard shortcuts: undo/redo (R15) plus Ctrl/Cmd+S -> explicit save —
-  // see `useCanvasShortcuts.ts`.
-  useCanvasShortcuts(handleSave);
+  // U5: Copy/Cut snapshot the selection into the app-level clipboard (a
+  // module value in clipboard.ts — survives plan switches by construction;
+  // payload-shaped, so no ids/references ever leak into it). Both read the
+  // store at call time (getState) so the handlers stay referentially stable
+  // for the shortcut hook however often the selection changes; both no-op
+  // on an empty selection WITHOUT clobbering a previous copy.
+  const handleCopy = useCallback(() => {
+    const { items, selectedItemIds } = useCanvasStore.getState();
+    const payload = buildClipboardPayload(selectedItemIds, items);
+    if (payload) setClipboard(payload);
+  }, []);
+
+  const handleCut = useCallback(() => {
+    const { items, selectedItemIds } = useCanvasStore.getState();
+    const payload = buildClipboardPayload(selectedItemIds, items);
+    if (!payload) return;
+    setClipboard(payload);
+    // Undoable: `deleteItems` is ONE tracked set(), so undo restores the
+    // cut originals — while the clipboard (module state, outside undo per
+    // the institutional invariant) keeps pasting either way.
+    deleteItems(selectedItemIds);
+  }, [deleteItems]);
+
+  // U5: paste at a MODEL-space point — the context menu passes its
+  // right-click stage point, Ctrl+V goes through `handlePasteShortcut`
+  // below. Minting + committing follow the stable-id invariants: fresh
+  // `local-` ids and fresh `group-` keys every time, one batched tracked
+  // set() (one undo entry removes the whole pasted set), then the pasted
+  // set becomes the selection.
+  const handlePasteAt = useCallback(
+    (point: Point) => {
+      const payload = getClipboard();
+      const floorPlan = floorPlanQuery.data;
+      if (!payload || !floorPlan) return;
+      const { items: currentItems } = useCanvasStore.getState();
+      const maxZIndex = currentItems.reduce(
+        (max, item) => Math.max(max, item.z_index),
+        -1,
+      );
+      const minted = mintClipboardItems(
+        payload,
+        point,
+        floorPlan.id,
+        maxZIndex + 1,
+      );
+      createItemsLocal(minted);
+      replaceSelection(minted.map((item) => item.id));
+    },
+    [floorPlanQuery.data, createItemsLocal, replaceSelection],
+  );
+
+  // U5: last observed pointer position (viewport coords) for Ctrl+V's
+  // paste-at-cursor. A bare ref write per pointermove — no re-renders; the
+  // "is the cursor actually over the canvas" containment check (and the
+  // viewport-center fallback when it isn't) happens at paste time inside
+  // `resolvePastePoint`.
+  const lastPointerClientRef = useRef<Point | null>(null);
+  useEffect(() => {
+    const trackPointer = (event: PointerEvent) => {
+      lastPointerClientRef.current = { x: event.clientX, y: event.clientY };
+    };
+    window.addEventListener("pointermove", trackPointer);
+    return () => window.removeEventListener("pointermove", trackPointer);
+  }, []);
+
+  const handlePasteShortcut = useCallback(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const rect = stage.container().getBoundingClientRect();
+    const { zoom, stagePosition } = useCanvasStore.getState();
+    handlePasteAt(
+      resolvePastePoint({
+        lastPointer: lastPointerClientRef.current,
+        containerRect: {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+        },
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        zoom,
+        stagePosition,
+      }),
+    );
+  }, [handlePasteAt]);
+
+  // U5: the right-click context menu — opened by CanvasStage's contextmenu
+  // handler (which applies the right-click selection rule first), closed on
+  // click-away/Escape/any action, and positioned at the click's viewport
+  // point. Its Paste uses the remembered stage point. The state carries the
+  // plan it was opened on so a plan switch (route param change without an
+  // unmount, e.g. browser back/forward between two plan URLs) implicitly
+  // discards a menu belonging to the previous plan's canvas — a render-time
+  // derivation instead of a setState-in-effect. (The CLIPBOARD itself
+  // deliberately survives switches: it's a module value in clipboard.ts,
+  // and cross-plan paste is the point of R14.)
+  const [contextMenu, setContextMenu] = useState<{
+    planId: number;
+    request: ContextMenuRequest;
+  } | null>(null);
+  const openContextMenu = useCallback(
+    (request: ContextMenuRequest) =>
+      setContextMenu({ planId: floorPlanId, request }),
+    [floorPlanId],
+  );
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+  const activeContextMenu =
+    contextMenu?.planId === floorPlanId ? contextMenu.request : null;
+
+  // Keyboard shortcuts: undo/redo (R15), Ctrl/Cmd+S -> explicit save, and
+  // U5's Ctrl/Cmd+C/X/V -> the clipboard handlers above — see
+  // `useCanvasShortcuts.ts` (Ctrl+G/Shift+G dispatch internally).
+  useCanvasShortcuts(handleSave, {
+    onCopy: handleCopy,
+    onCut: handleCut,
+    onPaste: handlePasteShortcut,
+  });
 
   // U1: Delete removes the WHOLE selection in one batched store action —
   // one history entry however many items were selected (the action also
@@ -465,10 +597,34 @@ export function CanvasEditorPage() {
             stagePosition={stagePosition}
             onZoomChange={setZoomAndPosition}
             onPanEnd={setStagePosition}
+            onOpenContextMenu={openContextMenu}
           />
         </div>
         <PropertyPanel />
       </div>
+
+      {/* U5: the right-click context menu (fixed-positioned DOM, so its
+          placement in the tree is irrelevant). Availability is computed at
+          render time — opening the menu re-renders this page, so the
+          entries always reflect the post-selection-rule store state and the
+          clipboard's current content. Every entry closes the menu itself
+          (ContextMenu wraps each handler with onClose). */}
+      {activeContextMenu && (
+        <ContextMenu
+          position={activeContextMenu.clientPosition}
+          availability={resolveContextMenuAvailability(
+            selectedItemIds,
+            items,
+            hasClipboardContent(),
+          )}
+          onCopy={handleCopy}
+          onCut={handleCut}
+          onPaste={() => handlePasteAt(activeContextMenu.stagePoint)}
+          onGroup={groupSelection}
+          onUngroup={ungroupSelection}
+          onClose={closeContextMenu}
+        />
+      )}
     </div>
   );
 }

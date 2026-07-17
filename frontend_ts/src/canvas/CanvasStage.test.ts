@@ -4,6 +4,7 @@ import {
   applyMarqueeSelection,
   buildGroupDragPatches,
   MARQUEE_CLICK_THRESHOLD_PX,
+  resolveContextMenuSelection,
   resolveGroupDragUpdate,
   resolveMarqueeCommit,
   resolveMemberModeGroupBox,
@@ -602,6 +603,54 @@ describe('resolveMarqueeCommit group expansion (U4)', () => {
     })
 
     expect(action).toEqual({ kind: 'select', ids: ['near', 'far'] })
+  })
+})
+
+describe('resolveContextMenuSelection (U5 right-click selection rule)', () => {
+  const items = [
+    makeObject({ id: 'a' }),
+    makeObject({ id: 'b' }),
+    makeObject({ id: 'm1', group_key: 'group-1' }),
+    makeObject({ id: 'm2', group_key: 'group-1' }),
+  ]
+
+  it('right-clicking an UNSELECTED object while another is selected replaces the selection with the clicked object (the menu acts on the visual target)', () => {
+    expect(resolveContextMenuSelection('b', ['a'], items)).toEqual({
+      kind: 'replace',
+      ids: ['b'],
+    })
+  })
+
+  it('right-clicking an unselected GROUP member replaces the selection with the whole group (expansion at selection time)', () => {
+    expect(resolveContextMenuSelection('m2', ['a'], items)).toEqual({
+      kind: 'replace',
+      ids: ['m1', 'm2'],
+    })
+  })
+
+  it('right-clicking an already-selected member keeps the existing multi-selection intact', () => {
+    expect(resolveContextMenuSelection('b', ['a', 'b'], items)).toEqual({
+      kind: 'keep',
+    })
+  })
+
+  it('member-mode: right-clicking the lone selected grouped member keeps that one-id selection (no re-expansion)', () => {
+    expect(resolveContextMenuSelection('m1', ['m1'], items)).toEqual({
+      kind: 'keep',
+    })
+  })
+
+  it('right-clicking empty canvas clears the selection (Paste-only menu)', () => {
+    expect(resolveContextMenuSelection(null, ['a', 'b'], items)).toEqual({
+      kind: 'clear',
+    })
+  })
+
+  it('right-clicking with nothing selected selects the clicked object before the menu opens', () => {
+    expect(resolveContextMenuSelection('a', [], items)).toEqual({
+      kind: 'replace',
+      ids: ['a'],
+    })
   })
 })
 
