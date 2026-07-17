@@ -812,6 +812,68 @@ describe('canvasStore selection set + batched mutations (U1)', () => {
       expect(useCanvasStore.getState().items[0]).toMatchObject({ x: 50, y: 60 })
       expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
     })
+
+    // U3: a group gesture over a mixed box+Line selection commits in ONE
+    // entry — the Line member's translation rides the same batched action
+    // via the patch's `points` (folded into properties.points), so a single
+    // undo restores the box's x/y AND the Line's points together.
+    it('a points patch replaces properties.points in the same single entry as box patches (U3)', () => {
+      const originalPoints = [
+        { x: 0, y: 0 },
+        { x: 100, y: 50 },
+      ]
+      useCanvasStore.setState({
+        items: [
+          makeItem({ id: 'box', x: 10, y: 10 }),
+          makeItem({
+            id: 'wall',
+            type: 'line_straight',
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 50,
+            properties: { points: originalPoints, curve_style: 'straight' },
+          }),
+        ],
+      })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().updateItemsGeometry([
+        { id: 'box', patch: { x: 30, y: 25 } },
+        {
+          id: 'wall',
+          patch: {
+            x: 20,
+            y: 15,
+            width: 100,
+            height: 50,
+            points: [
+              { x: 20, y: 15 },
+              { x: 120, y: 65 },
+            ],
+          },
+        },
+      ])
+
+      const items = useCanvasStore.getState().items
+      expect(items.find((item) => item.id === 'box')).toMatchObject({ x: 30, y: 25 })
+      const wall = items.find((item) => item.id === 'wall')
+      expect(wall).toMatchObject({ x: 20, y: 15 })
+      expect(wall?.properties.points).toEqual([
+        { x: 20, y: 15 },
+        { x: 120, y: 65 },
+      ])
+      // `points` must never leak onto the item as a top-level column.
+      expect(wall && 'points' in wall).toBe(false)
+      // Non-points properties survive the fold.
+      expect(wall?.properties.curve_style).toBe('straight')
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+
+      undo()
+      const restored = useCanvasStore.getState().items
+      expect(restored.find((item) => item.id === 'box')).toMatchObject({ x: 10, y: 10 })
+      expect(restored.find((item) => item.id === 'wall')?.properties.points).toEqual(originalPoints)
+    })
   })
 
   describe('deleteItems', () => {

@@ -124,6 +124,26 @@ describe('collectGuideStops', () => {
     const stops = collectGuideStops([wall], 'other-id')
     expect(stops.x).toContain(200) // start === end === center for a zero-width vertical line
   })
+
+  // U3: a group drag excludes the WHOLE selection — the dragged member must
+  // never snap against a co-moving member's stale store position.
+  it('accepts a Set of ids, excluding every member of a multi-selection', () => {
+    const a = catalogObject({ id: 1, x: 0, y: 0, width: 40, height: 20 })
+    const b = catalogObject({ id: 2, x: 100, y: 50, width: 20, height: 10 })
+    const c = catalogObject({ id: 3, x: 300, y: 200, width: 20, height: 10 })
+
+    const stops = collectGuideStops([a, b, c], new Set<CanvasObject['id']>([1, 2]))
+
+    // Only unselected c contributes stops.
+    expect(stops.x.sort((x, y) => x - y)).toEqual([300, 310, 320])
+    expect(stops.y.sort((x, y) => x - y)).toEqual([200, 205, 210])
+  })
+
+  it('an empty Set excludes nothing (every object contributes stops)', () => {
+    const a = catalogObject({ id: 1, x: 0, y: 0, width: 40, height: 20 })
+    const stops = collectGuideStops([a], new Set())
+    expect(stops.x).toHaveLength(3)
+  })
 })
 
 describe('findClosestAxisSnap', () => {

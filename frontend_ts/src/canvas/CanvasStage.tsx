@@ -1,9 +1,10 @@
 import { forwardRef, useCallback, useEffect, useRef, useState } from 'react'
 import Konva from 'konva'
 import { Layer, Line, Rect, Stage } from 'react-konva'
-import { AlignmentGuideLines, boundingBoxForObject, NO_GUIDES } from './AlignmentGuides'
+import { AlignmentGuideLines, boundingBoxForObject, NO_GUIDES, snapDragPosition } from './AlignmentGuides'
 import type { GuideLines } from './AlignmentGuides'
 import {
+  clampGroupDragDelta,
   clientToContainerPoint,
   computePinchZoom,
   computeWheelZoom,
@@ -14,17 +15,25 @@ import {
   screenToStagePoint,
   SELECTION_CHROME,
   shouldHandleDeleteKey,
+  translatePoints,
+  unionBoundingBoxes,
 } from './coordinates'
 import type { BoundingBox, ZoomPanState } from './coordinates'
 import { LineAnchorHandles } from './LineAnchorHandles'
-import { isLineTool, LinePreview, parseLinePoints, useLineTool } from './LineTool'
+import {
+  computeLineBoundingBox,
+  flattenPoints,
+  isLineTool,
+  LinePreview,
+  parseLinePoints,
+  useLineTool,
+} from './LineTool'
 import { ObjectShape } from './ObjectShape'
-import type { SelectionClickModifiers } from './ObjectShape'
+import type { GroupDragHandlers, SelectionClickModifiers } from './ObjectShape'
 import { SelectionTransformer } from './SelectionTransformer'
-import type { TransformGeometryPatch } from './SelectionTransformer'
 import { isShapeTool, ShapePreview, useShapeTool } from './ShapeTool'
 import type { ShapeGeometry } from './ShapeTool'
-import type { ActiveTool } from '../state/canvasStore'
+import type { ActiveTool, ItemGeometryPatch } from '../state/canvasStore'
 import type { CanvasObject, LineType, Point, ShapeType } from './types'
 
 // U2: left-drag on empty canvas is now the marquee, and panning moved to
@@ -60,13 +69,19 @@ interface CanvasStageProps {
   /** U1 click routing: clicking empty canvas clears the selection. Wired
    * to the store's `clearSelection`. */
   onClearSelection: () => void
-  /** Commits a drag-reposition's or resize/rotate's final geometry to the
-   * store (U8). Optional so callers/tests that don't exercise
-   * select/drag/transform can omit it. */
+  /** Commits a SINGLE object's drag-reposition final geometry to the store
+   * (U8). Optional so callers/tests that don't exercise select/drag can
+   * omit it. */
   onGeometryChange?: (
     id: CanvasObject['id'],
     patch: Partial<Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>>,
   ) => void
+  /** U3: commits a whole GESTURE's per-member geometry patches in one call
+   * — wired to the store's batched `updateItemsGeometry` (one history entry
+   * per gesture). Carries every transform commit (single- and multi-node)
+   * and every group-drag commit; Line members ride along via the patch's
+   * optional `points` (see `ItemGeometryPatch`). */
+  onItemsGeometryChange?: (patches: Array<{ id: CanvasObject['id']; patch: ItemGeometryPatch }>) => void
   /** Deletes the WHOLE current selection (U8's Delete/Backspace shortcut,
    * batched over the selection set as of U1). */
   onDeleteSelected?: () => void
@@ -247,6 +262,135 @@ export function resolveMarqueeCommit({
   return { kind: 'select', ids: applyMarqueeSelection(selectedItemIds, hits, additive) }
 }
 
+/**
+ * U3: everything one group-drag FRAME needs to apply, computed by
+ * `resolveGroupDragUpdate` (pure). `draggedPosition` is where the dragged
+ * node must be forced (its snapped, collectively-clamped position);
+ * `delta` is the shared translation every co-selected member follows —
+ * ONE delta for the whole selection is what preserves relative offsets.
+ */
+export interface GroupDragUpdate {
+  draggedPosition: Point
+  delta: Point
+  guides: GuideLines
+}
+
+export interface ResolveGroupDragUpdateArgs {
+  draggedId: CanvasObject['id']
+  /** The dragged node's current MODEL-space position (`node.x()/node.y()` —
+   * layer-local coordinates, which this app never transforms; only the
+   * Stage carries zoom/pan). For a dragged LINE member this is the node's
+   * position OFFSET (Lines render their absolute points with the node at
+   * the origin, so a dragged Line's x/y is exactly the translation so
+   * far). */
+  nodePosition: Point
+  objects: CanvasObject[]
+  selectedItemIds: CanvasObject['id'][]
+  zoom: number
+  gridSize: number
+  canvasWidth: number
+  canvasHeight: number
+}
+
+/**
+ * U3's pure per-frame group-drag policy (plan's doc-review-hardened rules):
+ *
+ * - Snapping: the dragged member's `snapDragPosition` excludes the ENTIRE
+ *   selection (never snap against a co-moving member's stale store
+ *   position). Alignment-or-grid snap applies only when a BOX member is
+ *   the one being dragged; a dragged LINE member skips snapping entirely
+ *   (its `nodePosition` is a translation offset, not a box origin — and
+ *   the plan allows skipping snap for group drags outright).
+ * - Clamping: the DELTA is clamped so the selection's COLLECTIVE bounding
+ *   box (union of every member's rotated/points-derived bbox at its STORE
+ *   position) stays in bounds — never per-member clamping, which would
+ *   distort the arrangement at the canvas edge.
+ * - Guides: a snap that the collective clamp then overrides is not shown
+ *   (that axis's guide is dropped — the edge isn't actually aligned).
+ *
+ * Returns `null` when the dragged id isn't in `objects` (mid-delete race)
+ * or the selection has no boxes to clamp against.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveGroupDragUpdate({
+  draggedId,
+  nodePosition,
+  objects,
+  selectedItemIds,
+  zoom,
+  gridSize,
+  canvasWidth,
+  canvasHeight,
+}: ResolveGroupDragUpdateArgs): GroupDragUpdate | null {
+  const dragged = objects.find((object) => object.id === draggedId)
+  if (!dragged) return null
+  const selectedIdSet = new Set(selectedItemIds)
+
+  const draggedIsLine = isLineTool(dragged.type)
+  const origin: Point = draggedIsLine ? { x: 0, y: 0 } : { x: dragged.x, y: dragged.y }
+
+  let target = nodePosition
+  let guides: GuideLines = NO_GUIDES
+  if (!draggedIsLine) {
+    const snapped = snapDragPosition(
+      nodePosition,
+      dragged.width,
+      dragged.height,
+      objects,
+      selectedIdSet,
+      zoom,
+      gridSize,
+    )
+    target = snapped.point
+    guides = snapped.guides
+  }
+
+  const collectiveBox = unionBoundingBoxes(
+    objects.filter((object) => selectedIdSet.has(object.id)).map(boundingBoxForObject),
+  )
+  if (!collectiveBox) return null
+
+  const rawDelta = { x: target.x - origin.x, y: target.y - origin.y }
+  const delta = clampGroupDragDelta(rawDelta, collectiveBox, canvasWidth, canvasHeight)
+  return {
+    draggedPosition: { x: origin.x + delta.x, y: origin.y + delta.y },
+    delta,
+    guides: {
+      x: delta.x === rawDelta.x ? guides.x : null,
+      y: delta.y === rawDelta.y ? guides.y : null,
+    },
+  }
+}
+
+/**
+ * U3's pure dragend commit builder: one patch per selected member, all
+ * translated by the SAME final `delta`. Box members patch x/y; Line members
+ * patch `points` (translated absolute coordinates — the store folds them
+ * into `properties.points`) plus their recomputed descriptive bbox
+ * metadata. The caller commits the whole array through ONE
+ * `updateItemsGeometry` call — one history entry per group-drag gesture.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function buildGroupDragPatches(
+  delta: Point,
+  objects: CanvasObject[],
+  selectedItemIds: CanvasObject['id'][],
+): Array<{ id: CanvasObject['id']; patch: ItemGeometryPatch }> {
+  const selectedIdSet = new Set(selectedItemIds)
+  const patches: Array<{ id: CanvasObject['id']; patch: ItemGeometryPatch }> = []
+  for (const object of objects) {
+    if (!selectedIdSet.has(object.id)) continue
+    if (isLineTool(object.type)) {
+      const points = translatePoints(parseLinePoints(object.properties), delta)
+      const metadata = points.length > 0 ? computeLineBoundingBox(points) : {}
+      patches.push({ id: object.id, patch: { points, ...metadata } })
+    } else {
+      patches.push({ id: object.id, patch: { x: object.x + delta.x, y: object.y + delta.y } })
+    }
+  }
+  return patches
+}
+
 interface UseMarqueeArgs {
   zoom: number
   stagePosition: Point
@@ -350,6 +494,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onToggleInSelection,
     onClearSelection,
     onGeometryChange,
+    onItemsGeometryChange,
     onDeleteSelected,
     activeTool = 'select',
     onCreateShape,
@@ -543,6 +688,80 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // what `AlignmentGuideLines` renders below — re-rendering every drag frame
   // is the accepted, unthrottled cost the plan flags (Risks & Dependencies).
   const [guides, setGuides] = useState<GuideLines>(NO_GUIDES)
+
+  // U3: group drag — dragging any member of a 2+ selection moves the whole
+  // selection as one. `ObjectShape` relays the dragged member's
+  // dragmove/dragend here (see `GroupDragHandlers`); these handlers are the
+  // thin Konva plumbing around the pure policy in `resolveGroupDragUpdate`/
+  // `buildGroupDragPatches` above: per frame, force the dragged node to its
+  // snapped+collectively-clamped position and apply the SAME delta to every
+  // co-selected node imperatively via `shapeNodesRef` (never a Konva.Group
+  // re-parent, never `shouldOverdrawWholeArea` — the plan's Key Technical
+  // Decision; `SelectionTransformer`'s attach effect also unbinds Konva's
+  // own proxy-drag so nothing fights this). Co-moved LINE members translate
+  // by rewriting their `points` (the `LineAnchorHandles` onDragMove
+  // pattern), never via node.x()/y() — a Line's position isn't a React
+  // prop, so an offset would survive the commit and double the translation.
+  const groupDragActive = selectedItemIds.length >= 2
+
+  const applyGroupDelta = (draggedId: CanvasObject['id'], delta: Point) => {
+    for (const member of objects) {
+      if (member.id === draggedId || !selectedItemIds.includes(member.id)) continue
+      const memberNode = shapeNodesRef.current.get(member.id)
+      if (!memberNode) continue
+      if (isLineTool(member.type)) {
+        ;(memberNode as Konva.Line).points(
+          flattenPoints(translatePoints(parseLinePoints(member.properties), delta)),
+        )
+      } else {
+        memberNode.position({ x: member.x + delta.x, y: member.y + delta.y })
+      }
+    }
+  }
+
+  const groupDragHandlers: GroupDragHandlers = {
+    onDragMove: (draggedId, node) => {
+      const update = resolveGroupDragUpdate({
+        draggedId,
+        nodePosition: { x: node.x(), y: node.y() },
+        objects,
+        selectedItemIds,
+        zoom,
+        gridSize,
+        canvasWidth: width,
+        canvasHeight: height,
+      })
+      if (!update) return
+      setGuides(update.guides)
+      node.position(update.draggedPosition)
+      applyGroupDelta(draggedId, update.delta)
+      node.getLayer()?.batchDraw()
+    },
+    onDragEnd: (draggedId, node) => {
+      setGuides(NO_GUIDES)
+      const dragged = objects.find((object) => object.id === draggedId)
+      if (!dragged) return
+      // The dragged node sits at its final (already snapped/clamped — every
+      // dragmove frame went through `resolveGroupDragUpdate`) position; the
+      // final shared delta falls straight out of it.
+      const origin: Point = isLineTool(dragged.type) ? { x: 0, y: 0 } : { x: dragged.x, y: dragged.y }
+      const delta: Point = { x: node.x() - origin.x, y: node.y() - origin.y }
+      const patches = buildGroupDragPatches(delta, objects, selectedItemIds)
+      // A dragged LINE moved via its node's position offset (Konva's own
+      // drag) — bake the translation into its points and zero the offset in
+      // this same dragend, BEFORE the store commit re-renders: the
+      // committed points already carry the translation, and a surviving
+      // offset would apply it twice (Line x/y aren't React-controlled).
+      if (isLineTool(dragged.type)) {
+        const committedPoints = patches.find((patch) => patch.id === draggedId)?.patch.points
+        if (committedPoints) (node as Konva.Line).points(flattenPoints(committedPoints))
+        node.position({ x: 0, y: 0 })
+      }
+      // ONE batched store action for the whole gesture — a single undo
+      // entry restores every member (AE2).
+      onItemsGeometryChange?.(patches)
+    },
+  }
 
   // U15: click-drag-to-size Shape drawing. `onCommit` fires on pointerup
   // with the finished (snapped/clamped) geometry; the caller (CanvasEditorPage)
@@ -841,6 +1060,13 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             allObjects={objects}
             zoom={zoom}
             onAlignmentGuidesChange={setGuides}
+            // U3: members of a 2+ selection drag as a group — the relay is
+            // passed ONLY to selected members, so unselected objects (and
+            // any object under a single selection) keep the pre-U3
+            // single-drag path bit-for-bit.
+            groupDrag={
+              groupDragActive && selectedItemIds.includes(object.id) ? groupDragHandlers : undefined
+            }
             shapeRef={(node) => {
               if (node) {
                 shapeNodesRef.current.set(object.id, node)
@@ -873,7 +1099,9 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             getNode={(id) => shapeNodesRef.current.get(id)}
             canvasWidth={width}
             canvasHeight={height}
-            onTransformEnd={(id, patch: TransformGeometryPatch) => onGeometryChange?.(id, patch)}
+            // U3: every transform (single- and multi-node) commits as one
+            // batched patch list — one history entry per gesture.
+            onTransformEnd={(patches) => onItemsGeometryChange?.(patches)}
             allObjects={objects}
             zoom={zoom}
             onAlignmentGuidesChange={setGuides}

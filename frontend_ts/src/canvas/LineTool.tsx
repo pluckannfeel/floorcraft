@@ -82,6 +82,21 @@ export function flattenPoints(points: Point[]): number[] {
   return points.flatMap((point) => [point.x, point.y])
 }
 
+/** Inverse of `flattenPoints`: pairs Konva `Line`'s flat
+ * `[x1, y1, x2, y2, ...]` number array back into `{x, y}[]` — U3 reads a
+ * live Line node's `points()` this way before mapping them through a
+ * finished multi-transform (`applyNodeTransformToPoints`). A trailing
+ * unpaired number (malformed input) is dropped rather than producing a
+ * point with an `undefined` coordinate. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function pairPoints(flat: number[]): Point[] {
+  const points: Point[] = []
+  for (let i = 0; i + 1 < flat.length; i += 2) {
+    points.push({ x: flat[i], y: flat[i + 1] })
+  }
+  return points
+}
+
 /**
  * Safely reads a `points` array back out of an Object's `properties` JSON
  * (as read from the store/API, typed as `Record<string, unknown>`). Returns

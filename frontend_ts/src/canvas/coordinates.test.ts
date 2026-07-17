@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyNodeTransformToPoints,
+  clampGroupDragDelta,
   clampToBounds,
   constrainTransformBox,
   containerToStagePoint,
@@ -9,6 +11,8 @@ import {
   rectsIntersect,
   shouldHandleDeleteKey,
   snapToGrid,
+  translatePoints,
+  unionBoundingBoxes,
 } from './coordinates'
 
 describe('snapToGrid', () => {
@@ -224,6 +228,124 @@ describe('constrainTransformBox', () => {
   it('rejects a negative-position newBox (bbox would start outside bounds)', () => {
     const newBox = { x: -10, y: 100, width: 40, height: 40, rotation: 0 }
     expect(constrainTransformBox(oldBox, newBox, 1600, 1200)).toBe(oldBox)
+  })
+})
+
+// U3: pure group-drag / multi-node transform helpers.
+describe('unionBoundingBoxes', () => {
+  it('returns the axis-aligned union of several boxes', () => {
+    const union = unionBoundingBoxes([
+      { x: 10, y: 20, width: 40, height: 40 },
+      { x: 100, y: 0, width: 20, height: 10 },
+      { x: 30, y: 90, width: 10, height: 30 },
+    ])
+    expect(union).toEqual({ x: 10, y: 0, width: 110, height: 120 })
+  })
+
+  it('a single box unions to itself', () => {
+    const box = { x: 5, y: 6, width: 7, height: 8 }
+    expect(unionBoundingBoxes([box])).toEqual(box)
+  })
+
+  it('returns null for an empty list (distinguishable from a zero-size box at the origin)', () => {
+    expect(unionBoundingBoxes([])).toBeNull()
+  })
+})
+
+describe('clampGroupDragDelta', () => {
+  const collectiveBox = { x: 100, y: 50, width: 200, height: 100 }
+
+  it('passes an in-bounds delta through unchanged', () => {
+    expect(clampGroupDragDelta({ x: 30, y: -20 }, collectiveBox, 1600, 1200)).toEqual({ x: 30, y: -20 })
+  })
+
+  it('clamps the delta so the COLLECTIVE box stops at the left/top edges', () => {
+    // Moving (-500, -500) would push the box (at 100, 50) past the origin;
+    // the delta stops at exactly (-100, -50), not at each member's own edge.
+    expect(clampGroupDragDelta({ x: -500, y: -500 }, collectiveBox, 1600, 1200)).toEqual({ x: -100, y: -50 })
+  })
+
+  it('clamps the delta so the collective box stops at the right/bottom edges', () => {
+    // Right edge: 1600 - (100 + 200) = 1300 max; bottom: 1200 - (50 + 100) = 1050.
+    expect(clampGroupDragDelta({ x: 9999, y: 9999 }, collectiveBox, 1600, 1200)).toEqual({ x: 1300, y: 1050 })
+  })
+
+  it('clamps each axis independently', () => {
+    expect(clampGroupDragDelta({ x: -500, y: 10 }, collectiveBox, 1600, 1200)).toEqual({ x: -100, y: 10 })
+  })
+
+  it('freezes an axis when the collective box is larger than the canvas (no valid translation)', () => {
+    const oversized = { x: -10, y: 0, width: 2000, height: 50 }
+    expect(clampGroupDragDelta({ x: 40, y: 20 }, oversized, 1600, 1200)).toEqual({ x: 0, y: 20 })
+  })
+})
+
+describe('translatePoints', () => {
+  it('rigidly translates every point by the delta', () => {
+    expect(
+      translatePoints(
+        [
+          { x: 0, y: 0 },
+          { x: 100, y: 50 },
+        ],
+        { x: 10, y: -5 },
+      ),
+    ).toEqual([
+      { x: 10, y: -5 },
+      { x: 110, y: 45 },
+    ])
+  })
+
+  it('returns a new array and leaves the input untouched', () => {
+    const points = [{ x: 1, y: 2 }]
+    const translated = translatePoints(points, { x: 3, y: 4 })
+    expect(translated).not.toBe(points)
+    expect(points).toEqual([{ x: 1, y: 2 }])
+  })
+})
+
+describe('applyNodeTransformToPoints', () => {
+  it('an identity transform returns the points unchanged', () => {
+    const points = [
+      { x: 10, y: 20 },
+      { x: 30, y: 40 },
+    ]
+    expect(
+      applyNodeTransformToPoints(points, { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 }),
+    ).toEqual(points)
+  })
+
+  it('scales points proportionally about the node origin, then translates (line member of a group resize)', () => {
+    // A Line whose node ends a transform at x=5, y=10 with scale (2, 0.5):
+    // each point maps to T + S·p.
+    const result = applyNodeTransformToPoints(
+      [
+        { x: 0, y: 0 },
+        { x: 100, y: 40 },
+      ],
+      { x: 5, y: 10, scaleX: 2, scaleY: 0.5, rotation: 0 },
+    )
+    expect(result).toEqual([
+      { x: 5, y: 10 },
+      { x: 205, y: 30 },
+    ])
+    // Proportionality: the segment's dx/dy scaled by exactly (2, 0.5).
+    expect(result[1].x - result[0].x).toBe(200)
+    expect(result[1].y - result[0].y).toBe(20)
+  })
+
+  it('applies rotation AFTER scale (Konva composes translate → rotate → scale)', () => {
+    // 90° rotation of a scaled point: (10, 0) · scale(2, 1) = (20, 0), then
+    // R(90°) → (0, 20), then translate by (100, 100).
+    const [point] = applyNodeTransformToPoints([{ x: 10, y: 0 }], {
+      x: 100,
+      y: 100,
+      scaleX: 2,
+      scaleY: 1,
+      rotation: 90,
+    })
+    expect(point.x).toBeCloseTo(100)
+    expect(point.y).toBeCloseTo(120)
   })
 })
 

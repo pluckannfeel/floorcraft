@@ -2,7 +2,9 @@ import { act, renderHook } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import {
   applyMarqueeSelection,
+  buildGroupDragPatches,
   MARQUEE_CLICK_THRESHOLD_PX,
+  resolveGroupDragUpdate,
   resolveMarqueeCommit,
   selectIdsInRect,
   sortObjectsByZIndex,
@@ -245,6 +247,290 @@ describe('resolveMarqueeCommit', () => {
     })
 
     expect(action).toEqual({ kind: 'select', ids: ['b', 'a'] })
+  })
+})
+
+/**
+ * U3: the group-drag policy pipeline. Same jsdom constraint as everything
+ * above — no Konva node can mount here, so the drag gesture was built as
+ * two pure functions (`resolveGroupDragUpdate` per dragmove frame,
+ * `buildGroupDragPatches` at dragend) that `CanvasStage`'s handlers only
+ * plumb node positions into. These tests live here (not coordinates.test.ts,
+ * where the plan first pointed) because the composition needs
+ * `AlignmentGuides`/`LineTool` helpers that `coordinates.ts` cannot import
+ * without a cycle — the delta-clamp/union/translate primitives themselves
+ * ARE in coordinates.ts with their own tests.
+ */
+describe('resolveGroupDragUpdate (U3 group drag)', () => {
+  const canvas = { canvasWidth: 800, canvasHeight: 600, zoom: 1, gridSize: 20 }
+
+  function threeSelected() {
+    return [
+      makeObject({ id: 'a', x: 100, y: 100 }),
+      makeObject({ id: 'b', x: 200, y: 150 }),
+      makeObject({ id: 'c', x: 300, y: 100 }),
+    ]
+  }
+
+  it('moves the whole selection by ONE shared delta — relative offsets preserved (AE2)', () => {
+    const objects = threeSelected()
+    // Dragging "a" 37/23 px (grid 20 would snap, but alignment/grid snap
+    // only adjusts the DRAGGED node's target; use a grid-aligned target to
+    // isolate the delta math).
+    const update = resolveGroupDragUpdate({
+      draggedId: 'a',
+      nodePosition: { x: 140, y: 120 },
+      objects,
+      selectedItemIds: ['a', 'b', 'c'],
+      ...canvas,
+    })
+
+    expect(update).not.toBeNull()
+    expect(update?.delta).toEqual({ x: 40, y: 20 })
+    expect(update?.draggedPosition).toEqual({ x: 140, y: 120 })
+  })
+
+  it('never snaps against a co-moving member, but still snaps against unselected objects', () => {
+    // "b" sits 3px off the dragged node's target — inside the 5px snap
+    // threshold. Selected: its stale store position must NOT magnet the
+    // drag. Unselected: it must.
+    const objects = [
+      makeObject({ id: 'a', x: 100, y: 100 }),
+      makeObject({ id: 'b', x: 143, y: 400 }),
+    ]
+    const nodePosition = { x: 140, y: 100 }
+
+    const asCoMember = resolveGroupDragUpdate({
+      draggedId: 'a',
+      nodePosition,
+      objects,
+      selectedItemIds: ['a', 'b'],
+      ...canvas,
+    })
+    // No alignment match (both selected) → grid-snap fallback (already on
+    // the 20-grid), position stays put and no guide renders.
+    expect(asCoMember?.draggedPosition).toEqual({ x: 140, y: 100 })
+    expect(asCoMember?.guides.x).toBeNull()
+
+    const asBystander = resolveGroupDragUpdate({
+      draggedId: 'a',
+      nodePosition,
+      objects: [...objects, makeObject({ id: 'c', x: 500, y: 500 })],
+      selectedItemIds: ['a', 'c'],
+      ...canvas,
+    })
+    // "b" is unselected now → its left edge (143) magnets the drag.
+    expect(asBystander?.draggedPosition.x).toBe(143)
+    expect(asBystander?.guides.x).toBe(143)
+  })
+
+  it('clamps the COLLECTIVE bbox at the canvas edge — relative offsets intact (never per-member)', () => {
+    const objects = threeSelected() // collective box spans x 100..340
+    // Dragging "a" far right: the delta must stop when the collective box's
+    // right edge (c at 300 + 40 wide) hits 800 → max delta x = 460.
+    const update = resolveGroupDragUpdate({
+      draggedId: 'a',
+      nodePosition: { x: 700, y: 100 },
+      objects,
+      selectedItemIds: ['a', 'b', 'c'],
+      ...canvas,
+    })
+
+    expect(update?.delta).toEqual({ x: 460, y: 0 })
+    // The dragged member stops at 100 + 460 = 560, NOT at its own per-member
+    // clamp (800 - 40 = 760) — that difference is the arrangement staying
+    // rigid at the edge.
+    expect(update?.draggedPosition).toEqual({ x: 560, y: 100 })
+  })
+
+  it('a dragged LINE member skips snapping entirely — its node position IS the raw delta (line-only selection)', () => {
+    const objects = [
+      makeObject({
+        id: 'wall-1',
+        type: 'line_straight',
+        x: 100,
+        y: 100,
+        width: 100,
+        height: 0,
+        properties: { points: [{ x: 100, y: 100 }, { x: 200, y: 100 }] },
+      }),
+      makeObject({
+        id: 'wall-2',
+        type: 'line_straight',
+        x: 100,
+        y: 200,
+        width: 100,
+        height: 0,
+        properties: { points: [{ x: 100, y: 200 }, { x: 200, y: 200 }] },
+      }),
+    ]
+
+    // A dragged Line's node position is its translation offset — an
+    // off-grid value must pass through unsnapped (grid is 20).
+    const update = resolveGroupDragUpdate({
+      draggedId: 'wall-1',
+      nodePosition: { x: 33, y: 17 },
+      objects,
+      selectedItemIds: ['wall-1', 'wall-2'],
+      ...canvas,
+    })
+
+    expect(update?.delta).toEqual({ x: 33, y: 17 })
+    expect(update?.draggedPosition).toEqual({ x: 33, y: 17 })
+    expect(update?.guides).toEqual({ x: null, y: null })
+  })
+
+  it("clamps a line-only selection's collective points-derived bbox at the canvas edge", () => {
+    const objects = [
+      makeObject({
+        id: 'wall-1',
+        type: 'line_straight',
+        properties: { points: [{ x: 100, y: 100 }, { x: 200, y: 100 }] },
+      }),
+      makeObject({
+        id: 'wall-2',
+        type: 'line_straight',
+        properties: { points: [{ x: 150, y: 500 }, { x: 250, y: 500 }] },
+      }),
+    ]
+
+    // Collective bbox x spans 100..250 → max delta x = 800 - 250 = 550;
+    // y spans 100..500 → min delta y = -100.
+    const update = resolveGroupDragUpdate({
+      draggedId: 'wall-1',
+      nodePosition: { x: 9999, y: -9999 },
+      objects,
+      selectedItemIds: ['wall-1', 'wall-2'],
+      ...canvas,
+    })
+
+    expect(update?.delta).toEqual({ x: 550, y: -100 })
+  })
+
+  it('drops a guide whose snap the collective clamp then overrode (edge not actually aligned)', () => {
+    // An unselected snap target sits just past the point where the
+    // collective bbox hits the canvas edge: the snap matches, but the clamp
+    // pulls the delta back — the guide must not render as if aligned.
+    const objects = [
+      makeObject({ id: 'a', x: 700, y: 100 }), // collective right edge at 740
+      makeObject({ id: 'b', x: 500, y: 100 }),
+      makeObject({ id: 'target', x: 763, y: 100 }), // start edge at 763
+    ]
+    const update = resolveGroupDragUpdate({
+      draggedId: 'a',
+      nodePosition: { x: 761, y: 100 }, // within 5px of 763 → snap wants 763
+      objects,
+      selectedItemIds: ['a', 'b'],
+      ...canvas,
+    })
+
+    // Snap wanted delta x = 63; clamp allows only 800 - 740 = 60.
+    expect(update?.delta.x).toBe(60)
+    expect(update?.guides.x).toBeNull()
+  })
+
+  it('returns null when the dragged id is not in objects (mid-delete race)', () => {
+    expect(
+      resolveGroupDragUpdate({
+        draggedId: 'ghost',
+        nodePosition: { x: 0, y: 0 },
+        objects: [makeObject({ id: 'a' })],
+        selectedItemIds: ['ghost', 'a'],
+        ...canvas,
+      }),
+    ).toBeNull()
+  })
+})
+
+describe('buildGroupDragPatches (U3 dragend commit)', () => {
+  it('patches every selected member by the same delta — one entry per member, boxes via x/y (AE2)', () => {
+    const objects = [
+      makeObject({ id: 'a', x: 100, y: 100 }),
+      makeObject({ id: 'b', x: 200, y: 150 }),
+      makeObject({ id: 'c', x: 300, y: 100 }),
+      makeObject({ id: 'bystander', x: 400, y: 400 }),
+    ]
+
+    const patches = buildGroupDragPatches({ x: 40, y: 20 }, objects, ['a', 'b', 'c'])
+
+    expect(patches).toEqual([
+      { id: 'a', patch: { x: 140, y: 120 } },
+      { id: 'b', patch: { x: 240, y: 170 } },
+      { id: 'c', patch: { x: 340, y: 120 } },
+    ])
+    // Relative offsets preserved: pairwise distances unchanged.
+    expect((patches[1].patch.x ?? 0) - (patches[0].patch.x ?? 0)).toBe(100)
+    expect((patches[2].patch.x ?? 0) - (patches[1].patch.x ?? 0)).toBe(100)
+  })
+
+  it('a LINE member commits translated points plus recomputed bbox metadata — rendered position equals committed points (no double-offset)', () => {
+    const objects = [
+      makeObject({ id: 'box', x: 100, y: 100 }),
+      makeObject({
+        id: 'wall',
+        type: 'line_straight',
+        x: 0, // stale metadata on purpose — points win
+        y: 0,
+        width: 0,
+        height: 0,
+        properties: {
+          points: [
+            { x: 300, y: 300 },
+            { x: 400, y: 350 },
+          ],
+          curve_style: 'straight',
+        },
+      }),
+    ]
+
+    const patches = buildGroupDragPatches({ x: 10, y: -20 }, objects, ['box', 'wall'])
+
+    const wallPatch = patches.find((patch) => patch.id === 'wall')?.patch
+    // The committed points carry the FULL translation themselves — the
+    // caller resets the dragged Line node's position offset to zero in the
+    // same dragend, so what renders (points at node origin) is exactly what
+    // was committed.
+    expect(wallPatch?.points).toEqual([
+      { x: 310, y: 280 },
+      { x: 410, y: 330 },
+    ])
+    expect(wallPatch).toMatchObject({ x: 310, y: 280, width: 100, height: 50 })
+  })
+
+  it('a line-only selection (two walls) group-moves — every line patched by the shared delta', () => {
+    const objects = [
+      makeObject({
+        id: 'wall-1',
+        type: 'line_straight',
+        properties: { points: [{ x: 100, y: 100 }, { x: 200, y: 100 }] },
+      }),
+      makeObject({
+        id: 'wall-2',
+        type: 'line_straight',
+        properties: { points: [{ x: 100, y: 200 }, { x: 200, y: 200 }] },
+      }),
+    ]
+
+    const patches = buildGroupDragPatches({ x: 33, y: 17 }, objects, ['wall-1', 'wall-2'])
+
+    expect(patches).toHaveLength(2)
+    expect(patches[0].patch.points).toEqual([{ x: 133, y: 117 }, { x: 233, y: 117 }])
+    expect(patches[1].patch.points).toEqual([{ x: 133, y: 217 }, { x: 233, y: 217 }])
+    // Relative offset between the two walls preserved.
+    expect((patches[1].patch.points?.[0].y ?? 0) - (patches[0].patch.points?.[0].y ?? 0)).toBe(100)
+  })
+
+  it('a degenerate 0-point line commits empty points without bbox metadata (no NaN/Infinity)', () => {
+    const objects = [
+      makeObject({ id: 'empty', type: 'line_straight', properties: { points: [] } }),
+      makeObject({ id: 'box', x: 0, y: 0 }),
+    ]
+
+    const patches = buildGroupDragPatches({ x: 5, y: 5 }, objects, ['empty', 'box'])
+
+    const emptyPatch = patches.find((patch) => patch.id === 'empty')?.patch
+    expect(emptyPatch?.points).toEqual([])
+    expect(emptyPatch?.x).toBeUndefined()
   })
 })
 

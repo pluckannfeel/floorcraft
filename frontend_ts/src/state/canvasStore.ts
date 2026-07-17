@@ -17,6 +17,27 @@ const TOOLBAR_ZOOM_STEP = 1.2
 export type ActiveTool = 'select' | ShapeType | LineType
 
 /**
+ * One item's share of a batched `updateItemsGeometry` gesture commit.
+ *
+ * U3 decision (the plan's "extend the batched action to accept a points
+ * patch" option): a Line member of a multi-selection moves/resizes by
+ * replacing its `properties.points` (a Line's points ARE its geometry — the
+ * same U17 reasoning that made `updateLinePoints` undo-tracked), but
+ * `properties` is not a geometry column. Rather than adding a second store
+ * write (which would split one gesture into two history entries), the
+ * batched patch carries an optional `points` array that
+ * `updateItemsGeometry` folds into `item.properties.points` inside the SAME
+ * single `set()` — one gesture, one history entry, whatever mix of boxes
+ * and Lines the selection contains.
+ */
+export type ItemGeometryPatch = Partial<
+  Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>
+> & {
+  /** Replacement ABSOLUTE canvas points for a Line-typed item. */
+  points?: Point[]
+}
+
+/**
  * Zustand store backing the canvas editor.
  *
  * Persistence model (explicit save): every content action below mutates
@@ -205,11 +226,16 @@ export interface CanvasState {
    * patches for the same id shallow-merge over earlier ones. A no-op (same
    * `items` reference, so no history entry) when no patch id matches an
    * item. The single-item action above remains for lone-object paths.
+   *
+   * U3: a patch may carry `points` for a Line member — folded into that
+   * item's `properties.points` in the same `set()` (see `ItemGeometryPatch`
+   * for why Line translation/scale commits ride this action instead of a
+   * second one).
    */
   updateItemsGeometry: (
     patches: Array<{
       id: CanvasObject['id']
-      patch: Partial<Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>>
+      patch: ItemGeometryPatch
     }>,
   ) => void
 
@@ -432,10 +458,7 @@ export const useCanvasStore = create<CanvasState>()(
 
       updateItemsGeometry: (patches) =>
         set((state) => {
-          const patchById = new Map<
-            CanvasObject['id'],
-            Partial<Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>>
-          >()
+          const patchById = new Map<CanvasObject['id'], ItemGeometryPatch>()
           for (const { id, patch } of patches) {
             patchById.set(id, { ...patchById.get(id), ...patch })
           }
@@ -443,7 +466,19 @@ export const useCanvasStore = create<CanvasState>()(
           return {
             items: state.items.map((item) => {
               const patch = patchById.get(item.id)
-              return patch ? { ...item, ...patch } : item
+              if (!patch) return item
+              // U3: `points` isn't a top-level column — fold it into
+              // `properties.points` (same location `updateLinePoints`
+              // writes and `ObjectShape` renders from) inside this same
+              // single tracked set().
+              const { points, ...geometry } = patch
+              return {
+                ...item,
+                ...geometry,
+                ...(points !== undefined
+                  ? { properties: { ...item.properties, points } }
+                  : {}),
+              }
             }),
             dirty: true,
           }

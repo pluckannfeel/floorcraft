@@ -100,19 +100,35 @@ export function edgesForBox(box: BoundingBox, axis: Axis): Record<EdgeKind, numb
 }
 
 /**
+ * U3: which Object(s) a snap computation must ignore — a single id (the
+ * lone Object being dragged/resized, every pre-U3 call site) or a whole SET
+ * of ids (every member of a multi-selection during a group drag: the
+ * plan's doc-review hardening — the dragged member must never "magnet"
+ * against its co-moving members' stale store positions, so ALL selected ids
+ * are excluded from the guide stops, not just the dragged one).
+ */
+export type SnapExcludeIds = CanvasObject['id'] | ReadonlySet<CanvasObject['id']>
+
+function toExcludeSet(excludeIds: SnapExcludeIds): ReadonlySet<CanvasObject['id']> {
+  return excludeIds instanceof Set ? excludeIds : new Set([excludeIds as CanvasObject['id']])
+}
+
+/**
  * Collects every OTHER Object's edge/center guide "stops" per axis —
- * excludes `excludeId` (the Object currently being dragged/resized) so an
- * Object never snaps against its own edges.
+ * excludes `excludeIds` (the Object currently being dragged/resized, or the
+ * whole selection set during a group drag — see `SnapExcludeIds`) so an
+ * Object never snaps against its own edges or a co-moving member's.
  */
 // eslint-disable-next-line react-refresh/only-export-components
 export function collectGuideStops(
   objects: CanvasObject[],
-  excludeId: CanvasObject['id'],
+  excludeIds: SnapExcludeIds,
 ): { x: number[]; y: number[] } {
+  const excluded = toExcludeSet(excludeIds)
   const xs: number[] = []
   const ys: number[] = []
   for (const object of objects) {
-    if (object.id === excludeId) continue
+    if (excluded.has(object.id)) continue
     const box = boundingBoxForObject(object)
     const xEdges = edgesForBox(box, 'x')
     const yEdges = edgesForBox(box, 'y')
@@ -181,12 +197,12 @@ export interface AlignmentSnapResult {
 export function computeAlignmentSnap(
   box: BoundingBox,
   otherObjects: CanvasObject[],
-  excludeId: CanvasObject['id'],
+  excludeIds: SnapExcludeIds,
   zoom: number,
   thresholdScreenPx: number = SNAP_THRESHOLD_SCREEN_PX,
 ): AlignmentSnapResult {
   const thresholdModelUnits = thresholdScreenPx / zoom
-  const stops = collectGuideStops(otherObjects, excludeId)
+  const stops = collectGuideStops(otherObjects, excludeIds)
   return {
     x: findClosestAxisSnap(box, 'x', stops.x, thresholdModelUnits),
     y: findClosestAxisSnap(box, 'y', stops.y, thresholdModelUnits),
@@ -210,13 +226,13 @@ export function snapDragPosition(
   width: number,
   height: number,
   otherObjects: CanvasObject[],
-  excludeId: CanvasObject['id'],
+  excludeIds: SnapExcludeIds,
   zoom: number,
   gridSize: number,
   thresholdScreenPx: number = SNAP_THRESHOLD_SCREEN_PX,
 ): { point: Point; guides: GuideLines } {
   const box: BoundingBox = { x: pos.x, y: pos.y, width, height }
-  const alignment = computeAlignmentSnap(box, otherObjects, excludeId, zoom, thresholdScreenPx)
+  const alignment = computeAlignmentSnap(box, otherObjects, excludeIds, zoom, thresholdScreenPx)
   const gridSnapped = snapToGrid(pos, gridSize)
 
   return {
@@ -272,11 +288,11 @@ export interface ResizeBox extends BoundingBox {
 export function snapResizeBox(
   newBox: ResizeBox,
   otherObjects: CanvasObject[],
-  excludeId: CanvasObject['id'],
+  excludeIds: SnapExcludeIds,
   zoom: number,
   thresholdScreenPx: number = SNAP_THRESHOLD_SCREEN_PX,
 ): { box: BoundingBox; guides: GuideLines } {
-  const alignment = computeAlignmentSnap(newBox, otherObjects, excludeId, zoom, thresholdScreenPx)
+  const alignment = computeAlignmentSnap(newBox, otherObjects, excludeIds, zoom, thresholdScreenPx)
 
   let x = newBox.x
   let width = newBox.width

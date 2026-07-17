@@ -244,6 +244,107 @@ export const SELECTION_CHROME = {
 } as const
 
 /**
+ * U3: the axis-aligned union of several bounding boxes — the multi-selection's
+ * COLLECTIVE bounding box a group drag is clamped against (see
+ * `clampGroupDragDelta`). Returns `null` for an empty list so callers can
+ * distinguish "no boxes" from a real zero-size box at the origin.
+ */
+export function unionBoundingBoxes(boxes: BoundingBox[]): BoundingBox | null {
+  if (boxes.length === 0) return null
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const box of boxes) {
+    minX = Math.min(minX, box.x)
+    minY = Math.min(minY, box.y)
+    maxX = Math.max(maxX, box.x + box.width)
+    maxY = Math.max(maxY, box.y + box.height)
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+}
+
+/** One axis of `clampGroupDragDelta`: the translation that keeps
+ * `[start, start + size]` within `[0, canvasSize]`. When the box is larger
+ * than the canvas there is no valid translation at all — freeze the axis
+ * (delta 0) rather than teleporting the selection to either edge. */
+function clampAxisDelta(delta: number, start: number, size: number, canvasSize: number): number {
+  const min = -start
+  const max = canvasSize - size - start
+  if (max < min) return 0
+  return Math.min(Math.max(delta, min), max)
+}
+
+/**
+ * U3's group-drag bounds rule: clamp the DELTA a multi-selection drag wants
+ * to apply so the selection's COLLECTIVE bounding box stays inside
+ * `[0, canvasWidth] x [0, canvasHeight]`. Clamping the shared delta (instead
+ * of clamping each member's position individually, `clampToBounds`-style)
+ * is what preserves the members' relative offsets at the canvas edge —
+ * per-member clamping would let interior members keep moving while edge
+ * members stop, distorting the arrangement. Mirrors
+ * `constrainTransformBox`'s collective-box approach for resize.
+ */
+export function clampGroupDragDelta(
+  delta: Point,
+  collectiveBox: BoundingBox,
+  canvasWidth: number,
+  canvasHeight: number,
+): Point {
+  return {
+    x: clampAxisDelta(delta.x, collectiveBox.x, collectiveBox.width, canvasWidth),
+    y: clampAxisDelta(delta.y, collectiveBox.y, collectiveBox.height, canvasHeight),
+  }
+}
+
+/** Rigidly translates every point by `delta` — how a co-moved Line member
+ * follows a group drag (its `properties.points` are absolute canvas
+ * coordinates, so translating the Line means translating each point; the
+ * Line node's own x/y must stay at the origin — see `ObjectShape.tsx`'s
+ * Line branch). */
+export function translatePoints(points: Point[], delta: Point): Point[] {
+  return points.map((point) => ({ x: point.x + delta.x, y: point.y + delta.y }))
+}
+
+/**
+ * The node-transform subset Konva's Transformer mutates on each attached
+ * node (`_fitNodesInto` decomposes the new transform into these attrs).
+ * `rotation` is in DEGREES — `Konva.Node.rotation()`'s convention (unlike
+ * `boundBoxFunc`'s radians, see `TransformBoundBox`).
+ */
+export interface NodeTransform {
+  x: number
+  y: number
+  scaleX: number
+  scaleY: number
+  rotation: number
+}
+
+/**
+ * U3 multi-node transform decomposition for LINE members: maps each local
+ * point through the node's own transform, producing the new ABSOLUTE canvas
+ * points to commit. Konva composes a node's transform as
+ * translate → rotate → scale (scale innermost), so a point maps to
+ * `T + R(θ) · (S · p)` — after committing these points and resetting the
+ * node's transform to identity, the rendered geometry is exactly what the
+ * transform displayed (points "scale proportionally", per the plan).
+ * Pure/Konva-free so it's unit-testable in jsdom.
+ */
+export function applyNodeTransformToPoints(points: Point[], transform: NodeTransform): Point[] {
+  const theta = (transform.rotation * Math.PI) / 180
+  const cos = Math.cos(theta)
+  const sin = Math.sin(theta)
+  return points.map((point) => {
+    const scaledX = point.x * transform.scaleX
+    const scaledY = point.y * transform.scaleY
+    return {
+      x: transform.x + scaledX * cos - scaledY * sin,
+      y: transform.y + scaledX * sin + scaledY * cos,
+    }
+  })
+}
+
+/**
  * The shape Konva's Transformer `boundBoxFunc` callback passes/expects:
  * `x`/`y` are the box's top-left position (pre-rotation-pivot, same
  * convention as `getRotatedBoundingBox`), and `rotation` is in RADIANS —

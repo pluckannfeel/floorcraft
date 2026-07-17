@@ -99,6 +99,9 @@ export function CanvasEditorPage() {
   const updateItemGeometry = useCanvasStore(
     (state) => state.updateItemGeometry,
   );
+  const updateItemsGeometry = useCanvasStore(
+    (state) => state.updateItemsGeometry,
+  );
   const updateLinePoints = useCanvasStore((state) => state.updateLinePoints);
   const deleteItems = useCanvasStore((state) => state.deleteItems);
   const reorderZIndexItems = useCanvasStore(
@@ -448,6 +451,7 @@ export function CanvasEditorPage() {
             onToggleInSelection={toggleInSelection}
             onClearSelection={clearSelection}
             onGeometryChange={updateItemGeometry}
+            onItemsGeometryChange={updateItemsGeometry}
             onDeleteSelected={handleDeleteSelected}
             activeTool={activeTool}
             onCreateShape={handleCreateShape}

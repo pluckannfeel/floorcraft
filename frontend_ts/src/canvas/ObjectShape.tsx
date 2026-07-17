@@ -53,6 +53,21 @@ export interface SelectionClickModifiers {
   metaKey: boolean
 }
 
+/**
+ * U3: the group-drag relay a multi-selected member's drag events dispatch
+ * into. `CanvasStage` owns the actual policy (delta computation, snapping
+ * with the whole selection excluded, COLLECTIVE bounds clamping, imperative
+ * co-member movement via its node registry, and the single batched
+ * `updateItemsGeometry` commit) — ObjectShape only relays which member is
+ * being dragged and its live node, exactly like `onSelect` relays clicks.
+ * Passed ONLY while this object is part of a 2+ selection; when absent,
+ * the pre-U3 single-drag behavior below is untouched.
+ */
+export interface GroupDragHandlers {
+  onDragMove: (id: CanvasObject['id'], node: Konva.Node) => void
+  onDragEnd: (id: CanvasObject['id'], node: Konva.Node) => void
+}
+
 interface ObjectShapeProps {
   object: CanvasObject
   isSelected?: boolean
@@ -88,6 +103,12 @@ interface ObjectShapeProps {
    * `CanvasStage` for rendering on the UI overlay layer, and to clear them
    * on `dragend`. */
   onAlignmentGuidesChange?: (guides: GuideLines) => void
+  /** U3: present exactly while this object belongs to a multi-selection —
+   * reroutes this node's drag gesture into `CanvasStage`'s group-drag
+   * orchestration (see `GroupDragHandlers`). Also what makes a LINE member
+   * draggable at all (single-selected Lines stay non-draggable,
+   * anchor-only — U17). */
+  groupDrag?: GroupDragHandlers
 }
 
 /**
@@ -118,6 +139,7 @@ export function ObjectShape({
   allObjects,
   zoom = 1,
   onAlignmentGuidesChange,
+  groupDrag,
 }: ObjectShapeProps) {
   const fill = colorForType(object.type)
 
@@ -129,6 +151,15 @@ export function ObjectShape({
   // x/y from the points it renders. Per Key Technical Decisions, Lines get
   // their own point-based editing model (U17's `LineAnchorHandles`) instead
   // of the Transformer/whole-node-drag pattern every other type uses.
+  //
+  // U3 exception: while part of a MULTI-selection the Line becomes
+  // draggable (otherwise a line-only selection — e.g. two marqueed walls —
+  // would have no draggable member to grab), with NO dragBoundFunc: the
+  // plan's group-drag rule skips per-member snapping/clamping entirely, and
+  // `CanvasStage`'s group `onDragEnd` both commits the translated points
+  // and resets the node's position offset back to zero in the same dragend
+  // (a Line's x/y aren't React props, so a surviving offset would double
+  // the committed translation on the store-driven re-render).
   if (isLineTool(object.type)) {
     const points = parseLinePoints(object.properties)
     const tension = getEffectiveTension(object.type, points.length)
@@ -142,12 +173,15 @@ export function ObjectShape({
         lineCap="round"
         lineJoin="round"
         hitStrokeWidth={12}
+        draggable={groupDrag != null}
         onClick={(event) =>
           onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
         }
         onTap={(event) =>
           onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
         }
+        onDragMove={groupDrag ? (event) => groupDrag.onDragMove(object.id, event.target) : undefined}
+        onDragEnd={groupDrag ? (event) => groupDrag.onDragEnd(object.id, event.target) : undefined}
       />
     )
   }
@@ -161,6 +195,12 @@ export function ObjectShape({
   // effect so they render for this same frame; Konva already re-invokes this
   // function every dragmove frame regardless, so this doesn't add extra
   // render passes beyond what dragging already causes.
+  //
+  // U3: NOT used while this object is part of a multi-selection — the
+  // group-drag policy in `CanvasStage` replaces both halves: snapping must
+  // exclude every co-moving member (not just this one), and clamping
+  // applies to the shared DELTA against the selection's COLLECTIVE bbox
+  // (per-member clamping would distort the arrangement at the canvas edge).
   const dragBoundFunc = function dragBoundFunc(this: Konva.Node, pos: Point): Point {
     if (gridSize == null || canvasWidth == null || canvasHeight == null) return pos
     const { point: snapped, guides } = snapDragPosition(
@@ -185,15 +225,23 @@ export function ObjectShape({
       rotation={object.rotation}
       ref={shapeRef}
       draggable
-      dragBoundFunc={dragBoundFunc}
+      dragBoundFunc={groupDrag ? undefined : dragBoundFunc}
       onClick={(event) =>
         onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
       }
       onTap={(event) =>
         onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
       }
+      onDragMove={groupDrag ? (event) => groupDrag.onDragMove(object.id, event.target) : undefined}
       onDragEnd={(event) => {
         const node = event.target
+        // U3: a multi-selected member's drag commits through the group
+        // relay (ONE batched store entry for the whole selection) instead
+        // of the single-object commit below.
+        if (groupDrag) {
+          groupDrag.onDragEnd(object.id, node)
+          return
+        }
         onGeometryChange?.(object.id, { x: node.x(), y: node.y() })
         // U19: destroy the temporary guide lines once the drag interaction
         // ends (Approach: guides are removed on dragend/transformend).
