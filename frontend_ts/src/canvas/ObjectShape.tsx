@@ -134,6 +134,11 @@ interface ObjectShapeProps {
    * draggable at all (single-selected Lines stay non-draggable,
    * anchor-only — U17). */
   groupDrag?: GroupDragHandlers
+  /** False while the canvas is in a navigate-only mode (pan tool): the node
+   * still LISTENS (a click selects it and hands over to the select tool),
+   * but must not be draggable — a press over it has to reach the draggable
+   * Stage so the drag pans instead of moving the object. */
+  draggable?: boolean
   /** U7: true while this object is being edited through the DOM
    * `TextEditOverlay` — the Konva node hides (official Konva editable-text
    * pattern: the overlay's textarea IS the visible text during editing, so
@@ -172,6 +177,7 @@ export function ObjectShape({
   zoom = 1,
   onAlignmentGuidesChange,
   groupDrag,
+  draggable = true,
   hidden = false,
 }: ObjectShapeProps) {
   const fill = colorForType(object.type)
@@ -206,7 +212,7 @@ export function ObjectShape({
         lineCap="round"
         lineJoin="round"
         hitStrokeWidth={12}
-        draggable={groupDrag != null}
+        draggable={draggable && groupDrag != null}
         onClick={(event) =>
           onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
         }
@@ -274,7 +280,7 @@ export function ObjectShape({
       rotation={object.rotation}
       visible={!hidden}
       ref={shapeRef}
-      draggable
+      draggable={draggable}
       dragBoundFunc={groupDrag ? undefined : dragBoundFunc}
       onClick={(event) =>
         onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })

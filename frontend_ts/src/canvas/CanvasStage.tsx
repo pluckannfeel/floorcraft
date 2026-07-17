@@ -148,6 +148,9 @@ interface CanvasStageProps {
   /** Escape with no gesture in flight leaves the active tool, returning to
    * the idle pan mode (canvas-tools follow-up). */
   onExitTool?: () => void
+  /** Clicking an object while in the idle pan mode engages the select tool
+   * (the click's own selection lands through the normal routing). */
+  onActivateSelectTool?: () => void
   /** U7: an existing TEXT object wants re-editing — a Text-tool click on
    * it, or a double-click with any tool (`resolveObjectDoubleClickAction`).
    * The caller opens the overlay for the id; the routing here has already
@@ -662,6 +665,20 @@ export function resolveObjectClickAction(
   return { kind: 'replace', ids: operand }
 }
 
+/**
+ * Should the Stage be draggable (i.e. will a plain drag pan)? The ONE
+ * expression behind both the `draggable` prop and every imperative restore
+ * after a per-gesture enable — they MUST agree, since react-konva only
+ * re-applies the prop when it changes between renders: restoring to a
+ * stale value (once: just `spaceHeld`) left the Stage non-draggable while
+ * the prop still read `true`, so pan mode worked exactly once per tool
+ * switch.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isStageDraggable(activeTool: ActiveTool, spaceHeld: boolean): boolean {
+  return spaceHeld || activeTool === 'pan'
+}
+
 /** What a double-click on an object should do — see
  * `resolveObjectDoubleClickAction`. */
 export type ObjectDoubleClickAction =
@@ -805,6 +822,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onDuplicateSelection,
     onCreateTextAt,
     onExitTool,
+    onActivateSelectTool,
     onEditTextObject,
     editingItemId = null,
     onApplyCrop,
@@ -830,6 +848,13 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // state toggle commits too late for the same pointerdown to start a Konva
   // drag.
   const [spaceHeld, setSpaceHeld] = useState(false)
+  // The ONE truth for the Stage's `draggable`, used by the prop AND by
+  // every imperative restore below. They must agree: react-konva only
+  // re-applies the prop when it CHANGES between renders, so restoring to a
+  // stale expression (e.g. just `spaceHeld`) leaves the Stage stuck
+  // non-draggable while the prop still reads `true` — which is exactly how
+  // pan-mode panning died after its first drag.
+  const stageDraggable = isStageDraggable(activeTool, spaceHeld)
   // U2: whether a stage pan drag is actually in flight — drives the
   // grab (pan available) vs grabbing (panning) cursor distinction.
   const [panDragging, setPanDragging] = useState(false)
@@ -911,6 +936,10 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // visually-targeted, selected item).
   const handleObjectSelect = (id: CanvasObject['id'], modifiers?: SelectionClickModifiers) => {
     const action = resolveObjectClickAction(id, activeTool, objects, modifiers)
+    // Clicking an object from the idle pan mode means "I want to work on
+    // this one": hand the canvas to the select tool, with the click's own
+    // selection (resolved below) landing as usual — no second click needed.
+    if (panTool) onActivateSelectTool?.()
     if (action.kind === 'edit-text') {
       onReplaceSelection([action.id])
       onEditTextObject?.(action.id)
@@ -1395,7 +1424,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
       scaleY={zoom}
       x={stagePosition.x}
       y={stagePosition.y}
-      draggable={spaceHeld || panTool}
+      draggable={stageDraggable}
       onDragStart={(event) => {
         // Only the Stage's own drag is a pan — an Object's dragstart fires
         // on the Object node, not the Stage (Konva dispatches drag events on
@@ -1414,9 +1443,11 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         setPanDragging(false)
         // Restore prop-truth after the imperative per-gesture enables
         // (middle-mouse/touch, below): react-konva only re-applies
-        // `draggable` when the PROP changes between renders, so an
-        // imperative `draggable(true)` would otherwise stick forever.
-        stage.draggable(spaceHeld)
+        // `draggable` when the PROP changes between renders, so both an
+        // imperative `draggable(true)` and a restore to the WRONG value
+        // stick until some unrelated prop change — hence `stageDraggable`,
+        // the same expression the prop uses.
+        stage.draggable(stageDraggable)
         onPanEnd?.({ x: stage.x(), y: stage.y() })
       }}
       onWheel={(event) => {
@@ -1591,7 +1622,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // false mid-drag makes Konva end that drag cleanly (dragend fires,
         // so the pan still commits through onDragEnd above).
         if (event.evt.pointerType === 'touch') {
-          event.target.getStage()?.draggable(spaceHeld)
+          event.target.getStage()?.draggable(stageDraggable)
         }
         if (!drawingShape || !shapeTool.isDrawing) return
         shapeTool.endDraw()
@@ -1672,7 +1703,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           dragging that Object. U8: the crop tool joins the drawing tools —
           a crop drag must start wherever the pointer is, objects
           underneath included. */}
-      <Layer listening={!drawingShape && !drawingLine && !spaceHeld && !panTool && !croppingTool}>
+      <Layer listening={!drawingShape && !drawingLine && !spaceHeld && !croppingTool}>
         {/* U18: render order comes from `sortObjectsByZIndex` (above) —
             deliberately NOT from imperative Konva `.moveToTop()`/`.zIndex()`
             calls, which react-konva's own docs warn will fight React's own
@@ -1698,6 +1729,10 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             // Unselected objects, and a sole-selected LINE, keep the plain
             // single-drag path bit-for-bit (see `dragRelayFor`).
             groupDrag={dragRelayFor(object)}
+            // Pan is navigate-only: objects stay clickable (a click hands
+            // the canvas to the select tool, below) but non-draggable, so a
+            // press over one reaches the draggable Stage and pans.
+            draggable={!panTool}
             // U7: the node being edited through the DOM text overlay hides
             // (the overlay's textarea is the visible text while editing).
             hidden={editingItemId != null && object.id === editingItemId}

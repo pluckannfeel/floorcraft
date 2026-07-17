@@ -10,6 +10,8 @@ import {
   resolveGroupDragUpdate,
   resolveMarqueeCommit,
   resolveMemberModeGroupBox,
+  isStageDraggable,
+  resolveObjectClickAction,
   selectIdsInRect,
   sortObjectsByZIndex,
   useMarquee,
@@ -1057,5 +1059,53 @@ describe('useMarquee', () => {
     act(() => result.current.update({ x: 200, y: 150 }))
 
     expect(result.current.rect).toEqual({ x: 100, y: 100, width: 50, height: 25 })
+  })
+})
+
+describe('isStageDraggable (pan-mode regression)', () => {
+  it('pans in the idle pan tool, and while Space is held from any tool', () => {
+    expect(isStageDraggable('pan', false)).toBe(true)
+    expect(isStageDraggable('select', true)).toBe(true)
+    expect(isStageDraggable('shape_rectangle', true)).toBe(true)
+  })
+
+  it('does not pan from a working tool without Space', () => {
+    expect(isStageDraggable('select', false)).toBe(false)
+    expect(isStageDraggable('crop', false)).toBe(false)
+    expect(isStageDraggable('text', false)).toBe(false)
+  })
+
+  it('is the SAME expression the imperative restores use — the pan-dies-after-one-drag bug', () => {
+    // The restore after every drag/touch gesture must reproduce the prop
+    // exactly: react-konva only re-applies `draggable` when the prop
+    // CHANGES, so restoring pan mode to `spaceHeld` (false) left the Stage
+    // permanently non-draggable while the prop still read `true`.
+    const activeTool = 'pan' as const
+    const spaceHeld = false
+    const propValue = isStageDraggable(activeTool, spaceHeld)
+    const restoredValue = isStageDraggable(activeTool, spaceHeld)
+    expect(restoredValue).toBe(propValue)
+    expect(restoredValue).toBe(true)
+  })
+})
+
+describe('clicking an object while panning (canvas-tools follow-up)', () => {
+  it('still resolves the normal selection so the caller can hand over to select', () => {
+    const a = makeObject({ id: 'a' })
+    // The pan mode itself does not change WHAT gets selected — the stage
+    // additionally engages the select tool (see handleObjectSelect).
+    expect(resolveObjectClickAction('a', 'pan', [a])).toEqual({
+      kind: 'replace',
+      ids: ['a'],
+    })
+  })
+
+  it('expands a clicked group member even from pan mode', () => {
+    const a = makeObject({ id: 'a', group_key: 'group-1' })
+    const b = makeObject({ id: 'b', group_key: 'group-1' })
+    expect(resolveObjectClickAction('a', 'pan', [a, b])).toEqual({
+      kind: 'replace',
+      ids: ['a', 'b'],
+    })
   })
 })

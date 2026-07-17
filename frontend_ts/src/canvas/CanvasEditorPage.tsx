@@ -594,6 +594,13 @@ export function CanvasEditorPage() {
   // pan mode, where a plain drag navigates the canvas.
   const handleExitTool = useCallback(() => setActiveTool("pan"), [setActiveTool]);
 
+  // Clicking an object while panning engages the select tool — the click's
+  // own selection lands through CanvasStage's normal routing.
+  const handleActivateSelectTool = useCallback(
+    () => setActiveTool("select"),
+    [setActiveTool],
+  );
+
   // U7: re-edit an existing text object (double-click, or Text-tool click
   // on it — CanvasStage's routing already selected it).
   const handleEditTextObject = useCallback(
@@ -834,6 +841,7 @@ export function CanvasEditorPage() {
             // Escape with nothing in flight drops the active tool back to
             // the idle pan mode (canvas-tools follow-up).
             onExitTool={handleExitTool}
+            onActivateSelectTool={handleActivateSelectTool}
             onEditTextObject={handleEditTextObject}
             editingItemId={
               activeTextEditor?.mode === "edit" ? activeTextEditor.itemId : null
