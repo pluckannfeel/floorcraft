@@ -585,10 +585,14 @@ export function CanvasEditorPage() {
         { text: "", ...DEFAULT_TEXT_STYLING },
       );
       setTextEditor({ planId: floorPlan.id, mode: "create", draft });
-      setActiveTool("select");
+      setActiveTool("pan");
     },
     [floorPlanQuery.data, buildLocalObject, setActiveTool],
   );
+
+  // Escape with no gesture in flight leaves the active tool for the idle
+  // pan mode, where a plain drag navigates the canvas.
+  const handleExitTool = useCallback(() => setActiveTool("pan"), [setActiveTool]);
 
   // U7: re-edit an existing text object (double-click, or Text-tool click
   // on it — CanvasStage's routing already selected it).
@@ -797,7 +801,12 @@ export function CanvasEditorPage() {
           canvasHeight={canvasSize.height}
           onDrop={handleDrop}
         />
-        <div className="flex-1 overflow-auto p-4">
+        {/* Gray workspace backdrop so the (white) canvas reads as a page
+            sitting on a surface, the way design tools frame a document —
+            `w-fit` keeps the ring/shadow hugging the stage rather than the
+            scroll area. */}
+        <div className="flex-1 overflow-auto bg-muted p-6">
+          <div className="w-fit rounded-sm shadow-md ring-1 ring-border">
           <CanvasStage
             ref={stageRef}
             width={canvasSize.width}
@@ -822,12 +831,16 @@ export function CanvasEditorPage() {
             onOpenContextMenu={openContextMenu}
             onDuplicateSelection={commitPayloadAt}
             onCreateTextAt={handleCreateTextAt}
+            // Escape with nothing in flight drops the active tool back to
+            // the idle pan mode (canvas-tools follow-up).
+            onExitTool={handleExitTool}
             onEditTextObject={handleEditTextObject}
             editingItemId={
               activeTextEditor?.mode === "edit" ? activeTextEditor.itemId : null
             }
             onApplyCrop={handleApplyCrop}
           />
+          </div>
         </div>
         <PropertyPanel />
       </div>

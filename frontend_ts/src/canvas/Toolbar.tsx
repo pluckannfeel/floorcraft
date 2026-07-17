@@ -8,6 +8,14 @@ import {
   AlignStartHorizontal,
   AlignStartVertical,
   AlignVerticalDistributeCenter,
+  BringToFront,
+  Download,
+  Maximize,
+  Redo2,
+  SendToBack,
+  Undo2,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useStore } from 'zustand'
@@ -121,10 +129,10 @@ export function Toolbar({
   return (
     <div className="flex gap-2 border-b px-4 py-2">
       <Button type="button" variant="outline" size="sm" onClick={() => undo()} disabled={!canUndo}>
-        Undo
+        <Undo2 aria-hidden="true" /> Undo
       </Button>
       <Button type="button" variant="outline" size="sm" onClick={() => redo()} disabled={!canRedo}>
-        Redo
+        <Redo2 aria-hidden="true" /> Redo
       </Button>
 
       <ToolbarDivider />
@@ -134,21 +142,21 @@ export function Toolbar({
           position exists for a button click, unlike wheel/pinch's
           zoom-to-point behavior); Reset returns to 1x at the origin. */}
       <Button type="button" variant="outline" size="icon-sm" onClick={() => zoomOut()} aria-label="Zoom out">
-        −
+        <ZoomOut aria-hidden="true" />
       </Button>
       <span className="min-w-12 self-center text-center text-sm tabular-nums">{Math.round(zoom * 100)}%</span>
       <Button type="button" variant="outline" size="icon-sm" onClick={() => zoomIn()} aria-label="Zoom in">
-        +
+        <ZoomIn aria-hidden="true" />
       </Button>
       <Button type="button" variant="outline" size="sm" onClick={() => resetZoom()} aria-label="Reset zoom">
-        Reset
+        <Maximize aria-hidden="true" /> Reset
       </Button>
 
       <ToolbarDivider />
 
       {/* U12: exports the current floor plan as a PNG download. */}
       <Button type="button" variant="outline" size="sm" onClick={handleExport}>
-        Export PNG
+        <Download aria-hidden="true" /> Export PNG
       </Button>
 
       <ToolbarDivider />
@@ -168,7 +176,7 @@ export function Toolbar({
         onClick={() => selectedItemIds.length > 0 && onReorderZIndex(selectedItemIds, 'front')}
         disabled={selectedItemIds.length === 0}
       >
-        Bring to Front
+        <BringToFront aria-hidden="true" /> Bring to Front
       </Button>
       <Button
         type="button"
@@ -177,7 +185,7 @@ export function Toolbar({
         onClick={() => selectedItemIds.length > 0 && onReorderZIndex(selectedItemIds, 'back')}
         disabled={selectedItemIds.length === 0}
       >
-        Send to Back
+        <SendToBack aria-hidden="true" /> Send to Back
       </Button>
 
       {/* U6: align/distribute. The whole section renders only for 2+

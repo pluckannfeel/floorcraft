@@ -266,3 +266,62 @@ describe('TextEditOverlay', () => {
     expect(textarea.style.top).toBe('180px') // 20 + 80 * 2
   })
 })
+
+describe('editing box is always visibly a field (canvas-tools follow-up)', () => {
+  it('an EMPTY create draft renders a usable box, not a ~12px sliver', () => {
+    // The reported bug: an empty draft measures a single space (~4px), so
+    // the overlay rendered too small to see or aim at — the text tool read
+    // as doing nothing at all.
+    setTextMeasurer(() => ({ width: 4, height: 16 }))
+    render(
+      <TextEditOverlay
+        object={makeTextObject({
+          properties: {
+            text: '',
+            font_family: 'Arial',
+            font_size: 16,
+            bold: false,
+            italic: false,
+            color: '#111827',
+          },
+        })}
+        mode="create"
+        zoom={1}
+        stagePosition={{ x: 0, y: 0 }}
+        getStage={() => null}
+        onCommit={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    )
+
+    const textarea = screen.getByLabelText('Edit text')
+    expect(textarea.style.width).toBe('128px') // 120 floor + 8 pad
+    expect(textarea.style.height).toBe('32px') // 24 floor + 8 pad
+  })
+
+  it('a long draft still grows past the floor (the floor is a minimum, not a cap)', () => {
+    setTextMeasurer(() => ({ width: 400, height: 18 }))
+    render(
+      <TextEditOverlay
+        object={makeTextObject({
+          properties: {
+            text: 'a'.repeat(60),
+            font_family: 'Arial',
+            font_size: 16,
+            bold: false,
+            italic: false,
+            color: '#111827',
+          },
+        })}
+        mode="edit"
+        zoom={1}
+        stagePosition={{ x: 0, y: 0 }}
+        getStage={() => null}
+        onCommit={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByLabelText('Edit text').style.width).toBe('408px')
+  })
+})

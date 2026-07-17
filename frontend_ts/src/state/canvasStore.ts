@@ -10,13 +10,16 @@ import type { CanvasObject, LineType, Point, ShapeType, TextType } from '../canv
 const TOOLBAR_ZOOM_STEP = 1.2
 
 /**
- * Drawing-tool mode for the shape/line/text creation flows (U15/U16, and
- * canvas-tools U7's `'text'`, U8's `'crop'`). `'select'` is the default/idle
- * mode matching the drag-select interaction; the rest mirror `ShapeType`/
- * `LineType`/`TextType` from `canvas/types.ts` plus the crop tool. Untracked
- * by undo (see `partialize` below) — switching tools isn't a content change.
+ * Active canvas tool. `'pan'` is the DEFAULT/idle mode: no tool is engaged,
+ * so a plain drag navigates the canvas (the same gesture Space+drag and
+ * middle-mouse give from any mode) and nothing on the canvas responds to
+ * clicks — deselecting any tool returns here. `'select'` engages the
+ * selection interactions (marquee, click-select, object drags); the rest
+ * mirror `ShapeType`/`LineType`/`TextType` from `canvas/types.ts` plus the
+ * crop tool. Untracked by undo (see `partialize` below) — switching tools
+ * isn't a content change.
  */
-export type ActiveTool = 'select' | ShapeType | LineType | TextType | 'crop'
+export type ActiveTool = 'pan' | 'select' | ShapeType | LineType | TextType | 'crop'
 
 /**
  * U8 (canvas-tools): the floor plan's live canvas dimensions while editing.
@@ -592,7 +595,7 @@ export const useCanvasStore = create<CanvasState>()(
     (set) => ({
       items: [],
       selectedItemIds: [],
-      activeTool: 'select',
+      activeTool: 'pan',
       canvasSize: null,
       zoom: 1,
       stagePosition: { x: 0, y: 0 },
@@ -912,9 +915,16 @@ export const useCanvasStore = create<CanvasState>()(
 
       setActiveTool: (tool) =>
         // U8: entering the crop tool clears the selection (see the
-        // interface doc). Neither key touches `items`/`canvasSize`, so no
-        // history entry either way.
-        set(tool === 'crop' ? { activeTool: tool, selectedItemIds: [] } : { activeTool: tool }),
+        // interface doc). `'pan'` clears it too: pan is the "no tool
+        // engaged" idle mode — the canvas doesn't respond to clicks there,
+        // so leaving a live selection behind would strand a transformer
+        // the user can't interact with. Neither key touches
+        // `items`/`canvasSize`, so no history entry either way.
+        set(
+          tool === 'crop' || tool === 'pan'
+            ? { activeTool: tool, selectedItemIds: [] }
+            : { activeTool: tool },
+        ),
 
       setZoomAndPosition: (zoom, position) => set({ zoom: clampZoom(zoom), stagePosition: position }),
 

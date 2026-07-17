@@ -8,6 +8,7 @@ import { apiClient } from '../api/client'
 import * as AuthContextModule from '../auth/AuthContext'
 import * as ToastContextModule from '../notifications/ToastContext'
 import { undo, useCanvasStore } from '../state/canvasStore'
+import { setTextMeasurer } from './TextTool'
 import type { CanvasObject, FloorPlan } from './types'
 import { CanvasEditorPage } from './CanvasEditorPage'
 
@@ -509,5 +510,37 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
     await user.click(screen.getByRole('link', { name: 'Home' }))
     expect(confirmSpy).not.toHaveBeenCalled()
     expect(await screen.findByText('Dashboard Placeholder')).toBeInTheDocument()
+  })
+})
+
+describe('text tool create flow (diagnostic)', () => {
+  it('creating text via the tool opens the overlay and commits into the store', async () => {
+    setTextMeasurer(() => ({ width: 60, height: 18 }))
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Text Plan' }), objects: [] },
+    })
+
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Text Plan')).toBeInTheDocument()
+
+    // Drive exactly what the stage's text-tool branch does on an
+    // empty-canvas click.
+    const onCreateTextAt = canvasStageProps.current?.onCreateTextAt as
+      | ((point: { x: number; y: number }) => void)
+      | undefined
+    expect(onCreateTextAt).toBeTypeOf('function')
+    act(() => onCreateTextAt!({ x: 100, y: 100 }))
+
+    const textarea = await screen.findByLabelText('Edit text')
+    const user = userEvent.setup()
+    await user.type(textarea, 'Meeting Room')
+    await user.keyboard('{Enter}')
+
+    await waitFor(() => {
+      const items = useCanvasStore.getState().items
+      expect(items).toHaveLength(1)
+      expect(items[0].type).toBe('text')
+      expect(items[0].properties.text).toBe('Meeting Room')
+    })
   })
 })

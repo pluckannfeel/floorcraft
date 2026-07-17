@@ -1696,3 +1696,34 @@ describe('code-review fixes (canvas-tools)', () => {
     expect(restored?.group_key).toBe('group-1')
   })
 })
+
+describe('pan as the idle tool mode (canvas-tools follow-up)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({
+      items: [makeItem({ id: 'a' })],
+      selectedItemIds: ['a'],
+      activeTool: 'select',
+    })
+    useCanvasStore.temporal.getState().clear()
+  })
+
+  it("defaults to 'pan' so a plain drag navigates before any tool is chosen", () => {
+    // The store's own initial state (not the test fixture above).
+    expect(useCanvasStore.getInitialState().activeTool).toBe('pan')
+  })
+
+  it('deselecting a tool (-> pan) clears the selection: the canvas ignores clicks in idle mode', () => {
+    useCanvasStore.getState().setActiveTool('pan')
+
+    expect(useCanvasStore.getState().activeTool).toBe('pan')
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+  })
+
+  it('switching tools never creates a history entry', () => {
+    useCanvasStore.getState().setActiveTool('pan')
+    useCanvasStore.getState().setActiveTool('text')
+    useCanvasStore.getState().setActiveTool('select')
+
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+})

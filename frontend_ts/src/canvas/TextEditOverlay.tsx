@@ -39,6 +39,11 @@ import type { CanvasObject, Point } from './types'
  * unchanged text is a no-op — this component only reports the final draft.
  */
 
+/** Floors for the EDITING box only (never the committed object's mirrored
+ * width/height) — see the sizing comment in the component body. */
+const MIN_EDITOR_WIDTH_PX = 120
+const MIN_EDITOR_HEIGHT_PX = 24
+
 export interface TextEditOverlayProps {
   /** The text object being edited: the live store item (re-edit) or the
    * not-yet-committed draft (create). Position/styling both read from it. */
@@ -123,6 +128,16 @@ export function TextEditOverlay({
   // scrolls/clips inside it — same measurement (and same injectable seam,
   // for jsdom) as every commit path uses for the mirrored width/height.
   const size = measureTextBox(draft, styling)
+  // ...but never smaller than a visibly-a-text-field box. An empty draft
+  // measures a single space (~4px at the default size), which rendered as
+  // a ~12px sliver the user couldn't see, type into with any confidence,
+  // or even find — the create flow read as "the text tool does nothing"
+  // (it then committed empty on click-away, which correctly aborts, so
+  // nothing ever appeared). The floor only affects the EDITING affordance;
+  // the committed object's mirrored box still comes from the real
+  // measurement in the commit handlers.
+  const boxWidth = Math.max(size.width * zoom, MIN_EDITOR_WIDTH_PX)
+  const boxHeight = Math.max(size.height * zoom, MIN_EDITOR_HEIGHT_PX)
 
   return (
     <textarea
@@ -153,9 +168,9 @@ export function TextEditOverlay({
         top,
         // A small pad past the measured box so the caret at the line end
         // never clips; `zoom` scales the box the same way the stage scales
-        // the node.
-        width: size.width * zoom + 8,
-        height: size.height * zoom + 8,
+        // the node, and the floors above keep an empty draft visible.
+        width: boxWidth + 8,
+        height: boxHeight + 8,
         // Font metrics mirror ObjectShape's Konva.Text branch exactly
         // (lineHeight 1 is Konva's default), scaled by the stage zoom.
         fontFamily: styling.font_family,
@@ -168,7 +183,11 @@ export function TextEditOverlay({
         // Group rotates around its top-left, so the same origin here.
         transform: object.rotation ? `rotate(${object.rotation}deg)` : undefined,
         transformOrigin: 'left top',
-        background: 'transparent',
+        // A near-opaque surface (rather than fully transparent): an empty
+        // create-draft has no text to see, so the field needs to read as a
+        // field. Light enough that an in-place edit still shows what's
+        // underneath.
+        background: 'rgba(255, 255, 255, 0.92)',
         border: '1px dashed #2563eb',
         borderRadius: 0,
         margin: 0,

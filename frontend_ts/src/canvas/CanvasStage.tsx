@@ -145,6 +145,9 @@ interface CanvasStageProps {
    * draft, and opens the edit overlay; same delegation as
    * `onCreateShape`/`onCreateLine`). */
   onCreateTextAt?: (point: Point) => void
+  /** Escape with no gesture in flight leaves the active tool, returning to
+   * the idle pan mode (canvas-tools follow-up). */
+  onExitTool?: () => void
   /** U7: an existing TEXT object wants re-editing — a Text-tool click on
    * it, or a double-click with any tool (`resolveObjectDoubleClickAction`).
    * The caller opens the overlay for the id; the routing here has already
@@ -801,6 +804,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onOpenContextMenu,
     onDuplicateSelection,
     onCreateTextAt,
+    onExitTool,
     onEditTextObject,
     editingItemId = null,
     onApplyCrop,
@@ -812,6 +816,12 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   const drawingLine = isLineTool(activeTool)
   const textToolActive = isTextType(activeTool)
   const croppingTool = activeTool === 'crop'
+  // The idle "no tool engaged" mode (canvas-tools follow-up): a plain drag
+  // navigates, exactly like Space+drag from any other mode. Deselecting any
+  // tool lands here, so it must behave like Space-held: the Stage is
+  // draggable and the objects layer stops listening (a drag starting over
+  // an object pans instead of moving it).
+  const panTool = activeTool === 'pan'
 
   // U2: plain drag on empty canvas is the marquee now; panning is
   // pan-active-only. The Stage is natively `draggable` ONLY while Space is
@@ -1083,16 +1093,28 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   useEffect(() => {
     const container = stageRef.current?.container()
     if (!container) return
-    container.style.cursor = marqueeActive || croppingTool
-      ? 'crosshair'
-      : panDragging
-        ? 'grabbing'
-        : spaceHeld
+    // One cursor per interaction mode (canvas-tools follow-up: every tool
+    // gets a cursor that names what a press will do). Order matters —
+    // in-flight gestures beat mode defaults.
+    container.style.cursor = panDragging
+      ? 'grabbing'
+      : marqueeActive || croppingTool || drawingShape || drawingLine
+        ? 'crosshair'
+        : spaceHeld || panTool
           ? 'grab'
           : textToolActive
             ? 'text'
             : ''
-  }, [marqueeActive, croppingTool, panDragging, spaceHeld, textToolActive])
+  }, [
+    marqueeActive,
+    croppingTool,
+    drawingShape,
+    drawingLine,
+    panDragging,
+    spaceHeld,
+    panTool,
+    textToolActive,
+  ])
 
   // Map<id, Konva.Node> resolving the selected item's live node for
   // SelectionTransformer's `.nodes([ref])` attach — populated/cleared by
@@ -1306,8 +1328,18 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
       ) {
         return
       }
-      if (event.key === 'Escape' && drawingLine) {
-        lineTool.finishDraw()
+      if (event.key === 'Escape') {
+        // Escape ownership (documented order: text overlay -> context menu
+        // -> crop region -> marquee -> line-draw -> EXIT TOOL). The inner
+        // consumers own their own gesture-scoped listeners; this handler
+        // covers the line draw and, when nothing is in flight, exiting the
+        // active tool back to idle/pan (canvas-tools follow-up).
+        if (drawingLine) {
+          lineTool.finishDraw()
+          return
+        }
+        if (cropActive || marquee.isActive) return
+        if (!panTool) onExitTool?.()
         return
       }
       if (shouldHandleDeleteKey(event.key, selectedItemIds, activeElement?.tagName, activeElement?.isContentEditable)) {
@@ -1322,7 +1354,16 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     // listener every render for no behavioral difference (same rationale as
     // the `shapeTool` window-pointerup effect below).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedItemIds, onDeleteSelected, drawingLine, lineTool.finishDraw])
+  }, [
+    selectedItemIds,
+    onDeleteSelected,
+    drawingLine,
+    lineTool.finishDraw,
+    cropActive,
+    marquee.isActive,
+    panTool,
+    onExitTool,
+  ])
 
   // U15 safety net: Konva's Stage pointer events only fire while the
   // pointer is over the canvas element, so a drag released outside the
@@ -1354,7 +1395,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
       scaleY={zoom}
       x={stagePosition.x}
       y={stagePosition.y}
-      draggable={spaceHeld}
+      draggable={spaceHeld || panTool}
       onDragStart={(event) => {
         // Only the Stage's own drag is a pan — an Object's dragstart fires
         // on the Object node, not the Stage (Konva dispatches drag events on
@@ -1449,7 +1490,9 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // U2: Space-held pan owns the gesture — the Stage is already
         // `draggable` via the prop, so Konva's own drag bookkeeping takes
         // this pointerdown; nothing below (drawing, marquee) may start.
-        if (spaceHeld) return
+        // The pan tool is the same deal (canvas-tools follow-up): it IS
+        // this gesture, as the idle mode.
+        if (spaceHeld || panTool) return
 
         // U15: a shape tool is active — start (or, per Konva's docs,
         // implicitly restart) a drag-to-size instead of the marquee/pan
@@ -1629,7 +1672,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           dragging that Object. U8: the crop tool joins the drawing tools —
           a crop drag must start wherever the pointer is, objects
           underneath included. */}
-      <Layer listening={!drawingShape && !drawingLine && !spaceHeld && !croppingTool}>
+      <Layer listening={!drawingShape && !drawingLine && !spaceHeld && !panTool && !croppingTool}>
         {/* U18: render order comes from `sortObjectsByZIndex` (above) —
             deliberately NOT from imperative Konva `.moveToTop()`/`.zIndex()`
             calls, which react-konva's own docs warn will fight React's own

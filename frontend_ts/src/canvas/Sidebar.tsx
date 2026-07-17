@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type Konva from 'konva'
-import { ChevronDown, ChevronRight, Crop } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronRight,
+  Circle,
+  Crop,
+  Hand,
+  MousePointer2,
+  Minus,
+  Spline,
+  Square,
+  RectangleHorizontal,
+  Type,
+  Waves,
+} from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useCanvasStore, type ActiveTool } from '../state/canvasStore'
@@ -32,15 +45,19 @@ const CATALOG_SECTIONS: { title: string; types: CatalogType[] }[] = [
  * plus every drawing tool (U15 shapes, U16 lines, U7 text, U8 crop), moved
  * here from `Toolbar.tsx`. Labels and lucide icons carry over unchanged
  * (only Crop had an icon in the toolbar). */
-const TOOL_BUTTONS: { type: ActiveTool; label: string; Icon?: LucideIcon }[] = [
-  { type: 'select', label: 'Select' },
-  { type: 'shape_rectangle', label: 'Rectangle' },
-  { type: 'shape_square', label: 'Square' },
-  { type: 'shape_circle', label: 'Circle' },
-  { type: 'line_straight', label: 'Line' },
-  { type: 'line_curved', label: 'Curved Line' },
-  { type: 'line_s_curve', label: 'S-Curve Line' },
-  { type: 'text', label: 'Text' },
+/** Every tool carries an icon (canvas-tools follow-up: icon + label reads
+ * faster than a wall of text labels). `'pan'` leads because it's the idle
+ * mode every other tool toggles back to. */
+const TOOL_BUTTONS: { type: ActiveTool; label: string; Icon: LucideIcon }[] = [
+  { type: 'pan', label: 'Pan', Icon: Hand },
+  { type: 'select', label: 'Select', Icon: MousePointer2 },
+  { type: 'shape_rectangle', label: 'Rectangle', Icon: RectangleHorizontal },
+  { type: 'shape_square', label: 'Square', Icon: Square },
+  { type: 'shape_circle', label: 'Circle', Icon: Circle },
+  { type: 'line_straight', label: 'Line', Icon: Minus },
+  { type: 'line_curved', label: 'Curved Line', Icon: Spline },
+  { type: 'line_s_curve', label: 'S-Curve Line', Icon: Waves },
+  { type: 'text', label: 'Text', Icon: Type },
   { type: 'crop', label: 'Crop', Icon: Crop },
 ]
 
@@ -166,9 +183,11 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
               size="sm"
               className="justify-start"
               aria-pressed={isActive}
-              onClick={() => setActiveTool(isActive ? 'select' : type)}
+              // Clicking the ACTIVE tool deselects it, landing on the idle
+              // pan mode where a plain drag navigates the canvas.
+              onClick={() => setActiveTool(isActive ? 'pan' : type)}
             >
-              {Icon && <Icon />} {label}
+              <Icon aria-hidden="true" /> {label}
             </Button>
           )
         })}

@@ -58,6 +58,7 @@ function renderSidebar(onDrop: (type: string, point: Point) => void = () => {}) 
 }
 
 const TOOL_LABELS = [
+  'Pan',
   'Select',
   'Rectangle',
   'Square',
@@ -71,20 +72,21 @@ const TOOL_LABELS = [
 
 describe('Sidebar tool strip (U9)', () => {
   beforeEach(() => {
-    useCanvasStore.setState({ activeTool: 'select', selectedItemIds: [] })
+    useCanvasStore.setState({ activeTool: 'pan', selectedItemIds: [] })
   })
 
-  it('renders every tool with Select pressed by default', () => {
+  it('renders every tool with Pan pressed by default (idle mode)', () => {
     renderSidebar()
 
     for (const label of TOOL_LABELS) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
     }
-    expect(screen.getByRole('button', { name: 'Select' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Pan' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Select' })).toHaveAttribute('aria-pressed', 'false')
     expect(screen.getByRole('button', { name: 'Rectangle' })).toHaveAttribute('aria-pressed', 'false')
   })
 
-  it('clicking a tool activates it; clicking it again toggles back to select', async () => {
+  it('clicking a tool activates it; clicking it again deselects back to pan (drag navigates)', async () => {
     renderSidebar()
     const user = userEvent.setup()
 
@@ -94,8 +96,8 @@ describe('Sidebar tool strip (U9)', () => {
     expect(screen.getByRole('button', { name: 'Select' })).toHaveAttribute('aria-pressed', 'false')
 
     await user.click(screen.getByRole('button', { name: 'Rectangle' }))
-    expect(useCanvasStore.getState().activeTool).toBe('select')
-    expect(screen.getByRole('button', { name: 'Select' })).toHaveAttribute('aria-pressed', 'true')
+    expect(useCanvasStore.getState().activeTool).toBe('pan')
+    expect(screen.getByRole('button', { name: 'Pan' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('the explicit Select button returns from any active tool', async () => {
@@ -112,7 +114,7 @@ describe('Sidebar tool strip (U9)', () => {
 
 describe('Sidebar grouped catalog (U9)', () => {
   beforeEach(() => {
-    useCanvasStore.setState({ activeTool: 'select', selectedItemIds: [] })
+    useCanvasStore.setState({ activeTool: 'pan', selectedItemIds: [] })
   })
 
   it('renders all 7 catalog items across the three sections, all open by default', () => {
