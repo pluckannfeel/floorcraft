@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { PropertyPanel } from './PropertyPanel'
+import { setTextMeasurer } from './TextTool'
 import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject } from './types'
 
@@ -284,5 +285,80 @@ describe('PropertyPanel multi-selection (U1)', () => {
 
     // One live item + one dead id -> exactly-one semantics, form renders.
     expect(screen.getByLabelText('Name')).toHaveValue('Real')
+  })
+})
+
+describe('PropertyPanel text styling (U7)', () => {
+  const makeText = (overrides: Partial<CanvasObject> = {}) =>
+    makeItem({
+      id: 'text-1',
+      type: 'text' as CanvasObject['type'],
+      width: 80,
+      height: 20,
+      properties: {
+        text: 'Meeting Room',
+        font_family: 'Arial',
+        font_size: 16,
+        bold: false,
+        italic: false,
+        color: '#111111',
+      },
+      ...overrides,
+    })
+
+  beforeEach(() => {
+    setTextMeasurer(() => ({ width: 123, height: 45 }))
+  })
+
+  it('renders the styling controls for a text object and hides styling keys from the generic rows', () => {
+    resetStore([makeText()], ['text-1'])
+    render(<PropertyPanel />)
+
+    expect(screen.getByLabelText('Font')).toHaveValue('Arial')
+    expect(screen.getByLabelText('Size')).toHaveValue(16)
+    expect(screen.getByRole('button', { name: 'Bold' })).toBeInTheDocument()
+    // Styling keys never appear as generic key/value rows (they have
+    // dedicated controls instead — e.g. the color input below).
+    expect(screen.queryByDisplayValue('font_family')).not.toBeInTheDocument()
+    expect(screen.queryByDisplayValue('color')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Color')).toHaveValue('#111111')
+  })
+
+  it('commits a font family change UNTRACKED and mirrors the measured box', async () => {
+    resetStore([makeText()], ['text-1'])
+    const user = userEvent.setup()
+    render(<PropertyPanel />)
+
+    await user.selectOptions(screen.getByLabelText('Font'), 'Georgia')
+
+    const item = useCanvasStore.getState().items[0]
+    expect(item.properties.font_family).toBe('Georgia')
+    expect(item.properties.text).toBe('Meeting Room') // content preserved
+    // Mirrored box recomputed through the injected measurer.
+    expect(item.width).toBe(123)
+    expect(item.height).toBe(45)
+    // R15: styling is not undoable — no history entry was pushed.
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('toggles bold via aria-pressed and clamps the font size draft on blur', async () => {
+    resetStore([makeText()], ['text-1'])
+    const user = userEvent.setup()
+    render(<PropertyPanel />)
+
+    await user.click(screen.getByRole('button', { name: 'Bold' }))
+    expect(useCanvasStore.getState().items[0].properties.bold).toBe(true)
+    expect(screen.getByRole('button', { name: 'Bold' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+
+    const size = screen.getByLabelText('Size')
+    await user.clear(size)
+    await user.type(size, '1')
+    await user.tab() // blur commits, clamped to MIN_TEXT_FONT_SIZE
+    expect(
+      useCanvasStore.getState().items[0].properties.font_size as number,
+    ).toBeGreaterThanOrEqual(4)
   })
 })

@@ -4,10 +4,11 @@ import { NO_GUIDES, snapDragPosition } from './AlignmentGuides'
 import type { GuideLines } from './AlignmentGuides'
 import { clampToBounds } from './coordinates'
 import { flattenPoints, getEffectiveTension, isLineTool, parseLinePoints } from './LineTool'
+import { fontStyleFor, isTextType, parseTextProperties } from './TextTool'
 import type { CanvasObject, ObjectType, Point } from './types'
 
 /**
- * Color palette for all 13 Object types (Key Technical Decisions: canvas-only
+ * Color palette for all 14 Object types (Key Technical Decisions: canvas-only
  * visual differentiation via color + text label is an accepted limitation
  * for this pass — no icons yet).
  *
@@ -15,6 +16,11 @@ import type { CanvasObject, ObjectType, Point } from './types'
  * types are included so ObjectShape renders generically without crashing
  * once U15/U16 start creating them (they still render as a plain colored
  * rect for now — type-specific rendering/Transformer support comes later).
+ *
+ * `text` (canvas-tools U7) never actually FILLS with this color — a text
+ * object's fill comes from its own `properties.color` — but the Record is
+ * deliberately exhaustive over `ObjectType` so adding an enum value without
+ * deciding its color is a compile error.
  */
 const TYPE_COLORS: Record<ObjectType, string> = {
   outlines: '#6b7280',
@@ -30,6 +36,7 @@ const TYPE_COLORS: Record<ObjectType, string> = {
   line_straight: '#dc2626',
   line_curved: '#b91c1c',
   line_s_curve: '#991b1b',
+  text: '#111827',
 }
 
 const DEFAULT_COLOR = '#4b5563'
@@ -127,6 +134,12 @@ interface ObjectShapeProps {
    * draggable at all (single-selected Lines stay non-draggable,
    * anchor-only — U17). */
   groupDrag?: GroupDragHandlers
+  /** U7: true while this object is being edited through the DOM
+   * `TextEditOverlay` — the Konva node hides (official Konva editable-text
+   * pattern: the overlay's textarea IS the visible text during editing, so
+   * the node underneath must not double-render). Only ever set for text
+   * objects in practice, but implemented generically on the Group. */
+  hidden?: boolean
 }
 
 /**
@@ -159,6 +172,7 @@ export function ObjectShape({
   zoom = 1,
   onAlignmentGuidesChange,
   groupDrag,
+  hidden = false,
 }: ObjectShapeProps) {
   const fill = colorForType(object.type)
 
@@ -242,6 +256,15 @@ export function ObjectShape({
     return clampToBounds(snapped, object.width, object.height, canvasWidth, canvasHeight)
   }
 
+  // U7: text objects render a single auto-sizing Konva.Text (NO width prop —
+  // Konva auto-sizes, and the stored width/height merely MIRROR that box)
+  // inside the SAME draggable Group wrapper as the box branch below, so
+  // selection, drag, dragBoundFunc snapping/clamping, group membership, and
+  // the transformer all treat text like any other box object. Konva.Text's
+  // hit region is its bounding rect, so the Group stays clickable without a
+  // backing Rect.
+  const textProperties = isTextType(object.type) ? parseTextProperties(object.properties) : null
+
   return (
     <Group
       x={object.x}
@@ -249,6 +272,7 @@ export function ObjectShape({
       width={object.width}
       height={object.height}
       rotation={object.rotation}
+      visible={!hidden}
       ref={shapeRef}
       draggable
       dragBoundFunc={groupDrag ? undefined : dragBoundFunc}
@@ -278,24 +302,36 @@ export function ObjectShape({
         onAlignmentGuidesChange?.(NO_GUIDES)
       }}
     >
-      <Rect
-        width={object.width}
-        height={object.height}
-        fill={fill}
-        stroke={isSelected ? '#111827' : undefined}
-        strokeWidth={isSelected ? 2 : 0}
-        cornerRadius={2}
-      />
-      <Text
-        text={object.name || object.type}
-        width={object.width}
-        height={object.height}
-        align="center"
-        verticalAlign="middle"
-        fontSize={11}
-        fill="#ffffff"
-        listening={false}
-      />
+      {textProperties ? (
+        <Text
+          text={textProperties.text}
+          fontFamily={textProperties.font_family}
+          fontSize={textProperties.font_size}
+          fontStyle={fontStyleFor(textProperties)}
+          fill={textProperties.color}
+        />
+      ) : (
+        <>
+          <Rect
+            width={object.width}
+            height={object.height}
+            fill={fill}
+            stroke={isSelected ? '#111827' : undefined}
+            strokeWidth={isSelected ? 2 : 0}
+            cornerRadius={2}
+          />
+          <Text
+            text={object.name || object.type}
+            width={object.width}
+            height={object.height}
+            align="center"
+            verticalAlign="middle"
+            fontSize={11}
+            fill="#ffffff"
+            listening={false}
+          />
+        </>
+      )}
     </Group>
   )
 }

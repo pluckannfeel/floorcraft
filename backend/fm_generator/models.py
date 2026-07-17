@@ -33,6 +33,12 @@ class Objects(models.Model):
         LINE_STRAIGHT = 'line_straight', 'Line: Straight'
         LINE_CURVED = 'line_curved', 'Line: Curved'
         LINE_S_CURVE = 'line_s_curve', 'Line: S-Curve'
+        # Text type (U7, canvas-tools): first-class auto-sizing text label.
+        # Requires a string `properties.text` (serializer-enforced, like the
+        # line rules); whole-object styling rides `properties`
+        # ({font_family, font_size, bold, italic, color}) and the row's
+        # width/height MIRROR the client's auto-sized text box.
+        TEXT = 'text', 'Text'
 
     floor_plan = models.ForeignKey(FloorPlan, on_delete=models.CASCADE, related_name='items')
     type = models.CharField(max_length=20, choices=ObjectType.choices)

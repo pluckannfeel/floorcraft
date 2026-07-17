@@ -116,6 +116,21 @@ describe('sortObjectsByZIndex', () => {
  * plumbs pointer events into them.
  */
 describe('selectIdsInRect', () => {
+  it('a TEXT object joins marquee selection via its mirrored width/height box (U7)', () => {
+    const text = makeObject({
+      id: 'text-1',
+      type: 'text' as CanvasObject['type'],
+      x: 100,
+      y: 100,
+      width: 80,
+      height: 20,
+      properties: { text: 'Label', font_family: 'Arial', font_size: 16, bold: false, italic: false, color: '#111' },
+    })
+    // Rect overlapping the mirrored box selects it; a disjoint rect does not.
+    expect(selectIdsInRect({ x: 90, y: 90, width: 30, height: 30 }, [text])).toEqual(['text-1'])
+    expect(selectIdsInRect({ x: 300, y: 300, width: 20, height: 20 }, [text])).toEqual([])
+  })
+
   it('selects exactly the objects the rect covers — 2 of 3 (AE1)', () => {
     const objects = [
       makeObject({ id: 'a', x: 0, y: 0 }),

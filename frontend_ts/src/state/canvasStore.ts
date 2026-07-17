@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { temporal } from 'zundo'
 import { clampZoom } from '../canvas/coordinates'
-import type { CanvasObject, LineType, Point, ShapeType } from '../canvas/types'
+import type { CanvasObject, LineType, Point, ShapeType, TextType } from '../canvas/types'
 
 /** U11's default zoom step for the Toolbar's zoom in/out buttons (a gentler
  * per-click step than a single wheel "tick" would feel like, since a click
@@ -9,12 +9,13 @@ import type { CanvasObject, LineType, Point, ShapeType } from '../canvas/types'
 const TOOLBAR_ZOOM_STEP = 1.2
 
 /**
- * Drawing-tool mode for the shape/line creation flows (U15/U16). `'select'`
- * is the default/idle mode matching the drag-select interaction; the rest
- * mirror `ShapeType`/`LineType` from `canvas/types.ts`. Untracked by undo
- * (see `partialize` below) — switching tools isn't a content change.
+ * Drawing-tool mode for the shape/line/text creation flows (U15/U16, and
+ * canvas-tools U7's `'text'`). `'select'` is the default/idle mode matching
+ * the drag-select interaction; the rest mirror `ShapeType`/`LineType`/
+ * `TextType` from `canvas/types.ts`. Untracked by undo (see `partialize`
+ * below) — switching tools isn't a content change.
  */
-export type ActiveTool = 'select' | ShapeType | LineType
+export type ActiveTool = 'select' | ShapeType | LineType | TextType
 
 /**
  * One item's share of a batched `updateItemsGeometry` gesture commit.
@@ -35,6 +36,16 @@ export type ItemGeometryPatch = Partial<
 > & {
   /** Replacement ABSOLUTE canvas points for a Line-typed item. */
   points?: Point[]
+  /**
+   * U7: replacement `font_size` for a TEXT-typed item — the transformer
+   * resize special case (a text node folds `min(scaleX, scaleY)` into its
+   * font size instead of stretching width/height; see
+   * `computeTransformCommit`). Folded into `item.properties.font_size`
+   * inside the same single tracked `set()`, exactly like `points` — one
+   * gesture, one history entry, and the patch's width/height carry the
+   * remeasured mirrored box alongside.
+   */
+  font_size?: number
 }
 
 /**
@@ -71,8 +82,8 @@ export type ItemGeometryPatch = Partial<
  *   those calls and no history entry is created. `createItemLocal`/
  *   `createItemsLocal`,
  *   `updateItemGeometry`/`updateItemsGeometry`, `deleteItem`/`deleteItems`,
- *   `reorderZIndex`/`reorderZIndexItems`, `updateLinePoints`, and U4's
- *   `groupSelection`/`ungroupSelection` all
+ *   `reorderZIndex`/`reorderZIndexItems`, `updateLinePoints`, U4's
+ *   `groupSelection`/`ungroupSelection`, and U7's `updateItemText` all
  *   replace `items` with a new array, so those calls
  *   do produce a history entry. This is simpler and safer than a
  *   `partialize` that strips fields per-item (e.g. dropping `properties`):
@@ -356,6 +367,42 @@ export interface CanvasState {
   updateLinePoints: (id: CanvasObject['id'], pointIndex: number, point: Point) => void
 
   /**
+   * U7: commits a text object's CONTENT (`properties.text`) plus its
+   * remeasured mirrored `width`/`height` in ONE tracked `set()` — one
+   * history entry per overlay commit. TRACKED deliberately (the plan's
+   * doc-review decision): text content is the object's substance — the same
+   * "a Line's points ARE its shape" U17 reasoning behind
+   * `updateLinePoints` — unlike STYLING, which stays untracked per R15
+   * (see `updateItemTextStyling` below). Without tracking, an unrelated
+   * undo would silently revert typed content via the whole-items snapshot
+   * restore. A no-op (no history entry, `dirty` untouched) if `id` matches
+   * no item.
+   */
+  updateItemText: (
+    id: CanvasObject['id'],
+    text: string,
+    size: { width: number; height: number },
+  ) => void
+
+  /**
+   * U7: commits a text object's STYLING (`properties` replacement — the
+   * caller builds the full next-properties object, `updateItemProperties`
+   * convention) plus the remeasured mirrored `width`/`height`, UNTRACKED
+   * (R15: property/styling edits never create undo history — same
+   * `temporal.pause()`/`resume()` bracket as `updateItemProperties`).
+   * A dedicated action rather than `updateItemProperties` itself because
+   * styling changes the rendered text metrics, so the mirrored box must
+   * move in the same `set()` — and `updateItemProperties`' patch shape is
+   * deliberately geometry-free. Still a content change the user hasn't
+   * saved: sets `dirty`. A no-op if `id` matches no item.
+   */
+  updateItemTextStyling: (
+    id: CanvasObject['id'],
+    properties: Record<string, unknown>,
+    size: { width: number; height: number },
+  ) => void
+
+  /**
    * Patches an item's `name` and/or `properties` JSON (U10's property panel
    * writes) directly on `items[i]` — the same location `ObjectShape.tsx`
    * renders `name`/`properties.points` from, so a saved edit is guaranteed
@@ -619,13 +666,19 @@ export const useCanvasStore = create<CanvasState>()(
               // U3: `points` isn't a top-level column — fold it into
               // `properties.points` (same location `updateLinePoints`
               // writes and `ObjectShape` renders from) inside this same
-              // single tracked set().
-              const { points, ...geometry } = patch
+              // single tracked set(). U7: `font_size` (a text member's
+              // transformer-resize fold) rides the same mechanism into
+              // `properties.font_size`.
+              const { points, font_size, ...geometry } = patch
+              const propertiesPatch = {
+                ...(points !== undefined ? { points } : {}),
+                ...(font_size !== undefined ? { font_size } : {}),
+              }
               return {
                 ...item,
                 ...geometry,
-                ...(points !== undefined
-                  ? { properties: { ...item.properties, points } }
+                ...(points !== undefined || font_size !== undefined
+                  ? { properties: { ...item.properties, ...propertiesPatch } }
                   : {}),
               }
             }),
@@ -684,6 +737,47 @@ export const useCanvasStore = create<CanvasState>()(
           }
         }),
 
+      updateItemText: (id, text, size) =>
+        set((state) => {
+          const item = state.items.find((candidate) => candidate.id === id)
+          if (!item) return {}
+          return {
+            items: state.items.map((candidate) =>
+              candidate.id === id
+                ? {
+                    ...candidate,
+                    width: size.width,
+                    height: size.height,
+                    properties: { ...candidate.properties, text },
+                  }
+                : candidate,
+            ),
+            dirty: true,
+          }
+        }),
+
+      updateItemTextStyling: (id, properties, size) => {
+        // Untracked like `updateItemProperties` (R15 — styling edits push
+        // no history entry), via the same pause()/resume() bracket; the
+        // mirrored box update rides the same set() so the box can never
+        // drift from the styling that produced it.
+        const temporalStore = useCanvasStore.temporal.getState()
+        temporalStore.pause()
+        set((state) => {
+          const item = state.items.find((candidate) => candidate.id === id)
+          if (!item) return {}
+          return {
+            items: state.items.map((candidate) =>
+              candidate.id === id
+                ? { ...candidate, width: size.width, height: size.height, properties }
+                : candidate,
+            ),
+            dirty: true,
+          }
+        })
+        temporalStore.resume()
+      },
+
       updateItemProperties: (id, patch) => {
         // Suspend zundo tracking for exactly this set() call (R15: property
         // edits must not create undo history), then immediately resume so
@@ -739,11 +833,13 @@ export const useCanvasStore = create<CanvasState>()(
       // createItemLocal/createItemsLocal (U5's batched paste commit),
       // updateItemGeometry/updateItemsGeometry,
       // deleteItem/deleteItems, reorderZIndex/reorderZIndexItems,
-      // updateLinePoints, and groupSelection/ungroupSelection (U4)
+      // updateLinePoints, groupSelection/ungroupSelection (U4), and
+      // updateItemText (U7's tracked content commit)
       // always build a new `items` array, so those do
       // produce an entry (the batched variants deliberately in ONE set()
       // each — one history entry per gesture, however many items it
-      // touched). `setItems` and `updateItemProperties` ALSO build a new
+      // touched). `setItems`, `updateItemProperties`, and U7's
+      // `updateItemTextStyling` ALSO build a new
       // `items` array reference but are kept out of history via
       // `temporal.pause()`/`resume()` instead of relying on this equality
       // check, since reference equality alone can't distinguish "a real

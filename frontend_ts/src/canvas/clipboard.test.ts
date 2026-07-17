@@ -463,3 +463,39 @@ describe('resolvePastePoint (Ctrl+V paste point)', () => {
     expect(point).toEqual({ x: 150, y: 62.5 })
   })
 })
+
+describe('text objects in the clipboard (U7)', () => {
+  it('copies and pastes a text object — content/styling deep-cloned, fresh local id, box preserved', () => {
+    const text = makeObject({
+      id: 'text-1',
+      type: 'text' as CanvasObject['type'],
+      x: 100,
+      y: 100,
+      width: 80,
+      height: 20,
+      properties: {
+        text: 'Meeting Room B',
+        font_family: 'Georgia',
+        font_size: 16,
+        bold: true,
+        italic: false,
+        color: '#333333',
+      },
+    })
+
+    const payload = buildClipboardPayload(['text-1'], [text])
+    expect(payload).not.toBeNull()
+
+    const minted = mintClipboardItems(payload!, { x: 500, y: 700 }, 7, 5)
+    expect(minted).toHaveLength(1)
+    const pasted = minted[0]
+    expect(String(pasted.id)).toMatch(/^local-/)
+    expect(pasted.id).not.toBe('text-1')
+    expect(pasted.x).toBe(500)
+    expect(pasted.y).toBe(700)
+    expect(pasted.width).toBe(80)
+    expect(pasted.height).toBe(20)
+    expect(pasted.properties).toEqual(text.properties)
+    expect(pasted.properties).not.toBe(text.properties) // deep clone
+  })
+})

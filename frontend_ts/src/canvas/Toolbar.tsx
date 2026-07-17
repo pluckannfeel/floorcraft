@@ -189,6 +189,23 @@ export function Toolbar({
 
       <ToolbarDivider />
 
+      {/* U7 (canvas-tools): the Text tool — click empty canvas to create a
+          text object and start typing; click an existing text object to
+          re-edit it. Lives HERE for now with the same toggle/active-variant
+          conventions as the shape/line tools; U9 moves the whole tool strip
+          into the sidebar. */}
+      <Button
+        type="button"
+        variant={activeTool === 'text' ? 'default' : 'outline'}
+        size="sm"
+        aria-pressed={activeTool === 'text'}
+        onClick={() => setActiveTool(activeTool === 'text' ? 'select' : 'text')}
+      >
+        Text
+      </Button>
+
+      <ToolbarDivider />
+
       {/* U11: zoom in/out/reset — the button-driven alternative to wheel
           scroll/pinch. Anchored at the current pan position (no cursor
           position exists for a button click, unlike wheel/pinch's

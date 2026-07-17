@@ -27,11 +27,18 @@ import {
 } from "./clipboard";
 import type { ClipboardPayload } from "./clipboard";
 import { ContextMenu, resolveContextMenuAvailability } from "./ContextMenu";
+import { clampToBounds, snapToGrid } from "./coordinates";
 import { FloorPlanNameEditor } from "./FloorPlanNameEditor";
 import { computeLineBoundingBox, curveStyleForType } from "./LineTool";
 import { PropertyPanel } from "./PropertyPanel";
 import type { ShapeGeometry } from "./ShapeTool";
 import { Sidebar } from "./Sidebar";
+import { TextEditOverlay } from "./TextEditOverlay";
+import {
+  DEFAULT_TEXT_STYLING,
+  measureTextBox,
+  parseTextProperties,
+} from "./TextTool";
 import { Toolbar } from "./Toolbar";
 import type {
   CanvasObject,
@@ -126,6 +133,9 @@ export function CanvasEditorPage() {
     (state) => state.updateItemsGeometry,
   );
   const updateLinePoints = useCanvasStore((state) => state.updateLinePoints);
+  // U7: the TRACKED text-content commit (one history entry per overlay
+  // commit; content is the object's substance, unlike untracked styling).
+  const updateItemText = useCanvasStore((state) => state.updateItemText);
   const deleteItems = useCanvasStore((state) => state.deleteItems);
   const reorderZIndexItems = useCanvasStore(
     (state) => state.reorderZIndexItems,
@@ -311,6 +321,36 @@ export function CanvasEditorPage() {
   const activeContextMenu =
     contextMenu?.planId === floorPlanId ? contextMenu.request : null;
 
+  // U7: the text-editing overlay session. Two shapes, one state:
+  // - 'create': a Text-tool click on empty canvas built a DRAFT object
+  //   (buildLocalObject-shaped, NOT yet in the store) — it only enters the
+  //   store on a non-empty commit, through ONE tracked `createItemLocal`
+  //   (so F3's "undo removes it" is a single undo step, and an empty/
+  //   Escape'd draft aborts with zero store traffic — no create+delete
+  //   history junk).
+  // - 'edit': re-editing an EXISTING text object (double-click, or
+  //   Text-tool click on it); a changed non-empty commit goes through the
+  //   tracked `updateItemText`, empty/unchanged/Escape reverts by simply
+  //   closing.
+  // Carries the plan it was opened on, same render-time plan-switch
+  // discard as the context menu above.
+  const [textEditor, setTextEditor] = useState<
+    | { planId: number; mode: "create"; draft: CanvasObject }
+    | { planId: number; mode: "edit"; itemId: CanvasObject["id"] }
+    | null
+  >(null);
+  const activeTextEditor =
+    textEditor?.planId === floorPlanId ? textEditor : null;
+  // The object the overlay edits: the uncommitted draft (create) or the
+  // LIVE store item (edit — resolved per render, so an item deleted
+  // mid-edit, e.g. by an undo, dissolves the overlay instead of editing a
+  // ghost).
+  const textEditorObject = activeTextEditor
+    ? activeTextEditor.mode === "create"
+      ? activeTextEditor.draft
+      : (items.find((item) => item.id === activeTextEditor.itemId) ?? null)
+    : null;
+
   // Keyboard shortcuts: undo/redo (R15), Ctrl/Cmd+S -> explicit save, and
   // U5's Ctrl/Cmd+C/X/V -> the clipboard handlers above — see
   // `useCanvasShortcuts.ts` (Ctrl+G/Shift+G dispatch internally).
@@ -489,6 +529,90 @@ export function CanvasEditorPage() {
     [floorPlanQuery.data, buildLocalObject, createItemLocal, setActiveTool],
   );
 
+  // U7: Text-tool click on empty canvas — build the DRAFT (snapped/clamped
+  // like every other creation path; the empty draft's box spans one
+  // caret-sized line via measureTextBox's empty-string handling) and open
+  // the overlay in create mode. The tool resets to 'select' immediately,
+  // matching the shape/line tools' one-shot convention (and preventing the
+  // overlay's own outside-click commit from instantly starting a second
+  // text at the click point).
+  const handleCreateTextAt = useCallback(
+    (point: Point) => {
+      const floorPlan = floorPlanQuery.data;
+      if (!floorPlan) return;
+
+      const snapped = clampToBounds(
+        snapToGrid(point, floorPlan.grid_size),
+        0,
+        0,
+        floorPlan.canvas_width,
+        floorPlan.canvas_height,
+      );
+      const size = measureTextBox("", DEFAULT_TEXT_STYLING);
+      const draft = buildLocalObject(
+        floorPlan.id,
+        "text",
+        { x: snapped.x, y: snapped.y, width: size.width, height: size.height },
+        { text: "", ...DEFAULT_TEXT_STYLING },
+      );
+      setTextEditor({ planId: floorPlan.id, mode: "create", draft });
+      setActiveTool("select");
+    },
+    [floorPlanQuery.data, buildLocalObject, setActiveTool],
+  );
+
+  // U7: re-edit an existing text object (double-click, or Text-tool click
+  // on it — CanvasStage's routing already selected it).
+  const handleEditTextObject = useCallback(
+    (id: CanvasObject["id"]) => {
+      setTextEditor({ planId: floorPlanId, mode: "edit", itemId: id });
+      setActiveTool("select");
+    },
+    [floorPlanId, setActiveTool],
+  );
+
+  // U7: the overlay's terminal commit. Empty text aborts a creation (no
+  // object, no history entry) and reverts a re-edit (previous content
+  // stands); an unchanged re-edit is a deliberate no-op (no junk history
+  // entry). Non-empty: create-mode commits the draft + content through ONE
+  // tracked createItemLocal (a single undo removes the whole text object)
+  // and selects it; edit-mode commits through the tracked updateItemText
+  // (content + remeasured mirrored box, one entry).
+  const handleTextEditCommit = useCallback(
+    (text: string) => {
+      setTextEditor(null);
+      if (!activeTextEditor) return;
+      if (text.trim() === "") return;
+
+      if (activeTextEditor.mode === "create") {
+        const draft = activeTextEditor.draft;
+        const styling = parseTextProperties(draft.properties);
+        const size = measureTextBox(text, styling);
+        createItemLocal({
+          ...draft,
+          width: size.width,
+          height: size.height,
+          properties: { ...draft.properties, text },
+        });
+        replaceSelection([draft.id]);
+        return;
+      }
+
+      const item = useCanvasStore
+        .getState()
+        .items.find((candidate) => candidate.id === activeTextEditor.itemId);
+      if (!item) return;
+      const current = parseTextProperties(item.properties);
+      if (current.text === text) return;
+      updateItemText(item.id, text, measureTextBox(text, current));
+    },
+    [activeTextEditor, createItemLocal, replaceSelection, updateItemText],
+  );
+
+  // U7: Escape — create-mode drafts vanish (they never touched the store),
+  // re-edits keep their previous content.
+  const handleTextEditCancel = useCallback(() => setTextEditor(null), []);
+
   // U5/R14: a malformed route param or a 404 (nonexistent, or someone
   // else's plan — the backend deliberately doesn't distinguish) renders a
   // not-found state with a way back, rather than crashing or retry-looping.
@@ -643,10 +767,31 @@ export function CanvasEditorPage() {
             onPanEnd={setStagePosition}
             onOpenContextMenu={openContextMenu}
             onDuplicateSelection={commitPayloadAt}
+            onCreateTextAt={handleCreateTextAt}
+            onEditTextObject={handleEditTextObject}
+            editingItemId={
+              activeTextEditor?.mode === "edit" ? activeTextEditor.itemId : null
+            }
           />
         </div>
         <PropertyPanel />
       </div>
+
+      {/* U7: the DOM text-editing overlay (fixed-positioned over the
+          canvas, like the context menu below). Keyed per editing session so
+          a create → immediate re-edit remounts with fresh draft state. */}
+      {activeTextEditor && textEditorObject && (
+        <TextEditOverlay
+          key={`${activeTextEditor.mode}-${String(textEditorObject.id)}`}
+          object={textEditorObject}
+          mode={activeTextEditor.mode === "create" ? "create" : "edit"}
+          zoom={zoom}
+          stagePosition={stagePosition}
+          getStage={getStage}
+          onCommit={handleTextEditCommit}
+          onCancel={handleTextEditCancel}
+        />
+      )}
 
       {/* U5: the right-click context menu (fixed-positioned DOM, so its
           placement in the tree is irrelevant). Availability is computed at

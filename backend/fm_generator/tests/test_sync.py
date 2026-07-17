@@ -397,6 +397,92 @@ class SyncGroupKeyTests(SyncEndpointTestCase):
         self.assertIsNone(response.json()['objects'][0]['group_key'])
 
 
+class SyncTextTests(SyncEndpointTestCase):
+    """U7 (canvas-tools): the 14th `type` value, `text`. Text items must
+    round-trip through sync (content + styling live in `properties`; the
+    row's width/height mirror the client's auto-sized box), and a text item
+    without a string `properties.text` fails per-index with 400 — the same
+    aligned-errors contract the line rules established.
+    """
+
+    def test_text_object_round_trips_through_sync(self):
+        self.login_as()
+        properties = {
+            'text': 'Meeting Room',
+            'font_family': 'Georgia',
+            'font_size': 24,
+            'bold': True,
+            'italic': False,
+            'color': '#111827',
+        }
+
+        response = self.sync(self.floor_plan.id, [
+            object_payload(
+                id='local-text-1', type=Objects.ObjectType.TEXT, name='',
+                x=100, y=80, width=132, height=24, properties=properties,
+            ),
+        ])
+
+        self.assertEqual(response.status_code, 200)
+        row = response.json()['objects'][0]
+        self.assertEqual(row['type'], 'text')
+        self.assertEqual(row['properties'], properties)
+        self.assertEqual(row['width'], 132)
+        self.assertEqual(row['height'], 24)
+
+        # Persisted, not just echoed: a reload's GET sees the same content.
+        stored = Objects.objects.get(floor_plan=self.floor_plan)
+        self.assertEqual(stored.type, Objects.ObjectType.TEXT)
+        self.assertEqual(stored.properties['text'], 'Meeting Room')
+
+    def test_text_without_text_property_is_per_index_400_and_atomic(self):
+        self.login_as()
+        survivor = Objects.objects.create(
+            floor_plan=self.floor_plan, type=Objects.ObjectType.TABLES,
+            name='Survivor', x=0, y=0,
+        )
+
+        response = self.sync(self.floor_plan.id, [
+            object_payload(id=survivor.id, name='Valid update'),
+            object_payload(type=Objects.ObjectType.TEXT, name='Bad text', properties={}),
+        ])
+
+        self.assertEqual(response.status_code, 400)
+        errors = response.json()['objects']
+        self.assertEqual(len(errors), 2)
+        self.assertEqual(errors[0], {})
+        self.assertIn('properties', errors[1])
+
+        # Nothing applied (atomicity holds for the text rule too).
+        survivor.refresh_from_db()
+        self.assertEqual(survivor.name, 'Survivor')
+        self.assertEqual(Objects.objects.filter(floor_plan=self.floor_plan).count(), 1)
+
+    def test_text_with_non_string_text_property_is_400(self):
+        self.login_as()
+
+        response = self.sync(self.floor_plan.id, [
+            object_payload(type=Objects.ObjectType.TEXT, properties={'text': 42}),
+        ])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('properties', response.json()['objects'][0])
+        self.assertEqual(Objects.objects.filter(floor_plan=self.floor_plan).count(), 0)
+
+    def test_empty_string_text_is_valid(self):
+        """An empty string is still a STRING — the create-path's empty-draft
+        abort is a frontend concern; the API contract only types the field.
+        """
+        self.login_as()
+
+        response = self.sync(self.floor_plan.id, [
+            object_payload(type=Objects.ObjectType.TEXT, properties={'text': ''}),
+        ])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['objects'][0]['properties']['text'], '')
+
+
 class SyncAuthenticationTests(SyncEndpointTestCase):
     """Matches the existing endpoints' behavior: without a session the
     request is rejected (401/403, per SessionAuthentication + the global

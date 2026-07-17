@@ -7,6 +7,8 @@ import {
   isPersistentGroupSelection,
   resolveTransformerNodes,
 } from './SelectionTransformer'
+import type { TransformSnapshot } from './SelectionTransformer'
+import { MIN_TEXT_FONT_SIZE } from './TextTool'
 import type { CanvasObject } from './types'
 
 /**
@@ -347,5 +349,102 @@ describe('isPersistentGroupSelection (U4)', () => {
 
   it('false when a selected id resolves to no object (mid-delete race)', () => {
     expect(isPersistentGroupSelection(['a', 'ghost'], objects)).toBe(false)
+  })
+})
+
+// U7: the TEXT member special case in the transformend decomposition —
+// resize folds min(scaleX, scaleY) into `font_size` (never a width/height
+// box-stretch) and remeasures the mirrored box through the injectable
+// measurer (jsdom can't run Konva's canvas-backed measurement).
+describe('computeTransformCommit text members (U7)', () => {
+  // Deliberately NOT proportional to the snapshot box (width from the
+  // text length, height with a 1.25 line factor) so a naive
+  // box-stretch commit could never accidentally produce these numbers.
+  const stubMeasurer = (text: string, styling: { font_size: number }) => ({
+    width: text.length * styling.font_size * 0.5,
+    height: styling.font_size * 1.25,
+  })
+
+  function textMember(snapshot: Partial<TransformSnapshot> = {}) {
+    return {
+      id: 'text-1',
+      snapshot: {
+        x: 100,
+        y: 80,
+        width: 96,
+        height: 16,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0,
+        ...snapshot,
+      },
+      text: {
+        text: 'Kitchen',
+        font_family: 'Arial',
+        font_size: 16,
+        bold: false,
+        italic: false,
+        color: '#111827',
+      },
+    }
+  }
+
+  it('folds min(scaleX, scaleY) into font_size — NOT into a width/height stretch — and mirrors the remeasured box', () => {
+    const [{ patch }] = computeTransformCommit(
+      [textMember({ scaleX: 2, scaleY: 1.5 })],
+      undefined,
+      stubMeasurer,
+    )
+
+    // min(2, 1.5) = 1.5 → 16 * 1.5 = 24.
+    expect(patch.font_size).toBe(24)
+    // width/height are the MEASURED box at the new font size ('Kitchen' =
+    // 7 chars * 24 * 0.5; height 24 * 1.25), not the old 96x16 box scaled
+    // by (2, 1.5) — i.e. not 192x24.
+    expect(patch.width).toBe(84)
+    expect(patch.height).toBe(30)
+    expect(patch.width).not.toBe(96 * 2)
+    expect(patch.height).not.toBe(16 * 1.5)
+  })
+
+  it('passes x/y/rotation through unchanged (position/rotation still commit like any box)', () => {
+    const [{ patch }] = computeTransformCommit(
+      [textMember({ x: 12, y: 34, rotation: 45, scaleX: 1, scaleY: 1 })],
+      undefined,
+      stubMeasurer,
+    )
+
+    expect(patch.x).toBe(12)
+    expect(patch.y).toBe(34)
+    expect(patch.rotation).toBe(45)
+    expect(patch.font_size).toBe(16) // scale 1 → unchanged
+  })
+
+  it('clamps the folded font_size at MIN_TEXT_FONT_SIZE on an extreme scale-down', () => {
+    const [{ patch }] = computeTransformCommit(
+      [textMember({ scaleX: 0.01, scaleY: 0.01 })],
+      undefined,
+      stubMeasurer,
+    )
+
+    expect(patch.font_size).toBe(MIN_TEXT_FONT_SIZE)
+  })
+
+  it('a mixed text+box selection folds each member by its own rule', () => {
+    const patches = computeTransformCommit(
+      [
+        textMember({ scaleX: 2, scaleY: 2 }),
+        {
+          id: 'box-1',
+          snapshot: { x: 0, y: 0, width: 40, height: 40, scaleX: 2, scaleY: 2, rotation: 0 },
+        },
+      ],
+      undefined,
+      stubMeasurer,
+    )
+
+    expect(patches[0].patch.font_size).toBe(32)
+    expect(patches[1].patch).toEqual({ x: 0, y: 0, width: 80, height: 80, rotation: 0 })
+    expect(patches[1].patch.font_size).toBeUndefined()
   })
 })

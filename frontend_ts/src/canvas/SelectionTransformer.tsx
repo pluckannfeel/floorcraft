@@ -10,6 +10,8 @@ import {
   SELECTION_CHROME,
 } from './coordinates'
 import { computeLineBoundingBox, flattenPoints, pairPoints } from './LineTool'
+import { isTextType, measureTextBox, MIN_TEXT_FONT_SIZE, parseTextProperties } from './TextTool'
+import type { TextMeasurer, TextProperties } from './TextTool'
 import type { ItemGeometryPatch } from '../state/canvasStore'
 import type { CanvasObject, Point } from './types'
 
@@ -107,6 +109,11 @@ export interface MemberTransformState {
   id: CanvasObject['id']
   snapshot: TransformSnapshot
   linePoints?: Point[]
+  /** U7: present exactly when the member is a TEXT object — its current
+   * parsed content+styling, so the commit can fold the transform's scale
+   * into `font_size` and remeasure the mirrored box (see
+   * `computeTransformCommit`). */
+  text?: TextProperties
 }
 
 /**
@@ -119,13 +126,25 @@ export interface MemberTransformState {
  * the Line's descriptive x/y/width/height metadata from the new points.
  * The caller commits the returned patches in ONE `updateItemsGeometry`
  * call — one history entry per gesture.
+ *
+ * U7: a TEXT member folds `min(scaleX, scaleY)` into its `font_size`
+ * (clamped to `MIN_TEXT_FONT_SIZE`) instead of stretching width/height —
+ * an auto-sizing text box has no independent width/height to stretch, and
+ * min() is the plan's chosen answer to non-uniform side-handle drags (the
+ * two scales can't both fold into one scalar; min never surprises with
+ * larger-than-dragged text). The patch's width/height carry the REMEASURED
+ * mirrored box (via `measureText` — injectable because jsdom can't run
+ * Konva's canvas-backed measurement) so box-derived math stays correct,
+ * and `font_size` rides `ItemGeometryPatch` into `properties.font_size`
+ * the same way a Line's `points` do — one patch, one history entry.
  */
 // eslint-disable-next-line react-refresh/only-export-components
 export function computeTransformCommit(
   members: MemberTransformState[],
   minSize: number = MIN_ITEM_SIZE,
+  measureText: TextMeasurer = measureTextBox,
 ): Array<{ id: CanvasObject['id']; patch: ItemGeometryPatch }> {
-  return members.map(({ id, snapshot, linePoints }) => {
+  return members.map(({ id, snapshot, linePoints, text }) => {
     if (linePoints) {
       const points = applyNodeTransformToPoints(linePoints, {
         x: snapshot.x,
@@ -139,6 +158,24 @@ export function computeTransformCommit(
       // same patch. A degenerate 0-point Line has no bbox to describe.
       const metadata = points.length > 0 ? computeLineBoundingBox(points) : {}
       return { id, patch: { points, ...metadata } }
+    }
+    if (text) {
+      const fontSize = Math.max(
+        MIN_TEXT_FONT_SIZE,
+        text.font_size * Math.min(snapshot.scaleX, snapshot.scaleY),
+      )
+      const size = measureText(text.text, { ...text, font_size: fontSize })
+      return {
+        id,
+        patch: {
+          x: snapshot.x,
+          y: snapshot.y,
+          rotation: snapshot.rotation,
+          width: size.width,
+          height: size.height,
+          font_size: fontSize,
+        },
+      }
     }
     return { id, patch: computeGeometryFromTransform(snapshot, minSize) }
   })
@@ -334,6 +371,11 @@ export function SelectionTransformer({
         for (const id of selectedItemIds) {
           const node = getNode(id)
           if (!node) continue
+          // U7: a text member's commit needs its content+styling for the
+          // fontSize fold — resolved from `allObjects` (always wired by
+          // CanvasStage; a caller omitting it simply gets the box fold,
+          // same graceful degradation as the alignment-guide props).
+          const object = allObjects?.find((candidate) => candidate.id === id)
           attached.push({
             node,
             member: {
@@ -348,6 +390,10 @@ export function SelectionTransformer({
                 rotation: node.rotation(),
               },
               linePoints: isLineNode(node) ? pairPoints(node.points()) : undefined,
+              text:
+                object && isTextType(object.type)
+                  ? parseTextProperties(object.properties)
+                  : undefined,
             },
           })
         }

@@ -2,9 +2,9 @@
  * Shared types for the canvas editor, mirroring the backend `Objects` model
  * (backend/fm_generator/models.py) and `FloorPlan` model/serializer.
  *
- * `type` is the full 13-value enum from the backend, but this unit (U7) only
- * ever creates catalog types via the sidebar; Shape/Line creation lands in
- * U15/U16.
+ * `type` is the full 14-value enum from the backend: 7 catalog types
+ * (sidebar drops), 3 Shapes (U15), 3 Lines (U16), and `text` (canvas-tools
+ * U7's first-class auto-sizing text object).
  */
 
 export const CATALOG_TYPES = [
@@ -25,7 +25,14 @@ export type ShapeType = (typeof SHAPE_TYPES)[number]
 export const LINE_TYPES = ['line_straight', 'line_curved', 'line_s_curve'] as const
 export type LineType = (typeof LINE_TYPES)[number]
 
-export type ObjectType = CatalogType | ShapeType | LineType
+/** U7 (canvas-tools): the first-class text object type. A one-member union
+ * (not a bare `'text'` literal alias) so it composes into `ObjectType`
+ * exactly like the other kind-unions do — `TextTool.ts`'s `isTextType`
+ * narrows to it the same way `isLineTool`/`isShapeTool` narrow to theirs. */
+export const TEXT_TYPES = ['text'] as const
+export type TextType = (typeof TEXT_TYPES)[number]
+
+export type ObjectType = CatalogType | ShapeType | LineType | TextType
 
 /** One row from `GET /api/objects/?floor_plan=<id>`. */
 export interface CanvasObject {

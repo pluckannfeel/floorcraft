@@ -1243,3 +1243,213 @@ describe('canvasStore persistent groups (U4)', () => {
     })
   })
 })
+
+// U7 (canvas-tools): text objects. Content commits (`updateItemText`) are
+// TRACKED — text content is the object's substance (the "a Line's points
+// ARE its shape" precedent) — while styling commits
+// (`updateItemTextStyling`) stay UNTRACKED per R15; both carry the
+// remeasured mirrored width/height in the same single set().
+describe('canvasStore text objects (U7)', () => {
+  function makeTextItem(overrides: Partial<CanvasObject> = {}): CanvasObject {
+    return makeItem({
+      id: 'text-1',
+      type: 'text',
+      width: 60,
+      height: 16,
+      properties: {
+        text: 'Meeting Room',
+        font_family: 'Arial',
+        font_size: 16,
+        bold: false,
+        italic: false,
+        color: '#111827',
+      },
+      ...overrides,
+    })
+  }
+
+  beforeEach(() => {
+    useCanvasStore.setState({ items: [], selectedItemIds: [], dirty: false })
+    useCanvasStore.temporal.getState().clear()
+  })
+
+  describe('updateItemText (tracked content commit)', () => {
+    it('commits the text AND the mirrored width/height in ONE history entry; a single undo restores both', () => {
+      useCanvasStore.setState({ items: [makeTextItem()] })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().updateItemText('text-1', 'Kitchen', { width: 56, height: 16 })
+
+      const item = useCanvasStore.getState().items[0]
+      expect(item.properties.text).toBe('Kitchen')
+      expect(item.width).toBe(56)
+      expect(item.height).toBe(16)
+      expect(useCanvasStore.getState().dirty).toBe(true)
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+
+      undo()
+      const restored = useCanvasStore.getState().items[0]
+      expect(restored.properties.text).toBe('Meeting Room')
+      expect(restored.width).toBe(60)
+      expect(restored.height).toBe(16)
+    })
+
+    it('preserves the styling keys (only text and the mirrored box change)', () => {
+      useCanvasStore.setState({ items: [makeTextItem()] })
+
+      useCanvasStore.getState().updateItemText('text-1', 'Renamed', { width: 50, height: 16 })
+
+      const properties = useCanvasStore.getState().items[0].properties
+      expect(properties.font_family).toBe('Arial')
+      expect(properties.font_size).toBe(16)
+      expect(properties.color).toBe('#111827')
+    })
+
+    it('tracked-content contract: edit text, then move ANOTHER object — a single undo restores only the move, the text survives', () => {
+      useCanvasStore.setState({
+        items: [makeTextItem(), makeItem({ id: 'chair-1', x: 10, y: 10 })],
+      })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().updateItemText('text-1', 'Edited content', { width: 90, height: 16 })
+      useCanvasStore.getState().updateItemGeometry('chair-1', { x: 200, y: 300 })
+
+      undo()
+
+      const [text, chair] = useCanvasStore.getState().items
+      expect(chair.x).toBe(10)
+      expect(chair.y).toBe(10)
+      // The content edit is its OWN history entry — the single undo above
+      // must not have silently reverted it via the whole-items snapshot.
+      expect(text.properties.text).toBe('Edited content')
+    })
+
+    it('no-ops (no history entry, dirty untouched) for an unknown id', () => {
+      useCanvasStore.setState({ items: [makeTextItem()] })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().updateItemText('ghost', 'nope', { width: 1, height: 1 })
+
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+      expect(useCanvasStore.getState().dirty).toBe(false)
+    })
+  })
+
+  describe('updateItemTextStyling (untracked styling commit)', () => {
+    it('updates properties AND the mirrored box, sets dirty, but pushes NO history entry (R15)', () => {
+      useCanvasStore.setState({ items: [makeTextItem()] })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().updateItemTextStyling(
+        'text-1',
+        {
+          text: 'Meeting Room',
+          font_family: 'Georgia',
+          font_size: 24,
+          bold: true,
+          italic: false,
+          color: '#ff0000',
+        },
+        { width: 132, height: 24 },
+      )
+
+      const item = useCanvasStore.getState().items[0]
+      expect(item.properties.font_family).toBe('Georgia')
+      expect(item.properties.font_size).toBe(24)
+      expect(item.properties.bold).toBe(true)
+      expect(item.width).toBe(132)
+      expect(item.height).toBe(24)
+      expect(useCanvasStore.getState().dirty).toBe(true)
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+    })
+
+    it('undo after a styling edit skips it and reverts the previous TRACKED action instead', () => {
+      useCanvasStore.setState({ items: [makeTextItem({ x: 0 })] })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().updateItemGeometry('text-1', { x: 100 })
+      useCanvasStore.getState().updateItemTextStyling(
+        'text-1',
+        { text: 'Meeting Room', font_family: 'Verdana', font_size: 16, bold: false, italic: false, color: '#111827' },
+        { width: 70, height: 16 },
+      )
+
+      undo()
+
+      const item = useCanvasStore.getState().items[0]
+      expect(item.x).toBe(0) // the move reverted
+      // R15: the styling change is not an undo step. (The whole-items
+      // snapshot restore does carry the item's pre-move properties, which
+      // is exactly why styling stays cheap/untracked — content, by
+      // contrast, gets its own TRACKED action above.)
+      expect(useCanvasStore.temporal.getState().futureStates).toHaveLength(1)
+    })
+
+    it('no-ops for an unknown id', () => {
+      useCanvasStore.setState({ items: [makeTextItem()] })
+      const before = useCanvasStore.getState().items
+
+      useCanvasStore.getState().updateItemTextStyling('ghost', {}, { width: 1, height: 1 })
+
+      expect(useCanvasStore.getState().items).toBe(before)
+      expect(useCanvasStore.getState().dirty).toBe(false)
+    })
+  })
+
+  describe('updateItemsGeometry font_size fold (transformer resize commit)', () => {
+    it('folds a patch font_size into properties.font_size alongside the mirrored box, in ONE entry', () => {
+      useCanvasStore.setState({ items: [makeTextItem()] })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().updateItemsGeometry([
+        {
+          id: 'text-1',
+          patch: { x: 5, y: 6, rotation: 0, width: 120, height: 32, font_size: 32 },
+        },
+      ])
+
+      const item = useCanvasStore.getState().items[0]
+      expect(item.properties.font_size).toBe(32)
+      expect(item.properties.text).toBe('Meeting Room') // untouched
+      expect(item.width).toBe(120)
+      expect(item.height).toBe(32)
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+
+      undo()
+      const restored = useCanvasStore.getState().items[0]
+      expect(restored.properties.font_size).toBe(16)
+      expect(restored.width).toBe(60)
+    })
+
+    it('a mixed batch (text font_size fold + box move) stays ONE history entry', () => {
+      useCanvasStore.setState({
+        items: [makeTextItem(), makeItem({ id: 'chair-1' })],
+      })
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().updateItemsGeometry([
+        { id: 'text-1', patch: { width: 90, height: 24, font_size: 24 } },
+        { id: 'chair-1', patch: { x: 300 } },
+      ])
+
+      expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+      expect(useCanvasStore.getState().items[0].properties.font_size).toBe(24)
+      expect(useCanvasStore.getState().items[1].x).toBe(300)
+    })
+  })
+
+  describe('create-then-undo (F3)', () => {
+    it('a committed creation via createItemLocal is removed by a SINGLE undo', () => {
+      useCanvasStore.temporal.getState().clear()
+
+      useCanvasStore.getState().createItemLocal(
+        makeTextItem({ id: 'local-text-abc', properties: { text: 'Storage', font_family: 'Arial', font_size: 16, bold: false, italic: false, color: '#111827' } }),
+      )
+      expect(useCanvasStore.getState().items).toHaveLength(1)
+
+      undo()
+
+      expect(useCanvasStore.getState().items).toHaveLength(0)
+    })
+  })
+})

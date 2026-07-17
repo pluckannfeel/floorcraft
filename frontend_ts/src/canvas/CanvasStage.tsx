@@ -35,6 +35,7 @@ import type { GroupDragHandlers, SelectionClickModifiers } from './ObjectShape'
 import { SelectionTransformer } from './SelectionTransformer'
 import { isShapeTool, ShapePreview, useShapeTool } from './ShapeTool'
 import type { ShapeGeometry } from './ShapeTool'
+import { isTextType } from './TextTool'
 import { expandIdsByGroup } from '../state/canvasStore'
 import type { ActiveTool, ItemGeometryPatch } from '../state/canvasStore'
 import type { CanvasObject, LineType, Point, ShapeType } from './types'
@@ -138,6 +139,20 @@ interface CanvasStageProps {
    * never touched by an Alt-drop). Optional: without it, Alt-drags commit
    * as ordinary moves. */
   onDuplicateSelection?: (payload: ClipboardPayload, dropPoint: Point) => void
+  /** U7: a Text-tool click on EMPTY canvas wants a text object created at
+   * `point` (raw model coordinates — the caller snaps/clamps, builds the
+   * draft, and opens the edit overlay; same delegation as
+   * `onCreateShape`/`onCreateLine`). */
+  onCreateTextAt?: (point: Point) => void
+  /** U7: an existing TEXT object wants re-editing — a Text-tool click on
+   * it, or a double-click with any tool (`resolveObjectDoubleClickAction`).
+   * The caller opens the overlay for the id; the routing here has already
+   * selected the object. */
+  onEditTextObject?: (id: CanvasObject['id']) => void
+  /** U7: the id currently being edited through the DOM overlay, if any —
+   * that object's Konva node hides (the overlay's textarea IS the visible
+   * text during editing, per Konva's official pattern). */
+  editingItemId?: CanvasObject['id'] | null
 }
 
 /** What `onOpenContextMenu` reports up — see the prop's doc above. */
@@ -601,6 +616,67 @@ export function resolveMemberModeGroupBox(
   return unionBoundingBoxes(members.map(boundingBoxForObject))
 }
 
+/** What a click on an OBJECT should do — see `resolveObjectClickAction`. */
+export type ObjectClickAction =
+  | { kind: 'edit-text'; id: CanvasObject['id'] }
+  | { kind: 'toggle'; ids: CanvasObject['id'][] }
+  | { kind: 'replace'; ids: CanvasObject['id'][] }
+
+/**
+ * U1/U4/U7's object-click routing, pure for jsdom tests: with the TEXT tool
+ * active, clicking an existing TEXT object re-edits it (the plan's
+ * interaction default — the selection also narrows to that object, which
+ * the `edit-text` consumer does before opening the overlay); every other
+ * click keeps the U1/U4 contract — ctrl(/meta) toggles the clicked object's
+ * group-expanded operand set atomically, a plain click replaces the
+ * selection with it. Expansion happens HERE, at selection time (the plan's
+ * chosen model), so the store's selection is always the literal operand
+ * set.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveObjectClickAction(
+  id: CanvasObject['id'],
+  activeTool: ActiveTool,
+  objects: CanvasObject[],
+  modifiers?: SelectionClickModifiers,
+): ObjectClickAction {
+  const target = objects.find((object) => object.id === id)
+  if (isTextType(activeTool) && target && isTextType(target.type)) {
+    return { kind: 'edit-text', id }
+  }
+  const operand = expandIdsByGroup([id], objects)
+  if (modifiers?.ctrlKey || modifiers?.metaKey) {
+    return { kind: 'toggle', ids: operand }
+  }
+  return { kind: 'replace', ids: operand }
+}
+
+/** What a double-click on an object should do — see
+ * `resolveObjectDoubleClickAction`. */
+export type ObjectDoubleClickAction =
+  | { kind: 'edit-text'; id: CanvasObject['id'] }
+  | { kind: 'member-mode'; id: CanvasObject['id'] }
+  | { kind: 'none' }
+
+/**
+ * U4/U7's double-click routing, pure for jsdom tests: a TEXT object
+ * re-edits (the overlay opens; the selection narrows to just it — for a
+ * grouped text member this doubles as U4's member-mode, which is exactly a
+ * one-id selection); a non-text GROUP MEMBER enters member-mode (U4);
+ * anything else is a no-op (a plain click already selected it).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveObjectDoubleClickAction(
+  id: CanvasObject['id'],
+  objects: CanvasObject[],
+): ObjectDoubleClickAction {
+  const target = objects.find((object) => object.id === id)
+  if (!target) return { kind: 'none' }
+  if (isTextType(target.type)) return { kind: 'edit-text', id }
+  if (target.group_key != null) return { kind: 'member-mode', id }
+  return { kind: 'none' }
+}
+
 interface UseMarqueeArgs {
   zoom: number
   stagePosition: Point
@@ -716,12 +792,16 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onPanEnd,
     onOpenContextMenu,
     onDuplicateSelection,
+    onCreateTextAt,
+    onEditTextObject,
+    editingItemId = null,
   },
   ref,
 ) {
   const gridLines = buildGridLines(width, height, gridSize)
   const drawingShape = isShapeTool(activeTool)
   const drawingLine = isLineTool(activeTool)
+  const textToolActive = isTextType(activeTool)
 
   // U2: plain drag on empty canvas is the marquee now; panning is
   // pan-active-only. The Stage is natively `draggable` ONLY while Space is
@@ -803,34 +883,42 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     soleSelectedId != null ? (objects.find((object) => object.id === soleSelectedId) ?? null) : null
   const selectedIsLine = selectedObject != null && isLineTool(selectedObject.type)
 
-  // U1/U4: selection click routing, group-aware via the shared
-  // `expandIdsByGroup` helper — expansion happens HERE, at selection time
-  // (the plan's chosen model), so the store's selection is always the
-  // literal operand set and no consumer re-derives group membership. Plain
-  // click REPLACES the selection with the clicked object's expanded set (a
-  // grouped member selects its whole group); ctrl(/meta, for macOS)+click
-  // TOGGLES the whole expanded set's membership atomically.
+  // U1/U4/U7: selection click routing — the whole decision is pure
+  // (`resolveObjectClickAction`): plain click REPLACES the selection with
+  // the clicked object's group-expanded set, ctrl(/meta)+click TOGGLES it
+  // atomically, and a Text-tool click on an existing TEXT object re-edits
+  // it (selecting just that object first, so the overlay always edits the
+  // visually-targeted, selected item).
   const handleObjectSelect = (id: CanvasObject['id'], modifiers?: SelectionClickModifiers) => {
-    const operand = expandIdsByGroup([id], objects)
-    if (modifiers?.ctrlKey || modifiers?.metaKey) {
-      onToggleIdsInSelection(operand)
+    const action = resolveObjectClickAction(id, activeTool, objects, modifiers)
+    if (action.kind === 'edit-text') {
+      onReplaceSelection([action.id])
+      onEditTextObject?.(action.id)
+    } else if (action.kind === 'toggle') {
+      onToggleIdsInSelection(action.ids)
     } else {
-      onReplaceSelection(operand)
+      onReplaceSelection(action.ids)
     }
   }
 
-  // U4: double-click on a group member enters MEMBER-MODE — the selection
-  // narrows to JUST that member (a plain one-id selection; there is no mode
-  // flag, so any outside click/marquee naturally restores group-level
-  // behavior by re-expanding). The double-click's constituent clicks also
-  // fired `handleObjectSelect` (browsers dispatch click, click, dblclick) —
-  // that ordering is expected and harmless: the first click selects the
-  // whole group, the second re-selects it, and this narrows to the member.
-  // Ungrouped objects need no narrowing (a plain click already selected
-  // exactly them), so this is a no-op for them.
+  // U4/U7: double-click routing, pure via `resolveObjectDoubleClickAction`:
+  // a TEXT object re-edits through the overlay; a non-text group member
+  // enters MEMBER-MODE — the selection narrows to JUST that member (a plain
+  // one-id selection; there is no mode flag, so any outside click/marquee
+  // naturally restores group-level behavior by re-expanding). The
+  // double-click's constituent clicks also fired `handleObjectSelect`
+  // (browsers dispatch click, click, dblclick) — that ordering is expected
+  // and harmless: the first click selects the whole group, the second
+  // re-selects it, and this narrows/edits. Ungrouped non-text objects need
+  // no narrowing (a plain click already selected exactly them): no-op.
   const handleObjectDoubleClick = (id: CanvasObject['id']) => {
-    const target = objects.find((object) => object.id === id)
-    if (target?.group_key != null) onReplaceSelection([id])
+    const action = resolveObjectDoubleClickAction(id, objects)
+    if (action.kind === 'edit-text') {
+      onReplaceSelection([action.id])
+      onEditTextObject?.(action.id)
+    } else if (action.kind === 'member-mode') {
+      onReplaceSelection([action.id])
+    }
   }
 
   // U4's member-mode cue: the dashed group-context outline drawn while
@@ -901,13 +989,22 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
 
   // U2 cursor language: crosshair while a marquee is being drawn;
   // grab/grabbing while pan is available/active (Space held or an actual
-  // pan drag, including middle-mouse); default arrow otherwise (the plan
-  // explicitly allows keeping the arrow for the idle Select tool).
+  // pan drag, including middle-mouse); I-beam for the Text tool over the
+  // canvas (U7); default arrow otherwise (the plan explicitly allows
+  // keeping the arrow for the idle Select tool).
   useEffect(() => {
     const container = stageRef.current?.container()
     if (!container) return
-    container.style.cursor = marqueeActive ? 'crosshair' : panDragging ? 'grabbing' : spaceHeld ? 'grab' : ''
-  }, [marqueeActive, panDragging, spaceHeld])
+    container.style.cursor = marqueeActive
+      ? 'crosshair'
+      : panDragging
+        ? 'grabbing'
+        : spaceHeld
+          ? 'grab'
+          : textToolActive
+            ? 'text'
+            : ''
+  }, [marqueeActive, panDragging, spaceHeld, textToolActive])
 
   // Map<id, Konva.Node> resolving the selected item's live node for
   // SelectionTransformer's `.nodes([ref])` attach — populated/cleared by
@@ -1269,6 +1366,19 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         if (drawingLine) {
           return
         }
+        // U7: Text tool — a left-press on EMPTY canvas creates a text
+        // object there (the caller snaps/clamps, builds the draft, and
+        // opens the edit overlay). A press on an existing object falls
+        // through to that object's own click handling instead (the objects
+        // layer stays listening for the text tool): existing TEXT objects
+        // re-edit via `resolveObjectClickAction`, others just select. No
+        // marquee starts while the text tool is active.
+        if (textToolActive) {
+          if (event.evt.button === 0 && event.target === stage) {
+            onCreateTextAt?.(screenToStagePoint(stage, event.evt.clientX, event.evt.clientY))
+          }
+          return
+        }
 
         // U2: touch is exempt from the pan rebind (plan) — single-finger
         // pan is preserved (the pinch handler in onTouchMove depends on the
@@ -1412,6 +1522,9 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
             // Unselected objects, and a sole-selected LINE, keep the plain
             // single-drag path bit-for-bit (see `dragRelayFor`).
             groupDrag={dragRelayFor(object)}
+            // U7: the node being edited through the DOM text overlay hides
+            // (the overlay's textarea is the visible text while editing).
+            hidden={editingItemId != null && object.id === editingItemId}
             shapeRef={(node) => {
               if (node) {
                 shapeNodesRef.current.set(object.id, node)

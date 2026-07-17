@@ -20,15 +20,15 @@ def make_owner(email='owner@example.com', password='Correct-Horse-9427!'):
 
 
 class ObjectsTypeTaxonomyTests(TestCase):
-    """Happy path: creating an Objects row with each of the 13 type values
-    succeeds and round-trips via the serializer.
+    """Happy path: creating an Objects row with each of the 14 type values
+    (13 original + U7's `text`) succeeds and round-trips via the serializer.
     """
 
     def setUp(self):
         self.floor_plan = FloorPlan.objects.create(name='Test Floor Plan', owner=make_owner())
 
-    def test_all_thirteen_types_round_trip(self):
-        self.assertEqual(len(ALL_TYPES), 13)
+    def test_all_fourteen_types_round_trip(self):
+        self.assertEqual(len(ALL_TYPES), 14)
 
         for obj_type in ALL_TYPES:
             payload = {
@@ -44,6 +44,9 @@ class ObjectsTypeTaxonomyTests(TestCase):
                 }
                 if obj_type in CURVED_LINE_TYPES:
                     payload['properties']['curve_style'] = 'smooth'
+            if obj_type == Objects.ObjectType.TEXT:
+                # U7's text rule: a string `properties.text` is required.
+                payload['properties'] = {'text': 'a label'}
 
             serializer = ObjectSerializer(data=payload)
             self.assertTrue(serializer.is_valid(), (obj_type, serializer.errors))
