@@ -490,8 +490,8 @@ export interface CanvasState {
    * entering the CROP tool also clears the selection (the plan's
    * interaction default — crop is a canvas-level gesture, and a lingering
    * selection would leave transformer chrome under the crop preview);
-   * handled here so every entry path (Toolbar button, future shortcuts)
-   * gets it for free. */
+   * handled here so every entry path (Sidebar tool button, future
+   * shortcuts) gets it for free. */
   setActiveTool: (tool: ActiveTool) => void
 
   /** U11: sets the Stage's zoom AND position together in one call — the

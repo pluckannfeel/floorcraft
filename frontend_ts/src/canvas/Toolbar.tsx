@@ -8,7 +8,6 @@ import {
   AlignStartHorizontal,
   AlignStartVertical,
   AlignVerticalDistributeCenter,
-  Crop,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useStore } from 'zustand'
@@ -17,21 +16,7 @@ import { redo, undo, useCanvasStore } from '../state/canvasStore'
 import { resolveAlignmentAvailability } from './alignment'
 import type { AlignKind, DistributeAxis } from './alignment'
 import { exportStageToPng } from './export'
-import type { CanvasObject, LineType, ShapeType } from './types'
-
-/** U15's three shape-drawing tools, with their toolbar labels. */
-const SHAPE_TOOLS: { type: ShapeType; label: string }[] = [
-  { type: 'shape_rectangle', label: 'Rectangle' },
-  { type: 'shape_square', label: 'Square' },
-  { type: 'shape_circle', label: 'Circle' },
-]
-
-/** U16's three line-drawing tools, with their toolbar labels. */
-const LINE_TOOLS: { type: LineType; label: string }[] = [
-  { type: 'line_straight', label: 'Line' },
-  { type: 'line_curved', label: 'Curved Line' },
-  { type: 'line_s_curve', label: 'S-Curve Line' },
-]
+import type { CanvasObject } from './types'
 
 /** U6's six align actions, in the conventional left→right then top→bottom
  * order, with lucide's object-alignment icons ("start/end vertical" = the
@@ -62,10 +47,11 @@ function ToolbarDivider() {
 }
 
 /**
- * Canvas editor toolbar (U9: undo/redo; U15: shape drawing tools; U16: line
- * drawing tools; U12: PNG export; U18: z-order). Later units append more
- * controls to this same component per the plan's Output Structure, rather
- * than each unit creating a separate toolbar.
+ * Canvas editor toolbar: undo/redo, zoom (U11), PNG export (U12), z-order
+ * (U18), and align/distribute (U6). The DRAWING tools (shapes, lines, text,
+ * crop) lived here through canvas-tools U8; U9 moved them into
+ * `Sidebar.tsx`'s tool strip (R24), so this component now holds only the
+ * non-tool controls.
  *
  * Undo/redo availability comes from zundo's temporal store
  * (`useCanvasStore.temporal`), a separate vanilla store from the main
@@ -111,8 +97,6 @@ export function Toolbar({
 }: ToolbarProps) {
   const canUndo = useStore(useCanvasStore.temporal, (state) => state.pastStates.length > 0)
   const canRedo = useStore(useCanvasStore.temporal, (state) => state.futureStates.length > 0)
-  const activeTool = useCanvasStore((state) => state.activeTool)
-  const setActiveTool = useCanvasStore((state) => state.setActiveTool)
   const zoom = useCanvasStore((state) => state.zoom)
   const zoomIn = useCanvasStore((state) => state.zoomIn)
   const zoomOut = useCanvasStore((state) => state.zoomOut)
@@ -141,83 +125,6 @@ export function Toolbar({
       </Button>
       <Button type="button" variant="outline" size="sm" onClick={() => redo()} disabled={!canRedo}>
         Redo
-      </Button>
-
-      <ToolbarDivider />
-
-      {/* Selecting a shape tool sets `activeTool` (U9's field); ShapeTool
-          watches it to drive the draw interaction. Clicking the
-          already-active tool toggles back to `'select'` so a tool can be
-          cancelled without drawing anything. The active tool is signalled
-          via the filled `default` variant (plus `aria-pressed`). */}
-      {SHAPE_TOOLS.map(({ type, label }) => {
-        const isActive = activeTool === type
-        return (
-          <Button
-            key={type}
-            type="button"
-            variant={isActive ? 'default' : 'outline'}
-            size="sm"
-            aria-pressed={isActive}
-            onClick={() => setActiveTool(isActive ? 'select' : type)}
-          >
-            {label}
-          </Button>
-        )
-      })}
-
-      <ToolbarDivider />
-
-      {/* U16: selecting a line tool sets `activeTool` the same way shape
-          tools do; LineTool/CanvasStage watch it to drive the click-per-point
-          draw interaction. Same toggle-back-to-'select' behavior (and same
-          active-variant signalling) as shape tools above. */}
-      {LINE_TOOLS.map(({ type, label }) => {
-        const isActive = activeTool === type
-        return (
-          <Button
-            key={type}
-            type="button"
-            variant={isActive ? 'default' : 'outline'}
-            size="sm"
-            aria-pressed={isActive}
-            onClick={() => setActiveTool(isActive ? 'select' : type)}
-          >
-            {label}
-          </Button>
-        )
-      })}
-
-      <ToolbarDivider />
-
-      {/* U7 (canvas-tools): the Text tool — click empty canvas to create a
-          text object and start typing; click an existing text object to
-          re-edit it. Lives HERE for now with the same toggle/active-variant
-          conventions as the shape/line tools; U9 moves the whole tool strip
-          into the sidebar. */}
-      <Button
-        type="button"
-        variant={activeTool === 'text' ? 'default' : 'outline'}
-        size="sm"
-        aria-pressed={activeTool === 'text'}
-        onClick={() => setActiveTool(activeTool === 'text' ? 'select' : 'text')}
-      >
-        Text
-      </Button>
-
-      {/* U8 (canvas-tools): the Crop tool — drag a region on the canvas,
-          then confirm (Enter / the floating Apply button) to trim the
-          canvas to it. Same toggle/active-variant conventions as the other
-          tools; entering it also clears the selection (the store's
-          setActiveTool handles that). */}
-      <Button
-        type="button"
-        variant={activeTool === 'crop' ? 'default' : 'outline'}
-        size="sm"
-        aria-pressed={activeTool === 'crop'}
-        onClick={() => setActiveTool(activeTool === 'crop' ? 'select' : 'crop')}
-      >
-        <Crop /> Crop
       </Button>
 
       <ToolbarDivider />
