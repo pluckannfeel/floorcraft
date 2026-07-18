@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type Konva from 'konva'
 import {
   ChevronDown,
@@ -68,6 +68,22 @@ const TOOL_BUTTONS: { type: ActiveTool; label: string; short: string; Icon: Luci
  * see Key Technical Decisions: all catalog types share this default. */
 export const DEFAULT_ITEM_SIZE = 40
 
+/** Resizable-sidebar bounds (final-polish round): the default is the
+ * regridded design width; the minimum keeps the 5-column tool grid's
+ * captions legible; the maximum stops the sidebar from squeezing the
+ * canvas into a sliver on laptop screens. */
+export const DEFAULT_SIDEBAR_WIDTH = 360
+export const MIN_SIDEBAR_WIDTH = 240
+export const MAX_SIDEBAR_WIDTH = 600
+
+/** One clamp shared by every width writer (edge drag + arrow keys). */
+export function clampSidebarWidth(width: number): number {
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)))
+}
+
+/** Arrow-key resize step for the handle's keyboard support. */
+const SIDEBAR_KEYBOARD_RESIZE_STEP = 16
+
 interface SidebarProps {
   /** Returns the live Konva.Stage instance so drop coordinates can be
    * computed against its current transform (zoom/pan-aware). */
@@ -106,6 +122,12 @@ interface DragState {
  */
 export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop }: SidebarProps) {
   const [drag, setDrag] = useState<DragState | null>(null)
+  // Resizable width (final-polish round): dragged via the right-edge
+  // handle below. Transient local state like the collapsible sections —
+  // a fresh mount starts back at the design default.
+  const [width, setWidth] = useState(DEFAULT_SIDEBAR_WIDTH)
+  const [resizing, setResizing] = useState(false)
+  const asideRef = useRef<HTMLElement | null>(null)
   // U9: one open/closed flag per section, default all open. Plain local
   // state (no persistence) — collapsing is a transient browse aid.
   const [openSections, setOpenSections] = useState<Record<string, boolean>>(() =>
@@ -160,12 +182,52 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
     setDrag({ type, clientX: event.clientX, clientY: event.clientY })
   }
 
+  // Edge-drag resize: same window-listener convention as the catalog drag
+  // above (subscribed only while a resize is in flight). Width follows the
+  // pointer's distance from the sidebar's left edge, clamped; body-level
+  // cursor/user-select overrides keep the col-resize cursor and suppress
+  // text selection while the pointer sweeps over the sidebar's content.
+  useEffect(() => {
+    if (!resizing) return undefined
+
+    function handlePointerMove(event: PointerEvent) {
+      const left = asideRef.current?.getBoundingClientRect().left ?? 0
+      setWidth(clampSidebarWidth(event.clientX - left))
+    }
+    function handlePointerUp() {
+      setResizing(false)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    const previousCursor = document.body.style.cursor
+    const previousUserSelect = document.body.style.userSelect
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      document.body.style.cursor = previousCursor
+      document.body.style.userSelect = previousUserSelect
+    }
+  }, [resizing])
+
   function toggleSection(title: string) {
     setOpenSections((current) => ({ ...current, [title]: !current[title] }))
   }
 
   return (
-    <aside aria-label="Object catalog" className="w-[360px] overflow-y-auto border-r bg-background p-4">
+    // The aside itself doesn't scroll — the inner div does — so the
+    // absolutely-positioned resize handle stays pinned to the visible
+    // right edge instead of scrolling away with the catalog.
+    <aside
+      ref={asideRef}
+      aria-label="Object catalog"
+      className="relative flex shrink-0 border-r bg-background"
+      // Dynamic value: the user-dragged width can't be a static class.
+      style={{ width }}
+    >
+      <div className="flex-1 overflow-y-auto p-4">
       {/* U9 tool strip, regridded (canvas-tools follow-up): a 5-column
           palette of stacked icon+caption buttons — the editor-program
           convention — instead of the original one-per-row text list.
@@ -263,6 +325,38 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
           </section>
         )
       })}
+      </div>
+
+      {/* Right-edge resize handle: ARIA window-splitter shape (separator +
+          value range) with arrow-key support; the pointer flow lives in the
+          `resizing` effect above. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        aria-valuemin={MIN_SIDEBAR_WIDTH}
+        aria-valuemax={MAX_SIDEBAR_WIDTH}
+        aria-valuenow={width}
+        tabIndex={0}
+        onPointerDown={(event) => {
+          // No native default to speak of, but preventDefault stops a
+          // text-selection start racing the first pointermove.
+          event.preventDefault()
+          setResizing(true)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+            event.preventDefault()
+            const delta =
+              event.key === 'ArrowLeft' ? -SIDEBAR_KEYBOARD_RESIZE_STEP : SIDEBAR_KEYBOARD_RESIZE_STEP
+            setWidth((current) => clampSidebarWidth(current + delta))
+          }
+        }}
+        className={cn(
+          'absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize touch-none outline-none transition-colors hover:bg-ring/40 focus-visible:bg-ring/60',
+          resizing && 'bg-ring/60',
+        )}
+      />
 
       {drag && (
         <div

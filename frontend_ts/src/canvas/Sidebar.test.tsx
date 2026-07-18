@@ -177,3 +177,50 @@ describe('Sidebar grouped catalog (U9)', () => {
     expect(onDrop).not.toHaveBeenCalled()
   })
 })
+
+describe('resizable sidebar (final polish)', () => {
+  // jsdom rects are all zeros, so the aside's left edge is 0 and the
+  // dragged width equals the pointer's clientX — which is exactly what the
+  // component computes (clientX - rect.left).
+  it('dragging the right-edge handle resizes the sidebar, clamped to min/max', () => {
+    renderSidebar()
+    const aside = screen.getByRole('complementary', { name: 'Object catalog' })
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
+
+    expect(aside).toHaveStyle({ width: '360px' })
+
+    fireEvent.pointerDown(handle, { clientX: 360 })
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 480 }))
+    expect(aside).toHaveStyle({ width: '480px' })
+    expect(handle).toHaveAttribute('aria-valuenow', '480')
+
+    // Past the max: clamped.
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 1200 }))
+    expect(aside).toHaveStyle({ width: '600px' })
+
+    // Below the min: clamped.
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 50 }))
+    expect(aside).toHaveStyle({ width: '240px' })
+
+    // Release ends the resize — later moves are ignored.
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 50 }))
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 500 }))
+    expect(aside).toHaveStyle({ width: '240px' })
+  })
+
+  it('arrow keys resize the focused handle in steps, clamped', () => {
+    renderSidebar()
+    const aside = screen.getByRole('complementary', { name: 'Object catalog' })
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
+
+    fireEvent.keyDown(handle, { key: 'ArrowRight' })
+    expect(aside).toHaveStyle({ width: '376px' })
+    fireEvent.keyDown(handle, { key: 'ArrowLeft' })
+    fireEvent.keyDown(handle, { key: 'ArrowLeft' })
+    expect(aside).toHaveStyle({ width: '344px' })
+
+    // Clamped at the max however long the key is held.
+    for (let i = 0; i < 30; i += 1) fireEvent.keyDown(handle, { key: 'ArrowRight' })
+    expect(aside).toHaveStyle({ width: '600px' })
+  })
+})
