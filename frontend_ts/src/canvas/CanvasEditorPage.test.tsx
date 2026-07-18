@@ -544,3 +544,48 @@ describe('text tool create flow (diagnostic)', () => {
     })
   })
 })
+
+describe('background deselect returns to pan (canvas-tools follow-up)', () => {
+  it('clicking empty canvas in select mode clears the selection AND drops to pan', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Deselect Plan' }), objects: [makeObject({ id: 5, floor_plan: 7 })] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Deselect Plan')).toBeInTheDocument()
+
+    // Simulate the pan -> click-object -> select entry, then a selection.
+    act(() => {
+      useCanvasStore.setState({ activeTool: 'select', selectedItemIds: [5] })
+    })
+
+    const onBackgroundDeselect = canvasStageProps.current?.onBackgroundDeselect as
+      | (() => void)
+      | undefined
+    expect(onBackgroundDeselect).toBeTypeOf('function')
+    act(() => onBackgroundDeselect!())
+
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+    expect(useCanvasStore.getState().activeTool).toBe('pan')
+  })
+
+  it('does not steal a DRAWING tool: an empty-click clears but keeps the active tool', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Draw Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Draw Plan')).toBeInTheDocument()
+
+    act(() => {
+      useCanvasStore.setState({ activeTool: 'shape_rectangle', selectedItemIds: [] })
+    })
+
+    const onBackgroundDeselect = canvasStageProps.current?.onBackgroundDeselect as
+      | (() => void)
+      | undefined
+    act(() => onBackgroundDeselect!())
+
+    // A shape tool is not "select" — the deselect must not yank the user
+    // out of the tool they deliberately picked.
+    expect(useCanvasStore.getState().activeTool).toBe('shape_rectangle')
+  })
+})

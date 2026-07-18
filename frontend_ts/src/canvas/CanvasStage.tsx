@@ -151,6 +151,10 @@ interface CanvasStageProps {
   /** Clicking an object while in the idle pan mode engages the select tool
    * (the click's own selection lands through the normal routing). */
   onActivateSelectTool?: () => void
+  /** A plain empty-canvas click deselects AND returns to the idle pan mode
+   * — the counterpart to `onActivateSelectTool` that closes the loop
+   * (enter select by clicking an object, leave it by clicking empty). */
+  onBackgroundDeselect?: () => void
   /** U7: an existing TEXT object wants re-editing — a Text-tool click on
    * it, or a double-click with any tool (`resolveObjectDoubleClickAction`).
    * The caller opens the overlay for the id; the routing here has already
@@ -712,6 +716,9 @@ interface UseMarqueeArgs {
   selectedItemIds: CanvasObject['id'][]
   onReplaceSelection: (ids: CanvasObject['id'][]) => void
   onClearSelection: () => void
+  /** See the same-named field on `CanvasStageProps`: a plain empty-canvas
+   * click deselects and returns to the idle pan mode. */
+  onBackgroundDeselect?: () => void
 }
 
 /**
@@ -737,6 +744,7 @@ export function useMarquee({
   selectedItemIds,
   onReplaceSelection,
   onClearSelection,
+  onBackgroundDeselect,
 }: UseMarqueeArgs) {
   const [gesture, setGesture] = useState<{ origin: Point; current: Point } | null>(null)
 
@@ -763,13 +771,25 @@ export function useMarquee({
         additive,
       })
       if (action.kind === 'clear') {
-        onClearSelection()
+        // A plain empty-canvas click: deselect AND drop back to the idle
+        // pan mode (mirrors Escape). `onBackgroundDeselect` owns both;
+        // `onClearSelection` is the bare fallback for tests.
+        ;(onBackgroundDeselect ?? onClearSelection)()
       } else if (action.kind === 'select') {
         onReplaceSelection(action.ids)
       }
       setGesture(null)
     },
-    [gesture, zoom, stagePosition, objects, selectedItemIds, onReplaceSelection, onClearSelection],
+    [
+      gesture,
+      zoom,
+      stagePosition,
+      objects,
+      selectedItemIds,
+      onReplaceSelection,
+      onClearSelection,
+      onBackgroundDeselect,
+    ],
   )
 
   // Model-space rect for rendering: converted per-render from the tracked
@@ -823,6 +843,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onCreateTextAt,
     onExitTool,
     onActivateSelectTool,
+    onBackgroundDeselect,
     onEditTextObject,
     editingItemId = null,
     onApplyCrop,
@@ -988,6 +1009,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     selectedItemIds,
     onReplaceSelection,
     onClearSelection,
+    onBackgroundDeselect,
   })
 
   // Latest-value ref so the gesture-scoped window listeners (registered
@@ -1588,7 +1610,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         if (event.evt.pointerType === 'touch') {
           stage.draggable(true)
           if (event.target === stage) {
-            onClearSelection()
+            ;(onBackgroundDeselect ?? onClearSelection)()
           }
           return
         }

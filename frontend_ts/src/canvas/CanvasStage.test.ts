@@ -988,6 +988,7 @@ describe('useMarquee', () => {
   function setup(overrides: { selectedItemIds?: CanvasObject['id'][]; zoom?: number; stagePosition?: { x: number; y: number } } = {}) {
     const onReplaceSelection = vi.fn()
     const onClearSelection = vi.fn()
+    const onBackgroundDeselect = vi.fn()
     const hook = renderHook(() =>
       useMarquee({
         zoom: overrides.zoom ?? 1,
@@ -996,9 +997,10 @@ describe('useMarquee', () => {
         selectedItemIds: overrides.selectedItemIds ?? [],
         onReplaceSelection,
         onClearSelection,
+        onBackgroundDeselect,
       }),
     )
-    return { ...hook, onReplaceSelection, onClearSelection }
+    return { ...hook, onReplaceSelection, onClearSelection, onBackgroundDeselect }
   }
 
   it('begin → update → commit replaces the selection with the covered objects (AE1)', () => {
@@ -1024,14 +1026,29 @@ describe('useMarquee', () => {
     expect(onReplaceSelection).toHaveBeenCalledExactlyOnceWith(['c', 'a', 'b'])
   })
 
-  it('a zero-movement commit clears the selection (regression: click empty canvas still clears)', () => {
-    const { result, onReplaceSelection, onClearSelection } = setup({ selectedItemIds: ['a'] })
+  it('a zero-movement commit deselects via onBackgroundDeselect (click empty -> clear + back to pan)', () => {
+    const { result, onReplaceSelection, onBackgroundDeselect } = setup({ selectedItemIds: ['a'] })
 
     act(() => result.current.begin({ x: 500, y: 500 }))
     act(() => result.current.commit(false))
 
-    expect(onClearSelection).toHaveBeenCalledOnce()
+    // The background-deselect callback owns both the clear AND the return
+    // to pan (canvas-tools follow-up) — a plain empty click, not a marquee.
+    expect(onBackgroundDeselect).toHaveBeenCalledOnce()
     expect(onReplaceSelection).not.toHaveBeenCalled()
+  })
+
+  it('a marquee DRAG that catches nothing stays a select (empty ids), NOT a background deselect', () => {
+    // The distinction that keeps repeated empty marquees in the select tool
+    // instead of bouncing to pan: only a plain CLICK deselects-to-pan.
+    const { result, onReplaceSelection, onBackgroundDeselect } = setup({ selectedItemIds: ['a'] })
+
+    act(() => result.current.begin({ x: 500, y: 500 }))
+    act(() => result.current.update({ x: 560, y: 560 })) // empty region
+    act(() => result.current.commit(false))
+
+    expect(onReplaceSelection).toHaveBeenCalledExactlyOnceWith([])
+    expect(onBackgroundDeselect).not.toHaveBeenCalled()
   })
 
   it('cancel (Escape mid-marquee) discards the gesture without touching the selection', () => {

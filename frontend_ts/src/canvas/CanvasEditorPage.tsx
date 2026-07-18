@@ -601,6 +601,19 @@ export function CanvasEditorPage() {
     [setActiveTool],
   );
 
+  // A plain click on empty canvas deselects and returns to the idle pan
+  // mode — the closing bracket of the select-tool loop (you enter select by
+  // clicking an object, you leave it by clicking empty), and the same
+  // outcome as Escape. Only from the select tool: a click-clear while a
+  // drawing/crop tool is active must not steal the tool out from under the
+  // user.
+  const handleBackgroundDeselect = useCallback(() => {
+    clearSelection();
+    if (useCanvasStore.getState().activeTool === "select") {
+      setActiveTool("pan");
+    }
+  }, [clearSelection, setActiveTool]);
+
   // U7: re-edit an existing text object (double-click, or Text-tool click
   // on it — CanvasStage's routing already selected it).
   const handleEditTextObject = useCallback(
@@ -842,6 +855,7 @@ export function CanvasEditorPage() {
             // the idle pan mode (canvas-tools follow-up).
             onExitTool={handleExitTool}
             onActivateSelectTool={handleActivateSelectTool}
+            onBackgroundDeselect={handleBackgroundDeselect}
             onEditTextObject={handleEditTextObject}
             editingItemId={
               activeTextEditor?.mode === "edit" ? activeTextEditor.itemId : null
