@@ -4,10 +4,11 @@ import { NO_GUIDES, snapDragPosition } from './AlignmentGuides'
 import type { GuideLines } from './AlignmentGuides'
 import { clampToBounds } from './coordinates'
 import { flattenPoints, getEffectiveTension, isLineTool, parseLinePoints } from './LineTool'
+import { fontStyleFor, isTextType, parseTextProperties } from './TextTool'
 import type { CanvasObject, ObjectType, Point } from './types'
 
 /**
- * Color palette for all 13 Object types (Key Technical Decisions: canvas-only
+ * Color palette for all 14 Object types (Key Technical Decisions: canvas-only
  * visual differentiation via color + text label is an accepted limitation
  * for this pass — no icons yet).
  *
@@ -15,6 +16,11 @@ import type { CanvasObject, ObjectType, Point } from './types'
  * types are included so ObjectShape renders generically without crashing
  * once U15/U16 start creating them (they still render as a plain colored
  * rect for now — type-specific rendering/Transformer support comes later).
+ *
+ * `text` (canvas-tools U7) never actually FILLS with this color — a text
+ * object's fill comes from its own `properties.color` — but the Record is
+ * deliberately exhaustive over `ObjectType` so adding an enum value without
+ * deciding its color is a compile error.
  */
 const TYPE_COLORS: Record<ObjectType, string> = {
   outlines: '#6b7280',
@@ -30,6 +36,7 @@ const TYPE_COLORS: Record<ObjectType, string> = {
   line_straight: '#dc2626',
   line_curved: '#b91c1c',
   line_s_curve: '#991b1b',
+  text: '#111827',
 }
 
 const DEFAULT_COLOR = '#4b5563'
@@ -41,10 +48,55 @@ export function colorForType(type: ObjectType): string {
   return TYPE_COLORS[type] ?? DEFAULT_COLOR
 }
 
+/**
+ * U1 (canvas-tools): the modifier keys held during a select click/tap,
+ * reported alongside the id so `CanvasStage`'s routing can distinguish
+ * plain click (replace selection) from ctrl/meta+click (toggle membership).
+ * ObjectShape itself stays selection-policy-free — it only relays what the
+ * pointer event carried.
+ */
+export interface SelectionClickModifiers {
+  ctrlKey: boolean
+  metaKey: boolean
+}
+
+/**
+ * U3: the group-drag relay a selected member's drag events dispatch
+ * into. `CanvasStage` owns the actual policy (delta computation, snapping
+ * with the whole selection excluded, COLLECTIVE bounds clamping, imperative
+ * co-member movement via its node registry, and the single batched
+ * `updateItemsGeometry` commit) — ObjectShape only relays which member is
+ * being dragged and its live node, exactly like `onSelect` relays clicks.
+ * Passed while this object is part of the SELECTION (U6 widened U3's
+ * 2+-only condition so a sole-selected box object shares the same
+ * dragstart-capture/Alt-at-release pipeline; a sole-selected Line still
+ * never gets the relay — anchor-only editing, U17); when absent, the
+ * pre-U3 single-drag behavior below is untouched.
+ *
+ * U6: `onDragStart` lets `CanvasStage` capture every selected node's
+ * pre-drag position (and Line points) for the Alt-drop duplicate's
+ * IMPERATIVE revert, and `onDragEnd` carries the release event's `altKey`
+ * — Alt is sampled at RELEASE (plan's interaction default), so ObjectShape
+ * itself stays policy-free and only reports what the event carried,
+ * exactly like `SelectionClickModifiers`.
+ */
+export interface GroupDragHandlers {
+  onDragStart: (id: CanvasObject['id'], node: Konva.Node) => void
+  onDragMove: (id: CanvasObject['id'], node: Konva.Node) => void
+  onDragEnd: (id: CanvasObject['id'], node: Konva.Node, altKey: boolean) => void
+}
+
 interface ObjectShapeProps {
   object: CanvasObject
   isSelected?: boolean
-  onSelect?: (id: CanvasObject['id']) => void
+  onSelect?: (id: CanvasObject['id'], modifiers?: SelectionClickModifiers) => void
+  /** U4: double-click/tap relay — `CanvasStage` narrows a double-clicked
+   * GROUP MEMBER's selection to just that member (member-mode). Like
+   * `onSelect`, ObjectShape stays selection-policy-free and only reports
+   * which object was double-clicked; the constituent single clicks still
+   * fire `onSelect` first (browser click/click/dblclick ordering), which
+   * the routing in CanvasStage expects. */
+  onDoubleClick?: (id: CanvasObject['id']) => void
   /** Registers/unregisters this node's Konva ref with a parent-owned
    * `Map<id, Konva.Node>` — used by U8's SelectionTransformer. Optional so
    * this unit doesn't need that machinery yet. */
@@ -76,6 +128,23 @@ interface ObjectShapeProps {
    * `CanvasStage` for rendering on the UI overlay layer, and to clear them
    * on `dragend`. */
   onAlignmentGuidesChange?: (guides: GuideLines) => void
+  /** U3: present exactly while this object belongs to a multi-selection —
+   * reroutes this node's drag gesture into `CanvasStage`'s group-drag
+   * orchestration (see `GroupDragHandlers`). Also what makes a LINE member
+   * draggable at all (single-selected Lines stay non-draggable,
+   * anchor-only — U17). */
+  groupDrag?: GroupDragHandlers
+  /** False while the canvas is in a navigate-only mode (pan tool): the node
+   * still LISTENS (a click selects it and hands over to the select tool),
+   * but must not be draggable — a press over it has to reach the draggable
+   * Stage so the drag pans instead of moving the object. */
+  draggable?: boolean
+  /** U7: true while this object is being edited through the DOM
+   * `TextEditOverlay` — the Konva node hides (official Konva editable-text
+   * pattern: the overlay's textarea IS the visible text during editing, so
+   * the node underneath must not double-render). Only ever set for text
+   * objects in practice, but implemented generically on the Group. */
+  hidden?: boolean
 }
 
 /**
@@ -98,6 +167,7 @@ export function ObjectShape({
   object,
   isSelected = false,
   onSelect,
+  onDoubleClick,
   shapeRef,
   gridSize,
   canvasWidth,
@@ -106,6 +176,9 @@ export function ObjectShape({
   allObjects,
   zoom = 1,
   onAlignmentGuidesChange,
+  groupDrag,
+  draggable = true,
+  hidden = false,
 }: ObjectShapeProps) {
   const fill = colorForType(object.type)
 
@@ -117,6 +190,15 @@ export function ObjectShape({
   // x/y from the points it renders. Per Key Technical Decisions, Lines get
   // their own point-based editing model (U17's `LineAnchorHandles`) instead
   // of the Transformer/whole-node-drag pattern every other type uses.
+  //
+  // U3 exception: while part of a MULTI-selection the Line becomes
+  // draggable (otherwise a line-only selection — e.g. two marqueed walls —
+  // would have no draggable member to grab), with NO dragBoundFunc: the
+  // plan's group-drag rule skips per-member snapping/clamping entirely, and
+  // `CanvasStage`'s group `onDragEnd` both commits the translated points
+  // and resets the node's position offset back to zero in the same dragend
+  // (a Line's x/y aren't React props, so a surviving offset would double
+  // the committed translation on the store-driven re-render).
   if (isLineTool(object.type)) {
     const points = parseLinePoints(object.properties)
     const tension = getEffectiveTension(object.type, points.length)
@@ -130,8 +212,22 @@ export function ObjectShape({
         lineCap="round"
         lineJoin="round"
         hitStrokeWidth={12}
-        onClick={() => onSelect?.(object.id)}
-        onTap={() => onSelect?.(object.id)}
+        draggable={draggable && groupDrag != null}
+        onClick={(event) =>
+          onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
+        }
+        onTap={(event) =>
+          onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
+        }
+        onDblClick={() => onDoubleClick?.(object.id)}
+        onDblTap={() => onDoubleClick?.(object.id)}
+        onDragStart={groupDrag ? (event) => groupDrag.onDragStart(object.id, event.target) : undefined}
+        onDragMove={groupDrag ? (event) => groupDrag.onDragMove(object.id, event.target) : undefined}
+        onDragEnd={
+          groupDrag
+            ? (event) => groupDrag.onDragEnd(object.id, event.target, event.evt.altKey)
+            : undefined
+        }
       />
     )
   }
@@ -145,6 +241,12 @@ export function ObjectShape({
   // effect so they render for this same frame; Konva already re-invokes this
   // function every dragmove frame regardless, so this doesn't add extra
   // render passes beyond what dragging already causes.
+  //
+  // U3: NOT used while this object is part of a multi-selection — the
+  // group-drag policy in `CanvasStage` replaces both halves: snapping must
+  // exclude every co-moving member (not just this one), and clamping
+  // applies to the shared DELTA against the selection's COLLECTIVE bbox
+  // (per-member clamping would distort the arrangement at the canvas edge).
   const dragBoundFunc = function dragBoundFunc(this: Konva.Node, pos: Point): Point {
     if (gridSize == null || canvasWidth == null || canvasHeight == null) return pos
     const { point: snapped, guides } = snapDragPosition(
@@ -160,6 +262,15 @@ export function ObjectShape({
     return clampToBounds(snapped, object.width, object.height, canvasWidth, canvasHeight)
   }
 
+  // U7: text objects render a single auto-sizing Konva.Text (NO width prop —
+  // Konva auto-sizes, and the stored width/height merely MIRROR that box)
+  // inside the SAME draggable Group wrapper as the box branch below, so
+  // selection, drag, dragBoundFunc snapping/clamping, group membership, and
+  // the transformer all treat text like any other box object. Konva.Text's
+  // hit region is its bounding rect, so the Group stays clickable without a
+  // backing Rect.
+  const textProperties = isTextType(object.type) ? parseTextProperties(object.properties) : null
+
   return (
     <Group
       x={object.x}
@@ -167,37 +278,66 @@ export function ObjectShape({
       width={object.width}
       height={object.height}
       rotation={object.rotation}
+      visible={!hidden}
       ref={shapeRef}
-      draggable
-      dragBoundFunc={dragBoundFunc}
-      onClick={() => onSelect?.(object.id)}
-      onTap={() => onSelect?.(object.id)}
+      draggable={draggable}
+      dragBoundFunc={groupDrag ? undefined : dragBoundFunc}
+      onClick={(event) =>
+        onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
+      }
+      onTap={(event) =>
+        onSelect?.(object.id, { ctrlKey: event.evt.ctrlKey, metaKey: event.evt.metaKey })
+      }
+      onDblClick={() => onDoubleClick?.(object.id)}
+      onDblTap={() => onDoubleClick?.(object.id)}
+      onDragStart={groupDrag ? (event) => groupDrag.onDragStart(object.id, event.target) : undefined}
+      onDragMove={groupDrag ? (event) => groupDrag.onDragMove(object.id, event.target) : undefined}
       onDragEnd={(event) => {
         const node = event.target
+        // U3: a selected member's drag commits through the group relay
+        // (ONE batched store entry for the whole selection) instead of the
+        // single-object commit below. U6: the release event's altKey rides
+        // along — Alt held at release turns the drop into a duplicate.
+        if (groupDrag) {
+          groupDrag.onDragEnd(object.id, node, event.evt.altKey)
+          return
+        }
         onGeometryChange?.(object.id, { x: node.x(), y: node.y() })
         // U19: destroy the temporary guide lines once the drag interaction
         // ends (Approach: guides are removed on dragend/transformend).
         onAlignmentGuidesChange?.(NO_GUIDES)
       }}
     >
-      <Rect
-        width={object.width}
-        height={object.height}
-        fill={fill}
-        stroke={isSelected ? '#111827' : undefined}
-        strokeWidth={isSelected ? 2 : 0}
-        cornerRadius={2}
-      />
-      <Text
-        text={object.name || object.type}
-        width={object.width}
-        height={object.height}
-        align="center"
-        verticalAlign="middle"
-        fontSize={11}
-        fill="#ffffff"
-        listening={false}
-      />
+      {textProperties ? (
+        <Text
+          text={textProperties.text}
+          fontFamily={textProperties.font_family}
+          fontSize={textProperties.font_size}
+          fontStyle={fontStyleFor(textProperties)}
+          fill={textProperties.color}
+        />
+      ) : (
+        <>
+          <Rect
+            width={object.width}
+            height={object.height}
+            fill={fill}
+            stroke={isSelected ? '#111827' : undefined}
+            strokeWidth={isSelected ? 2 : 0}
+            cornerRadius={2}
+          />
+          <Text
+            text={object.name || object.type}
+            width={object.width}
+            height={object.height}
+            align="center"
+            verticalAlign="middle"
+            fontSize={11}
+            fill="#ffffff"
+            listening={false}
+          />
+        </>
+      )}
     </Group>
   )
 }

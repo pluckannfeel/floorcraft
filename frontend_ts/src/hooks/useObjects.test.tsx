@@ -3,8 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { apiClient } from '../api/client'
+import {
+  buildClipboardPayload,
+  clearClipboard,
+  mintClipboardItems,
+  setClipboard,
+} from '../canvas/clipboard'
 import * as ToastContextModule from '../notifications/ToastContext'
-import { undo, useCanvasStore } from '../state/canvasStore'
+import { redo, undo, useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject } from '../canvas/types'
 import { useObjects, useSaveObjects } from './useObjects'
 
@@ -55,12 +61,14 @@ beforeEach(() => {
   })
   useCanvasStore.setState({
     items: [],
-    selectedItemId: null,
+    selectedItemIds: [],
     activeTool: 'select',
+    canvasSize: null,
     dirty: false,
     serverIdMap: {},
   })
   useCanvasStore.temporal.getState().clear()
+  clearClipboard()
   showError.mockClear()
   vi.spyOn(ToastContextModule, 'useToast').mockReturnValue({
     toasts: [],
@@ -212,6 +220,322 @@ describe('useSaveObjects', () => {
       objects: Record<string, unknown>[]
     }
     expect(secondBody.objects.map((o) => o.id)).toEqual([99])
+  })
+
+  it('carries group_key in every payload item — the stored key for grouped items, an explicit null otherwise (U4)', async () => {
+    useCanvasStore.setState({
+      items: [
+        makeObject({ id: 1, name: 'Member', group_key: 'group-abc' }),
+        makeObject({ id: 2, name: 'Never grouped' }),
+        makeObject({ id: 3, name: 'Ungrouped', group_key: null }),
+      ],
+      dirty: true,
+    })
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: { objects: [], id_map: {} },
+    } as never)
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const body = putSpy.mock.calls[0][1] as {
+      objects: Record<string, unknown>[]
+    }
+    // Explicit null (never an omitted field): an ungroup must round-trip
+    // as a CLEAR server-side, and never-grouped items must stay NULL.
+    expect(body.objects.map((o) => o.group_key)).toEqual([
+      'group-abc',
+      null,
+      null,
+    ])
+  })
+
+  it('undo ACROSS a save of a grouping change stays consistent — mapped ids reused, key toggles cleanly (U4)', async () => {
+    // The chain: create 2 -> group -> save #1 -> undo (ungroups) ->
+    // save #2 (mapped ids, null keys) -> redo (regroups with the SAME
+    // key from the snapshot) -> save #3 (mapped ids, key back). Group
+    // keys are client-generated, so no id_map machinery ever touches
+    // them — they must ride the items snapshots verbatim.
+    act(() => {
+      useCanvasStore
+        .getState()
+        .createItemLocal(makeObject({ id: 'local-a' as never, name: 'A' }))
+    })
+    act(() => {
+      useCanvasStore
+        .getState()
+        .createItemLocal(makeObject({ id: 'local-b' as never, name: 'B' }))
+    })
+    act(() => {
+      useCanvasStore.getState().replaceSelection(['local-a', 'local-b'])
+    })
+    act(() => {
+      useCanvasStore.getState().groupSelection()
+    })
+    const groupKey = useCanvasStore.getState().items[0].group_key
+    expect(groupKey).toMatch(/^group-/)
+
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: {
+        objects: [
+          makeObject({ id: 1, name: 'A', group_key: groupKey }),
+          makeObject({ id: 2, name: 'B', group_key: groupKey }),
+        ],
+        id_map: { 'local-a': 1, 'local-b': 2 },
+      },
+    } as never)
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const firstBody = putSpy.mock.calls[0][1] as {
+      objects: Record<string, unknown>[]
+    }
+    expect(firstBody.objects.map((o) => o.group_key)).toEqual([
+      groupKey,
+      groupKey,
+    ])
+
+    // Undo AFTER the save reverts ONLY the grouping (one entry) and
+    // re-dirties; the items keep their client-side local ids.
+    act(() => undo())
+    expect(
+      useCanvasStore.getState().items.map((item) => item.group_key ?? null),
+    ).toEqual([null, null])
+    expect(useCanvasStore.getState().dirty).toBe(true)
+
+    // Save #2: ids translate through serverIdMap (updates, not duplicate
+    // creates) and the cleared keys go out as explicit nulls.
+    act(() => result.current.mutate())
+    await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(2))
+    const secondBody = putSpy.mock.calls[1][1] as {
+      objects: Record<string, unknown>[]
+    }
+    expect(secondBody.objects.map((o) => o.id)).toEqual([1, 2])
+    expect(secondBody.objects.map((o) => o.group_key)).toEqual([null, null])
+
+    // Redo restores the grouping with the ORIGINAL client-generated key
+    // (snapshots carry it verbatim); save #3 sends it under mapped ids.
+    act(() => redo())
+    act(() => result.current.mutate())
+    await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(3))
+    const thirdBody = putSpy.mock.calls[2][1] as {
+      objects: Record<string, unknown>[]
+    }
+    expect(thirdBody.objects.map((o) => o.id)).toEqual([1, 2])
+    expect(thirdBody.objects.map((o) => o.group_key)).toEqual([
+      groupKey,
+      groupKey,
+    ])
+  })
+
+  it('paste → save → undo → save follows the stable-id invariants (pasted item translates through serverIdMap on save #2) (U5)', async () => {
+    // The chain-repair suite, extended to PASTED objects: a paste mints a
+    // fresh `local-` id (never reusing the copied item's identity), save #1
+    // creates its row and maps the local id, and after an undo the second
+    // save must send the pasted item under its MAPPED server id (an
+    // update) — never a duplicate create.
+    const source = makeObject({ id: 10, name: 'Source', x: 0, y: 0 })
+    useCanvasStore.setState({ items: [source] })
+    useCanvasStore.temporal.getState().clear()
+
+    // Copy the source, paste it at (100, 100) — mirrors handleCopy +
+    // handlePasteAt (batched create, then select).
+    const payload = buildClipboardPayload([10], [source])!
+    setClipboard(payload)
+    const minted = mintClipboardItems(payload, { x: 100, y: 100 }, 7, 1)
+    act(() => {
+      useCanvasStore.getState().createItemsLocal(minted)
+      useCanvasStore.getState().replaceSelection(minted.map((item) => item.id))
+    })
+    const pastedId = minted[0].id
+    expect(String(pastedId)).toMatch(/^local-/)
+
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: {
+        objects: [source, makeObject({ id: 55, name: 'Source', x: 100, y: 100 })],
+        id_map: { [String(pastedId)]: 55 },
+      },
+    } as never)
+
+    // Save #1: the pasted item goes out under its local id (a create).
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const firstBody = putSpy.mock.calls[0][1] as {
+      objects: Record<string, unknown>[]
+    }
+    expect(firstBody.objects.map((o) => o.id)).toEqual([10, pastedId])
+    expect(useCanvasStore.getState().serverIdMap).toEqual({
+      [String(pastedId)]: 55,
+    })
+
+    // Post-save edit, then undo it — the pasted item keeps its client-side
+    // local id through the whole traversal (ids in snapshots stay valid all
+    // session; translation happens only at the save boundary).
+    act(() => {
+      useCanvasStore.getState().updateItemGeometry(pastedId, { x: 300 })
+    })
+    act(() => undo())
+    expect(
+      useCanvasStore.getState().items.map((item) => item.id),
+    ).toEqual([10, pastedId])
+    expect(useCanvasStore.getState().items[1].x).toBe(100)
+    expect(useCanvasStore.getState().dirty).toBe(true)
+
+    // Save #2: the pasted item translates through serverIdMap — sent as
+    // row 55 (an update), not re-created under a fresh id.
+    act(() => result.current.mutate())
+    await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(2))
+    const secondBody = putSpy.mock.calls[1][1] as {
+      objects: Record<string, unknown>[]
+    }
+    expect(secondBody.objects.map((o) => o.id)).toEqual([10, 55])
+  })
+
+  it('always sends the store dims as `canvas` alongside the objects, and merges them into the floorPlan cache on success (U8)', async () => {
+    // Seeded (then cropped) dims: the PUT must carry them whether or not a
+    // crop happened this session — always-send is the plan's decision.
+    useCanvasStore.getState().setItems([makeObject({ id: 10 })], { width: 1600, height: 1200 })
+    act(() => {
+      useCanvasStore.getState().applyCrop({ x: 100, y: 100, width: 800, height: 600 })
+    })
+    queryClient.setQueryData(['floorPlan', 7], {
+      id: 7,
+      name: 'Croppable',
+      grid_size: 20,
+      canvas_width: 1600,
+      canvas_height: 1200,
+    })
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: { objects: [], id_map: {} },
+    } as never)
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const body = putSpy.mock.calls[0][1] as {
+      objects: Record<string, unknown>[]
+      canvas?: { width: number; height: number }
+    }
+    // One PUT carries objects (shifted: the object sat at the origin, the
+    // crop origin was (100, 100)) AND the cropped dims.
+    expect(body.canvas).toEqual({ width: 800, height: 600 })
+    expect(body.objects[0]).toMatchObject({ x: -100, y: -100 })
+    // Dirty cleared (nothing changed mid-flight) and the floorPlan cache
+    // now mirrors the persisted dims (merged, other fields kept).
+    expect(useCanvasStore.getState().dirty).toBe(false)
+    expect(queryClient.getQueryData(['floorPlan', 7])).toEqual({
+      id: 7,
+      name: 'Croppable',
+      grid_size: 20,
+      canvas_width: 800,
+      canvas_height: 600,
+    })
+  })
+
+  it('omits the canvas field when canvasSize is null (pre-seed edge), and leaves the floorPlan cache alone', async () => {
+    useCanvasStore.setState({ items: [makeObject({ id: 10 })], dirty: true })
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: { objects: [], id_map: {} },
+    } as never)
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const body = putSpy.mock.calls[0][1] as Record<string, unknown>
+    expect(body).not.toHaveProperty('canvas')
+    expect(queryClient.getQueryData(['floorPlan', 7])).toBeUndefined()
+  })
+
+  it('crop → save → undo → save restores the original dims server-side (the second PUT carries the pre-crop dims) (U8)', async () => {
+    useCanvasStore.getState().setItems(
+      [makeObject({ id: 10, x: 300, y: 250 })],
+      { width: 1600, height: 1200 },
+    )
+    act(() => {
+      useCanvasStore.getState().applyCrop({ x: 200, y: 200, width: 800, height: 600 })
+    })
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: { objects: [makeObject({ id: 10, x: 100, y: 50 })], id_map: {} },
+    } as never)
+
+    // Save #1 persists the crop.
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const firstBody = putSpy.mock.calls[0][1] as {
+      objects: Record<string, unknown>[]
+      canvas?: { width: number; height: number }
+    }
+    expect(firstBody.canvas).toEqual({ width: 800, height: 600 })
+    expect(firstBody.objects[0]).toMatchObject({ x: 100, y: 50 })
+    expect(useCanvasStore.getState().dirty).toBe(false)
+
+    // Undo AFTER the save: ONE step restores dims and coordinates, and the
+    // divergence re-dirties the canvas.
+    act(() => undo())
+    expect(useCanvasStore.getState().canvasSize).toEqual({ width: 1600, height: 1200 })
+    expect(useCanvasStore.getState().items[0]).toMatchObject({ x: 300, y: 250 })
+    expect(useCanvasStore.getState().dirty).toBe(true)
+
+    // Save #2: the chain of truth holds — the PUT carries the RESTORED
+    // dims (and coordinates), so the server returns to the pre-crop state.
+    act(() => result.current.mutate())
+    await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(2))
+    const secondBody = putSpy.mock.calls[1][1] as {
+      objects: Record<string, unknown>[]
+      canvas?: { width: number; height: number }
+    }
+    expect(secondBody.canvas).toEqual({ width: 1600, height: 1200 })
+    expect(secondBody.objects[0]).toMatchObject({ x: 300, y: 250 })
+  })
+
+  it('keeps dirty set when a crop landed while the PUT was in flight (sentCanvasSize gating), while the cache gets the SENT dims (U8)', async () => {
+    useCanvasStore.getState().setItems([makeObject({ id: 10 })], { width: 1600, height: 1200 })
+    useCanvasStore.setState({ dirty: true })
+    queryClient.setQueryData(['floorPlan', 7], {
+      id: 7,
+      name: 'Racy',
+      grid_size: 20,
+      canvas_width: 1600,
+      canvas_height: 1200,
+    })
+    let releasePut: ((value: unknown) => void) | null = null
+    vi.spyOn(apiClient, 'put').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releasePut = resolve
+        }) as never,
+    )
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(releasePut).not.toBeNull())
+
+    // Mid-flight crop: replaces BOTH tracked refs — but even a dims-only
+    // divergence must block markSaved, so change ONLY canvasSize here (the
+    // items reference stays identical to what was sent).
+    act(() => {
+      useCanvasStore.setState({ canvasSize: { width: 500, height: 400 }, dirty: true })
+    })
+
+    act(() => {
+      releasePut!({ data: { objects: [], id_map: {} } })
+    })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    // The in-flight save covered the OLD dims only: still dirty...
+    expect(useCanvasStore.getState().dirty).toBe(true)
+    // ...and the floorPlan cache reflects what the server actually
+    // persisted (the sent 1600x1200), not the unsaved mid-flight crop.
+    expect(queryClient.getQueryData(['floorPlan', 7])).toMatchObject({
+      canvas_width: 1600,
+      canvas_height: 1200,
+    })
   })
 
   it('keeps dirty set when the user edited while the PUT was in flight', async () => {

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { PropertyPanel } from './PropertyPanel'
+import { setTextMeasurer } from './TextTool'
 import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject } from './types'
 
@@ -28,8 +29,8 @@ function makeItem(overrides: Partial<CanvasObject> = {}): CanvasObject {
   }
 }
 
-function resetStore(items: CanvasObject[] = [], selectedItemId: CanvasObject['id'] | null = null) {
-  useCanvasStore.setState({ items, selectedItemId, activeTool: 'select' })
+function resetStore(items: CanvasObject[] = [], selectedItemIds: CanvasObject['id'][] = []) {
+  useCanvasStore.setState({ items, selectedItemIds, activeTool: 'select' })
   useCanvasStore.temporal.getState().clear()
 }
 
@@ -39,7 +40,7 @@ describe('PropertyPanel (U10)', () => {
   })
 
   it('renders nothing when no item is selected', () => {
-    resetStore([makeItem()], null)
+    resetStore([makeItem()], [])
     const { container } = render(<PropertyPanel />)
     expect(container).toBeEmptyDOMElement()
   })
@@ -47,7 +48,7 @@ describe('PropertyPanel (U10)', () => {
   it('selecting an item populates the panel with its current name/properties', () => {
     resetStore(
       [makeItem({ name: 'A/C Unit 1', properties: { btu: '12000', color: 'white' } })],
-      'item-1',
+      ['item-1'],
     )
     render(<PropertyPanel />)
 
@@ -57,7 +58,7 @@ describe('PropertyPanel (U10)', () => {
   })
 
   it('editing the name field and blurring saves the change exactly once (not per keystroke)', async () => {
-    resetStore([makeItem({ name: 'Old Name' })], 'item-1')
+    resetStore([makeItem({ name: 'Old Name' })], ['item-1'])
     render(<PropertyPanel />)
     const user = userEvent.setup()
 
@@ -78,7 +79,7 @@ describe('PropertyPanel (U10)', () => {
   })
 
   it('editing a generic property field and blurring saves the change', async () => {
-    resetStore([makeItem({ properties: { color: 'red' } })], 'item-1')
+    resetStore([makeItem({ properties: { color: 'red' } })], ['item-1'])
     render(<PropertyPanel />)
     const user = userEvent.setup()
 
@@ -112,7 +113,7 @@ describe('PropertyPanel (U10)', () => {
           },
         }),
       ],
-      'line-1',
+      ['line-1'],
     )
     render(<PropertyPanel />)
 
@@ -124,7 +125,7 @@ describe('PropertyPanel (U10)', () => {
   it('switching selection while a field is mid-edit commits the pending edit first', async () => {
     resetStore(
       [makeItem({ id: 'item-1', name: 'First' }), makeItem({ id: 'item-2', name: 'Second' })],
-      'item-1',
+      ['item-1'],
     )
     render(<PropertyPanel />)
     const user = userEvent.setup()
@@ -136,7 +137,7 @@ describe('PropertyPanel (U10)', () => {
     // No blur yet — switch selection directly via the store, simulating a
     // click on a different canvas item.
     expect(useCanvasStore.getState().items[0].name).toBe('First')
-    useCanvasStore.getState().selectItem('item-2')
+    useCanvasStore.getState().replaceSelection(['item-2'])
 
     await waitFor(() => {
       expect(useCanvasStore.getState().items.find((item) => item.id === 'item-1')?.name).toBe('First Edited')
@@ -149,7 +150,7 @@ describe('PropertyPanel (U10)', () => {
   })
 
   it('deleting a property row removes it from the saved properties', async () => {
-    resetStore([makeItem({ properties: { color: 'red', size: 'large' } })], 'item-1')
+    resetStore([makeItem({ properties: { color: 'red', size: 'large' } })], ['item-1'])
     render(<PropertyPanel />)
     const user = userEvent.setup()
 
@@ -162,7 +163,7 @@ describe('PropertyPanel (U10)', () => {
   })
 
   it('adding a new property and blurring saves it alongside existing properties', async () => {
-    resetStore([makeItem({ properties: { color: 'red' } })], 'item-1')
+    resetStore([makeItem({ properties: { color: 'red' } })], ['item-1'])
     render(<PropertyPanel />)
     const user = userEvent.setup()
 
@@ -181,7 +182,7 @@ describe('PropertyPanel (U10)', () => {
   it('reselecting the same item after editing shows the saved values', async () => {
     resetStore(
       [makeItem({ id: 'item-1', name: 'First' }), makeItem({ id: 'item-2', name: 'Second' })],
-      'item-1',
+      ['item-1'],
     )
     render(<PropertyPanel />)
     const user = userEvent.setup()
@@ -195,8 +196,8 @@ describe('PropertyPanel (U10)', () => {
       expect(useCanvasStore.getState().items[0].name).toBe('Renamed')
     })
 
-    useCanvasStore.getState().selectItem('item-2')
-    useCanvasStore.getState().selectItem('item-1')
+    useCanvasStore.getState().replaceSelection(['item-2'])
+    useCanvasStore.getState().replaceSelection(['item-1'])
 
     await waitFor(() => {
       expect(screen.getByLabelText('Name')).toHaveValue('Renamed')
@@ -212,7 +213,7 @@ describe('PropertyPanel (U10)', () => {
           properties: { points: originalPoints, curve_style: 'straight', label: 'wall a' },
         }),
       ],
-      'item-1',
+      ['item-1'],
     )
     render(<PropertyPanel />)
     const user = userEvent.setup()
@@ -240,5 +241,124 @@ describe('PropertyPanel (U10)', () => {
     // The reshape must survive the unrelated commit, not revert to the
     // points captured when this form first mounted.
     expect(useCanvasStore.getState().items[0].properties.points).toEqual(reshapedPoints)
+  })
+})
+
+// U1 (canvas-tools): the panel's exactly-one contract over the selection
+// SET — the editable form renders only for exactly one selected item; 2+
+// shows a count placeholder; 0 renders nothing (covered above).
+describe('PropertyPanel multi-selection (U1)', () => {
+  beforeEach(() => {
+    resetStore()
+  })
+
+  it('renders the editable form when exactly one item is selected', () => {
+    resetStore(
+      [makeItem({ id: 'item-1', name: 'Only One' }), makeItem({ id: 'item-2' })],
+      ['item-1'],
+    )
+    render(<PropertyPanel />)
+
+    expect(screen.getByLabelText('Name')).toHaveValue('Only One')
+    expect(screen.queryByText(/objects selected/)).not.toBeInTheDocument()
+  })
+
+  it('shows an "N objects selected" placeholder (no form) when 2+ items are selected', () => {
+    resetStore(
+      [
+        makeItem({ id: 'item-1' }),
+        makeItem({ id: 'item-2' }),
+        makeItem({ id: 'item-3' }),
+      ],
+      ['item-1', 'item-3'],
+    )
+    render(<PropertyPanel />)
+
+    expect(screen.getByText('2 objects selected')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Name')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '+ Add property' })).not.toBeInTheDocument()
+  })
+
+  it('counts only ids that resolve to live items (a stale id renders no form for a ghost)', () => {
+    resetStore([makeItem({ id: 'item-1', name: 'Real' })], ['item-1', 'ghost-id'])
+    render(<PropertyPanel />)
+
+    // One live item + one dead id -> exactly-one semantics, form renders.
+    expect(screen.getByLabelText('Name')).toHaveValue('Real')
+  })
+})
+
+describe('PropertyPanel text styling (U7)', () => {
+  const makeText = (overrides: Partial<CanvasObject> = {}) =>
+    makeItem({
+      id: 'text-1',
+      type: 'text' as CanvasObject['type'],
+      width: 80,
+      height: 20,
+      properties: {
+        text: 'Meeting Room',
+        font_family: 'Arial',
+        font_size: 16,
+        bold: false,
+        italic: false,
+        color: '#111111',
+      },
+      ...overrides,
+    })
+
+  beforeEach(() => {
+    setTextMeasurer(() => ({ width: 123, height: 45 }))
+  })
+
+  it('renders the styling controls for a text object and hides styling keys from the generic rows', () => {
+    resetStore([makeText()], ['text-1'])
+    render(<PropertyPanel />)
+
+    expect(screen.getByLabelText('Font')).toHaveValue('Arial')
+    expect(screen.getByLabelText('Size')).toHaveValue(16)
+    expect(screen.getByRole('button', { name: 'Bold' })).toBeInTheDocument()
+    // Styling keys never appear as generic key/value rows (they have
+    // dedicated controls instead — e.g. the color input below).
+    expect(screen.queryByDisplayValue('font_family')).not.toBeInTheDocument()
+    expect(screen.queryByDisplayValue('color')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Color')).toHaveValue('#111111')
+  })
+
+  it('commits a font family change UNTRACKED and mirrors the measured box', async () => {
+    resetStore([makeText()], ['text-1'])
+    const user = userEvent.setup()
+    render(<PropertyPanel />)
+
+    await user.selectOptions(screen.getByLabelText('Font'), 'Georgia')
+
+    const item = useCanvasStore.getState().items[0]
+    expect(item.properties.font_family).toBe('Georgia')
+    expect(item.properties.text).toBe('Meeting Room') // content preserved
+    // Mirrored box recomputed through the injected measurer.
+    expect(item.width).toBe(123)
+    expect(item.height).toBe(45)
+    // R15: styling is not undoable — no history entry was pushed.
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('toggles bold via aria-pressed and clamps the font size draft on blur', async () => {
+    resetStore([makeText()], ['text-1'])
+    const user = userEvent.setup()
+    render(<PropertyPanel />)
+
+    await user.click(screen.getByRole('button', { name: 'Bold' }))
+    expect(useCanvasStore.getState().items[0].properties.bold).toBe(true)
+    expect(screen.getByRole('button', { name: 'Bold' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+
+    const size = screen.getByLabelText('Size')
+    await user.clear(size)
+    await user.type(size, '1')
+    await user.tab() // blur commits, clamped to MIN_TEXT_FONT_SIZE
+    expect(
+      useCanvasStore.getState().items[0].properties.font_size as number,
+    ).toBeGreaterThanOrEqual(4)
   })
 })

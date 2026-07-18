@@ -3,13 +3,26 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { isLineTool } from './LineTool'
+import {
+  isTextType,
+  measureTextBox,
+  MIN_TEXT_FONT_SIZE,
+  parseTextProperties,
+  TEXT_FONT_FAMILIES,
+} from './TextTool'
+import type { TextStyling } from './TextTool'
 import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject, ObjectType } from './types'
 
 /**
- * R19/U10: a persistent side panel, visible whenever `selectedItemId` is
- * set, showing the selected Object's free-text `name` and a generic
- * key-value editor for whatever's in its `properties` JSON.
+ * R19/U10: a persistent side panel, visible whenever the selection is
+ * non-empty. With EXACTLY ONE Object selected it shows that Object's
+ * free-text `name` and a generic key-value editor for whatever's in its
+ * `properties` JSON; with 2+ selected (U1's selection set) it shows an
+ * "N objects selected" placeholder instead — the plan's exactly-one
+ * contract (multi-editing properties is out of scope; the form's
+ * remount-per-id and commit-on-unmount machinery below is inherently
+ * single-item).
  *
  * Per the Key Technical Decisions ("no fixed per-catalog-type property
  * schema in this pass"), `properties` is edited generically — whatever
@@ -55,8 +68,23 @@ import type { CanvasObject, ObjectType } from './types'
 
 const LINE_STRUCTURAL_KEYS = new Set(['points', 'curve_style'])
 
+/** U7: a text object's reserved keys — `text` is the content (edited via
+ * the canvas overlay, never as a raw key-value row) and the styling keys
+ * get dedicated controls below (`TextStylingFields`), so all six hide from
+ * the generic editor — the same treatment as `LINE_STRUCTURAL_KEYS`. */
+const TEXT_STRUCTURAL_KEYS = new Set([
+  'text',
+  'font_family',
+  'font_size',
+  'bold',
+  'italic',
+  'color',
+])
+
 function excludedKeysForType(type: ObjectType): Set<string> {
-  return isLineTool(type) ? LINE_STRUCTURAL_KEYS : new Set()
+  if (isLineTool(type)) return LINE_STRUCTURAL_KEYS
+  if (isTextType(type)) return TEXT_STRUCTURAL_KEYS
+  return new Set()
 }
 
 interface PropertyRow {
@@ -108,9 +136,137 @@ function shallowEqualStringRecords(a: Record<string, string>, b: Record<string, 
 
 type PropertiesPatch = { name?: string; properties?: Record<string, unknown> }
 
+/** U7: the untracked text-styling commit shape — the full next
+ * `properties` object plus the remeasured mirrored box, matching the
+ * store's `updateItemTextStyling`. */
+type TextStylingCommit = (
+  id: CanvasObject['id'],
+  properties: Record<string, unknown>,
+  size: { width: number; height: number },
+) => void
+
+interface TextStylingFieldsProps {
+  item: CanvasObject
+  onCommitStyling: TextStylingCommit
+}
+
+/**
+ * U7: dedicated styling controls for a selected TEXT object — font family
+ * (curated `TEXT_FONT_FAMILIES` select), font size, bold/italic toggles,
+ * and color. Every commit goes through the UNTRACKED styling path (R15:
+ * styling edits create no undo history — `updateItemTextStyling`) and
+ * carries the REMEASURED mirrored width/height in the same store write, so
+ * box-derived math (marquee/align/groups) never sees a stale box.
+ *
+ * The select/color/toggle controls are store-controlled (they re-render
+ * from `item.properties` after each commit); the font-size input keeps
+ * local draft state and commits on blur like the panel's other text
+ * inputs, clamped to `MIN_TEXT_FONT_SIZE`.
+ */
+function TextStylingFields({ item, onCommitStyling }: TextStylingFieldsProps) {
+  const styling = parseTextProperties(item.properties)
+  const [fontSizeDraft, setFontSizeDraft] = useState(String(styling.font_size))
+
+  function commitStyling(patch: Partial<TextStyling>) {
+    const next = { ...styling, ...patch }
+    // Full-replacement properties (the `updateItemProperties` convention),
+    // preserving the content key and any generic keys the styling controls
+    // don't own.
+    const nextProperties: Record<string, unknown> = {
+      ...item.properties,
+      font_family: next.font_family,
+      font_size: next.font_size,
+      bold: next.bold,
+      italic: next.italic,
+      color: next.color,
+    }
+    onCommitStyling(item.id, nextProperties, measureTextBox(next.text, next))
+  }
+
+  function commitFontSizeDraft() {
+    const parsed = Number(fontSizeDraft)
+    const fontSize = Number.isFinite(parsed)
+      ? Math.max(MIN_TEXT_FONT_SIZE, parsed)
+      : styling.font_size
+    setFontSizeDraft(String(fontSize))
+    if (fontSize !== styling.font_size) commitStyling({ font_size: fontSize })
+  }
+
+  return (
+    <div>
+      <div className="mb-1 text-xs text-muted-foreground">Text style</div>
+
+      <Label htmlFor="property-panel-font-family" className="mb-1">
+        Font
+      </Label>
+      <select
+        id="property-panel-font-family"
+        value={styling.font_family}
+        onChange={(event) => commitStyling({ font_family: event.target.value })}
+        className="mb-2 h-8 w-full rounded-md border bg-transparent px-2 text-sm"
+      >
+        {TEXT_FONT_FAMILIES.map((family) => (
+          <option key={family} value={family}>
+            {family}
+          </option>
+        ))}
+      </select>
+
+      <Label htmlFor="property-panel-font-size" className="mb-1">
+        Size
+      </Label>
+      <Input
+        id="property-panel-font-size"
+        type="number"
+        min={MIN_TEXT_FONT_SIZE}
+        value={fontSizeDraft}
+        onChange={(event) => setFontSizeDraft(event.target.value)}
+        onBlur={commitFontSizeDraft}
+        className="mb-2"
+      />
+
+      <div className="mb-2 flex items-center gap-1">
+        <Button
+          type="button"
+          variant={styling.bold ? 'default' : 'outline'}
+          size="icon-sm"
+          aria-label="Bold"
+          aria-pressed={styling.bold}
+          onClick={() => commitStyling({ bold: !styling.bold })}
+        >
+          <span className="font-bold">B</span>
+        </Button>
+        <Button
+          type="button"
+          variant={styling.italic ? 'default' : 'outline'}
+          size="icon-sm"
+          aria-label="Italic"
+          aria-pressed={styling.italic}
+          onClick={() => commitStyling({ italic: !styling.italic })}
+        >
+          <span className="italic">I</span>
+        </Button>
+      </div>
+
+      <Label htmlFor="property-panel-text-color" className="mb-1">
+        Color
+      </Label>
+      <Input
+        id="property-panel-text-color"
+        type="color"
+        value={styling.color}
+        onChange={(event) => commitStyling({ color: event.target.value })}
+      />
+    </div>
+  )
+}
+
 interface PropertyPanelFormProps {
   item: CanvasObject
   onCommit: (id: CanvasObject['id'], patch: PropertiesPatch) => void
+  /** U7: the untracked text-styling commit (see `TextStylingFields`) —
+   * only used when `item` is a text object. */
+  onCommitTextStyling: TextStylingCommit
 }
 
 /**
@@ -119,7 +275,7 @@ interface PropertyPanelFormProps {
  * for why that's what makes "commit pending edit on selection switch" work
  * without any imperative selection-change detection.
  */
-function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
+function PropertyPanelForm({ item, onCommit, onCommitTextStyling }: PropertyPanelFormProps) {
   const excludedKeys = excludedKeysForType(item.type)
 
   const [name, setName] = useState(item.name)
@@ -224,6 +380,13 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
         />
       </div>
 
+      {/* U7: text objects get dedicated styling controls (untracked commit
+          path + mirrored-box remeasure); their reserved keys are excluded
+          from the generic editor below via TEXT_STRUCTURAL_KEYS. */}
+      {isTextType(item.type) && (
+        <TextStylingFields item={item} onCommitStyling={onCommitTextStyling} />
+      )}
+
       <div>
         <div className="mb-1 text-xs text-muted-foreground">Properties</div>
         {rows.map((row) => (
@@ -270,19 +433,36 @@ function PropertyPanelForm({ item, onCommit }: PropertyPanelFormProps) {
 
 export function PropertyPanel() {
   const items = useCanvasStore((state) => state.items)
-  const selectedItemId = useCanvasStore((state) => state.selectedItemId)
+  const selectedItemIds = useCanvasStore((state) => state.selectedItemIds)
   const updateItemProperties = useCanvasStore((state) => state.updateItemProperties)
+  // U7: the untracked text-styling path (properties + mirrored box in one
+  // paused set() — see canvasStore.ts).
+  const updateItemTextStyling = useCanvasStore((state) => state.updateItemTextStyling)
 
-  const selectedItem = items.find((item) => item.id === selectedItemId) ?? null
+  // Resolve the selection against `items` (dropping any id without a live
+  // item) so the exactly-one/placeholder branch below can never try to
+  // render a form for a nonexistent item.
+  const selectedItems = items.filter((item) => selectedItemIds.includes(item.id))
 
-  if (!selectedItem) return null
+  if (selectedItems.length === 0) return null
 
   return (
     <aside
       aria-label="Property panel"
       className="flex w-[260px] flex-col gap-3 overflow-y-auto border-l p-4"
     >
-      <PropertyPanelForm key={selectedItem.id} item={selectedItem} onCommit={updateItemProperties} />
+      {selectedItems.length === 1 ? (
+        <PropertyPanelForm
+          key={selectedItems[0].id}
+          item={selectedItems[0]}
+          onCommit={updateItemProperties}
+          onCommitTextStyling={updateItemTextStyling}
+        />
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          {selectedItems.length} objects selected
+        </p>
+      )}
     </aside>
   )
 }

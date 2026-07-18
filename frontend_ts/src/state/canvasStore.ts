@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import { temporal } from 'zundo'
 import { clampZoom } from '../canvas/coordinates'
-import type { CanvasObject, LineType, Point, ShapeType } from '../canvas/types'
+import type { BoundingBox } from '../canvas/coordinates'
+import type { CanvasObject, LineType, Point, ShapeType, TextType } from '../canvas/types'
 
 /** U11's default zoom step for the Toolbar's zoom in/out buttons (a gentler
  * per-click step than a single wheel "tick" would feel like, since a click
@@ -9,12 +10,58 @@ import type { CanvasObject, LineType, Point, ShapeType } from '../canvas/types'
 const TOOLBAR_ZOOM_STEP = 1.2
 
 /**
- * Drawing-tool mode for the shape/line creation flows (U15/U16). `'select'`
- * is the default/idle mode matching the drag-select interaction; the rest
- * mirror `ShapeType`/`LineType` from `canvas/types.ts`. Untracked by undo
- * (see `partialize` below) — switching tools isn't a content change.
+ * Active canvas tool. `'pan'` is the DEFAULT/idle mode: no tool is engaged,
+ * so a plain drag navigates the canvas (the same gesture Space+drag and
+ * middle-mouse give from any mode) and nothing on the canvas responds to
+ * clicks — deselecting any tool returns here. `'select'` engages the
+ * selection interactions (marquee, click-select, object drags); the rest
+ * mirror `ShapeType`/`LineType`/`TextType` from `canvas/types.ts` plus the
+ * crop tool. Untracked by undo (see `partialize` below) — switching tools
+ * isn't a content change.
  */
-export type ActiveTool = 'select' | ShapeType | LineType
+export type ActiveTool = 'pan' | 'select' | ShapeType | LineType | TextType | 'crop'
+
+/**
+ * U8 (canvas-tools): the floor plan's live canvas dimensions while editing.
+ * `null` only before the first seed (the editor doesn't render the stage
+ * until the seed-once effect stamps real dims) and after a plan-switch
+ * reset, so unsaved cropped dims can never leak into the next plan.
+ */
+export interface CanvasSize {
+  width: number
+  height: number
+}
+
+/**
+ * One item's share of a batched `updateItemsGeometry` gesture commit.
+ *
+ * U3 decision (the plan's "extend the batched action to accept a points
+ * patch" option): a Line member of a multi-selection moves/resizes by
+ * replacing its `properties.points` (a Line's points ARE its geometry — the
+ * same U17 reasoning that made `updateLinePoints` undo-tracked), but
+ * `properties` is not a geometry column. Rather than adding a second store
+ * write (which would split one gesture into two history entries), the
+ * batched patch carries an optional `points` array that
+ * `updateItemsGeometry` folds into `item.properties.points` inside the SAME
+ * single `set()` — one gesture, one history entry, whatever mix of boxes
+ * and Lines the selection contains.
+ */
+export type ItemGeometryPatch = Partial<
+  Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>
+> & {
+  /** Replacement ABSOLUTE canvas points for a Line-typed item. */
+  points?: Point[]
+  /**
+   * U7: replacement `font_size` for a TEXT-typed item — the transformer
+   * resize special case (a text node folds `min(scaleX, scaleY)` into its
+   * font size instead of stretching width/height; see
+   * `computeTransformCommit`). Folded into `item.properties.font_size`
+   * inside the same single tracked `set()`, exactly like `points` — one
+   * gesture, one history entry, and the patch's width/height carry the
+   * remeasured mirrored box alongside.
+   */
+  font_size?: number
+}
 
 /**
  * Zustand store backing the canvas editor.
@@ -27,24 +74,37 @@ export type ActiveTool = 'select' | ShapeType | LineType
  * `hooks/useObjects.ts`), which PUTs the full `items` list and re-baselines
  * the store from the server's canonical response via `setItems`.
  *
- * Undo/redo design notes (U9):
- * - `zundo`'s `partialize` returns only `{ items }`, so `undo()`/`redo()`
- *   read/write *only* the `items` key on this store — `selectedItemId`,
+ * Undo/redo design notes (U9, extended by canvas-tools U8):
+ * - `zundo`'s `partialize` returns `{ items, canvasSize }` (U8 pulled the
+ *   canvas dims into the tracked snapshot so a crop undoes as ONE step), so
+ *   `undo()`/`redo()`
+ *   read/write *only* those keys on this store — `selectedItemIds`,
  *   `activeTool`, zoom/pan, and `dirty` are never touched by a history
  *   traversal, matching R15's "property edits are excluded" scope decision
  *   and the plan's Key Technical Decision that undo/redo is partitioned to
- *   `items` only. (`dirty` in particular must stay out: a traversal must
+ *   document content only. (`dirty` in particular must stay out: a traversal must
  *   never restore a stale saved/unsaved flag — `undo()`/`redo()` below mark
  *   the store dirty themselves whenever a traversal actually changes the
- *   canvas.)
+ *   canvas. `selectedItemIds` likewise: a traversal never RESTORES an old
+ *   selection, but the exported `undo()`/`redo()` wrappers do PRUNE ids
+ *   that no longer exist in the restored `items`, so e.g. undoing a create
+ *   can't leave a ghost selection pointing at a nonexistent item.)
  * - `equality` gates whether a given `set()` call pushes a new history
- *   entry at all: it compares the `items` array by *reference*. Every
- *   action below that isn't supposed to be undoable (`selectItem`,
- *   `setActiveTool`, `markSaved`, the zoom/pan actions) only ever `set()`s
- *   keys other than `items`, so `items` keeps the same reference across
- *   those calls and no history entry is created. `createItemLocal`,
- *   `updateItemGeometry`, `deleteItem`, `reorderZIndex`, and
- *   `updateLinePoints` all replace `items` with a new array, so those calls
+ *   entry at all: it compares the `items` array AND `canvasSize` (U8) by
+ *   *reference*. Every
+ *   action below that isn't supposed to be undoable (the selection actions
+ *   `replaceSelection`/`toggleIdsInSelection`/`clearSelection`,
+ *   `setActiveTool`, `markSaved`, the zoom/pan actions)
+ *   only ever `set()`s
+ *   keys other than `items`/`canvasSize`, so both keep the same reference
+ *   across
+ *   those calls and no history entry is created. `createItemLocal`/
+ *   `createItemsLocal`,
+ *   `updateItemGeometry`/`updateItemsGeometry`, `deleteItems`,
+ *   `reorderZIndexItems`, `updateLinePoints`, U4's
+ *   `groupSelection`/`ungroupSelection`, U7's `updateItemText`, and U8's
+ *   `applyCrop` (which replaces BOTH tracked references at once) all
+ *   replace `items` with a new array, so those calls
  *   do produce a history entry. This is simpler and safer than a
  *   `partialize` that strips fields per-item (e.g. dropping `properties`):
  *   zundo's `undo()`/`redo()` write the partialized snapshot straight back
@@ -79,14 +139,39 @@ export type ActiveTool = 'select' | ShapeType | LineType
  */
 export interface CanvasState {
   items: CanvasObject[]
-  selectedItemId: CanvasObject['id'] | null
+  /**
+   * U1 (canvas-tools plan): the current selection, as an ORDERED array of
+   * item ids (insertion-ordered, not a Set — deterministic and
+   * JSON-friendly for tests). This is always the LITERAL operand set every
+   * consumer acts on as-is (delete, z-order, transformer, property panel):
+   * group expansion (U4) happens at selection time in the click/marquee
+   * handlers, never by derivation here, and no consumer re-expands or
+   * branches on group state. Consumers needing exactly-one semantics
+   * (PropertyPanel's form, line anchor handles) check `length === 1`.
+   * Untracked by undo (never in `partialize` — a binding invariant from
+   * docs/solutions/ui-bugs/undo-redo-broken-after-save-2026-07-16.md); the
+   * exported `undo()`/`redo()` wrappers below prune ids absent from the
+   * restored `items` after a traversal instead.
+   */
+  selectedItemIds: CanvasObject['id'][]
   /** Drawing-tool mode for U15/U16's shape/line creation flows. */
   activeTool: ActiveTool
+  /**
+   * U8: the canvas dimensions, part of the TRACKED snapshot (unlike
+   * zoom/pan/selection): `partialize` below carries `{ items, canvasSize }`
+   * and `equality` compares BOTH references, so `applyCrop` — which replaces
+   * both in ONE `set()` — is a single history entry whose undo restores dims
+   * AND every shifted coordinate together. Seeded by `setItems` (from the
+   * floor-plan query, inside the same paused bracket) and reset to `null` by
+   * the plan-switch `setItems([])`; every OTHER action leaves the reference
+   * untouched, so nothing else ever pushes a dims history entry.
+   */
+  canvasSize: CanvasSize | null
   /** U11: current Stage scale (mirrors Konva's `scaleX`/`scaleY`, kept
    * equal on both axes). View state, not document state — deliberately NOT
    * part of `partialize` below, so zooming/panning never creates undo
    * history (same "only set() items and it's tracked" mechanism the class
-   * doc above already relies on for `selectedItemId`/`activeTool`: this
+   * doc above already relies on for `selectedItemIds`/`activeTool`: this
    * store's `equality` only compares `items` by reference, and neither
    * `setZoom`/`setStagePosition`/etc. below ever touch `items`, so no
    * history entry is ever pushed for them). */
@@ -135,8 +220,32 @@ export interface CanvasState {
    * the historical bug this prevents). Deliberately NOT called after a
    * save: a save keeps the store's items (and undo history) untouched and
    * only updates `serverIdMap`/`dirty`.
+   *
+   * U8: also the `seedFromServer(items, canvasSize)`-shaped seed for the
+   * canvas dims — the seed-once effect gates on BOTH queries and passes the
+   * floor plan's dims here, inside the same paused bracket, so seeding
+   * never becomes an undoable step either. Omitting `canvasSize` (the
+   * plan-switch reset's `setItems([])`) resets it to `null`, so an unsaved
+   * crop's dims can't leak into the next plan.
    */
-  setItems: (items: CanvasObject[]) => void
+  setItems: (items: CanvasObject[], canvasSize?: CanvasSize | null) => void
+
+  /**
+   * U8: applies a confirmed crop region (model-space rect, integer-rounded
+   * by the crop gesture) in ONE tracked `set()` that ALWAYS replaces BOTH
+   * tracked references — the `items` array (every object's x/y shifted by
+   * -rect.x/-rect.y; a Line's `properties.points` shifted identically, its
+   * x/y bbox metadata shifting via the same x/y rule) and `canvasSize`
+   * ({rect.width, rect.height}) — so one undo restores dims AND every
+   * coordinate together. Objects fully or partly outside the region KEEP
+   * their (now possibly negative / out-of-bounds) coordinates (R22);
+   * `constrainTransformBox`/`clampGroupDragDelta` relax their bounds
+   * rejection for already-out-of-bounds boxes so such objects stay
+   * transformable/movable. Note: a crop origin that isn't grid-aligned
+   * de-aligns previously grid-snapped objects — accepted per the plan (the
+   * next drag re-snaps them).
+   */
+  applyCrop: (rect: BoundingBox) => void
 
   /**
    * Appends a locally-created item (sidebar drop, Shape draw, Line draw) to
@@ -145,8 +254,74 @@ export interface CanvasState {
    */
   createItemLocal: (item: CanvasObject) => void
 
-  /** Selects an item, or clears selection when passed `null`. */
-  selectItem: (id: CanvasObject['id'] | null) => void
+  /**
+   * U5: batched multi-item variant of `createItemLocal` — appends every
+   * minted item in ONE `set()` (one history entry for a whole paste,
+   * however many items the clipboard held; a single undo removes the whole
+   * pasted set, AE4). The items arrive fully formed from
+   * `clipboard.ts`'s `mintClipboardItems` (fresh `local-` ids, fresh
+   * `group-` keys, absolute geometry, top-of-stack z_indexes) — this action
+   * only commits them. A no-op (same `items` reference, so no history
+   * entry, `dirty` untouched) for an empty list. Selecting the pasted set
+   * is the caller's follow-up `replaceSelection` (untracked, so the pair
+   * still yields exactly one history entry).
+   */
+  createItemsLocal: (items: CanvasObject[]) => void
+
+  /**
+   * U1: replaces the selection wholesale with `ids` — the plain-click
+   * contract (`replaceSelection([id])`) and, from U2 on, the marquee's full
+   * hit set. Callers pass the exact operand set (group expansion, when it
+   * arrives in U4, happens in the handlers before this call). Untracked by
+   * undo (never touches `items`).
+   */
+  replaceSelection: (ids: CanvasObject['id'][]) => void
+
+  /**
+   * U1: toggles one id's membership in the selection — the ctrl(/meta)+
+   * click contract. Removes the id if present; appends it at the END if
+   * not (the array is insertion-ordered). Untracked by undo.
+   */
+
+  /**
+   * U4: toggles a whole id SET
+   * in/out of the selection atomically, the group-aware ctrl(/meta)+click
+   * contract (the handler expands the clicked member's `group_key` peers
+   * via `expandIdsByGroup` and passes the expanded set here). When EVERY
+   * given id is already selected the whole set is removed; otherwise the
+   * missing ids are appended at the END in the given order (so a partially
+   * selected group completes rather than half-toggling). A one-element set
+   * covers the lone-object ctrl+click too (a one-element set) — after the
+   * U1 conversion, batched actions are the ONLY mutation paths; the old
+   * single-item variants were removed as dead code (code-review). Untracked by undo.
+   */
+  toggleIdsInSelection: (ids: CanvasObject['id'][]) => void
+
+  /** U1: empties the selection (empty-canvas click, PNG export, plan
+   * switch). Untracked by undo. */
+  clearSelection: () => void
+
+  /**
+   * U4: stamps ONE fresh client-generated key (`group-${crypto.randomUUID()}`,
+   * NEVER server-assigned — the institutional stable-identity invariant, so
+   * keys ride `items` snapshots safely with no id-map involvement) onto
+   * every currently-selected item, in ONE tracked `set()` — one history
+   * entry per Group action. Groups are FLAT (R9): items already carrying a
+   * key are simply re-stamped with the new one, merging any groups in the
+   * selection into a single group. A no-op (no history entry, `dirty`
+   * untouched) unless the selection matches at least 2 items.
+   */
+  groupSelection: () => void
+
+  /**
+   * U4: clears `group_key` (to null) on every currently-selected item, in
+   * ONE tracked `set()`. A mixed selection dissolves ALL groups present;
+   * loose (never-grouped) members are untouched, and the selection itself
+   * is left as-is (everything stays selected — selection is untracked
+   * anyway). A no-op (no history entry, `dirty` untouched) unless at least
+   * one selected item is grouped.
+   */
+  ungroupSelection: () => void
 
   /**
    * Patches an item's geometry (x/y/width/height/rotation) — the single
@@ -161,8 +336,36 @@ export interface CanvasState {
     patch: Partial<Pick<CanvasObject, 'x' | 'y' | 'width' | 'height' | 'rotation'>>,
   ) => void
 
-  /** Removes an item and clears selection if it was the selected item. */
-  deleteItem: (id: CanvasObject['id']) => void
+  /**
+   * U1: batched multi-item variant of `updateItemGeometry` — applies every
+   * patch in ONE `set()` call, so a single gesture over a multi-selection
+   * (U3's group move/transform, U6's align/distribute) produces exactly one
+   * history entry (one `items` reference swap), never N undo steps. Later
+   * patches for the same id shallow-merge over earlier ones. A no-op (same
+   * `items` reference, so no history entry) when no patch id matches an
+   * item. The single-item action above remains for lone-object paths.
+   *
+   * U3: a patch may carry `points` for a Line member — folded into that
+   * item's `properties.points` in the same `set()` (see `ItemGeometryPatch`
+   * for why Line translation/scale commits ride this action instead of a
+   * second one).
+   */
+  updateItemsGeometry: (
+    patches: Array<{
+      id: CanvasObject['id']
+      patch: ItemGeometryPatch
+    }>,
+  ) => void
+
+  /** Removes an item and drops its id from the selection if selected. */
+
+  /**
+   * U1: batched delete — removes every listed
+   * item in ONE `set()` (one history entry for a whole-selection delete)
+   * and drops the deleted ids from the selection in the same call. A no-op
+   * when none of the ids match an item.
+   */
+  deleteItems: (ids: CanvasObject['id'][]) => void
 
   /**
    * U18: moves an item to the front (`'front'`) or back (`'back'`) of the
@@ -190,7 +393,17 @@ export interface CanvasState {
    * A no-op if `id` doesn't match any item, or if `items` has only one
    * item (nothing to reorder relative to).
    */
-  reorderZIndex: (id: CanvasObject['id'], direction: 'front' | 'back') => void
+
+  /**
+   * U1: batched z-reorder — moves ALL listed
+   * items above the previous max (`'front'`) or below the previous min
+   * (`'back'`) among this store's `items`, preserving the batch's own
+   * relative z-order (current `z_index`, then `id` — the same tiebreak
+   * `CanvasStage.tsx`'s `sortObjectsByZIndex` renders by), in ONE
+   * `set()`/history entry. Same no-op conditions as the single-item
+   * action; both share the pure `applyZIndexReorder` helper below.
+   */
+  reorderZIndexItems: (ids: CanvasObject['id'][], direction: 'front' | 'back') => void
 
   /**
    * Patches a single point (by index) in a Line-typed item's
@@ -204,6 +417,42 @@ export interface CanvasState {
    * `pointIndex` is out of range for that item's current points array.
    */
   updateLinePoints: (id: CanvasObject['id'], pointIndex: number, point: Point) => void
+
+  /**
+   * U7: commits a text object's CONTENT (`properties.text`) plus its
+   * remeasured mirrored `width`/`height` in ONE tracked `set()` — one
+   * history entry per overlay commit. TRACKED deliberately (the plan's
+   * doc-review decision): text content is the object's substance — the same
+   * "a Line's points ARE its shape" U17 reasoning behind
+   * `updateLinePoints` — unlike STYLING, which stays untracked per R15
+   * (see `updateItemTextStyling` below). Without tracking, an unrelated
+   * undo would silently revert typed content via the whole-items snapshot
+   * restore. A no-op (no history entry, `dirty` untouched) if `id` matches
+   * no item.
+   */
+  updateItemText: (
+    id: CanvasObject['id'],
+    text: string,
+    size: { width: number; height: number },
+  ) => void
+
+  /**
+   * U7: commits a text object's STYLING (`properties` replacement — the
+   * caller builds the full next-properties object, `updateItemProperties`
+   * convention) plus the remeasured mirrored `width`/`height`, UNTRACKED
+   * (R15: property/styling edits never create undo history — same
+   * `temporal.pause()`/`resume()` bracket as `updateItemProperties`).
+   * A dedicated action rather than `updateItemProperties` itself because
+   * styling changes the rendered text metrics, so the mirrored box must
+   * move in the same `set()` — and `updateItemProperties`' patch shape is
+   * deliberately geometry-free. Still a content change the user hasn't
+   * saved: sets `dirty`. A no-op if `id` matches no item.
+   */
+  updateItemTextStyling: (
+    id: CanvasObject['id'],
+    properties: Record<string, unknown>,
+    size: { width: number; height: number },
+  ) => void
 
   /**
    * Patches an item's `name` and/or `properties` JSON (U10's property panel
@@ -237,7 +486,12 @@ export interface CanvasState {
    * callers/tests that need to reset the flag without replacing `items`.) */
   markSaved: () => void
 
-  /** Sets the active drawing tool (U15/U16). Untracked by undo. */
+  /** Sets the active drawing tool (U15/U16). Untracked by undo. U8:
+   * entering the CROP tool also clears the selection (the plan's
+   * interaction default — crop is a canvas-level gesture, and a lingering
+   * selection would leave transformer chrome under the crop preview);
+   * handled here so every entry path (Sidebar tool button, future
+   * shortcuts) gets it for free. */
   setActiveTool: (tool: ActiveTool) => void
 
   /** U11: sets the Stage's zoom AND position together in one call — the
@@ -260,12 +514,89 @@ export interface CanvasState {
   resetZoom: () => void
 }
 
+/**
+ * U4's shared selection-expansion helper — THE mechanism behind the plan's
+ * "expansion at selection time" model: the click/dblclick/marquee handlers
+ * (`CanvasStage.tsx`) pass their raw hit ids through this before writing
+ * the selection, so `selectedItemIds` is always the LITERAL operand set and
+ * no consumer ever re-derives group membership. For each input id, if its
+ * item carries a `group_key` the WHOLE key-set joins the result (in `items`
+ * order — deterministic for the ordered-array selection contract);
+ * ungrouped/unknown ids pass through as themselves. Deduplicated, input
+ * order first. Pure and Konva-free; deliberately NOT called by anything in
+ * this store — double-click member-mode (a plain one-id selection of a
+ * grouped member) exists precisely because handlers can also choose NOT to
+ * expand.
+ */
+export function expandIdsByGroup(
+  ids: CanvasObject['id'][],
+  items: CanvasObject[],
+): CanvasObject['id'][] {
+  const result: CanvasObject['id'][] = []
+  const seen = new Set<CanvasObject['id']>()
+  const push = (id: CanvasObject['id']) => {
+    if (!seen.has(id)) {
+      seen.add(id)
+      result.push(id)
+    }
+  }
+  for (const id of ids) {
+    const key = items.find((item) => item.id === id)?.group_key
+    if (key != null) {
+      for (const member of items) {
+        if (member.group_key === key) push(member.id)
+      }
+    } else {
+      push(id)
+    }
+  }
+  return result
+}
+
+/**
+ * Pure z-reorder math backing
+ * `reorderZIndexItems` (batched): returns the next `items` array with every
+ * matched id renumbered contiguously above the current max (`'front'`) or
+ * below the current min (`'back'`) among ALL items, preserving the batch's
+ * own relative ordering (current `z_index`, then `id`). Returns `null` when
+ * there's nothing to do (no id matches any item, or fewer than 2 items) so
+ * the calling action can no-op without replacing the `items` reference —
+ * i.e. without pushing a history entry.
+ */
+function applyZIndexReorder(
+  items: CanvasObject[],
+  ids: CanvasObject['id'][],
+  direction: 'front' | 'back',
+): CanvasObject[] | null {
+  const idSet = new Set(ids)
+  const selected = items.filter((item) => idSet.has(item.id))
+  if (selected.length === 0 || items.length < 2) return null
+
+  const orderedSelected = [...selected].sort((a, b) => {
+    if (a.z_index !== b.z_index) return a.z_index - b.z_index
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+  })
+  const zIndexes = items.map((item) => item.z_index)
+  const base =
+    direction === 'front'
+      ? Math.max(...zIndexes) + 1
+      : Math.min(...zIndexes) - orderedSelected.length
+  const nextZIndexById = new Map<CanvasObject['id'], number>()
+  orderedSelected.forEach((item, index) => nextZIndexById.set(item.id, base + index))
+
+  return items.map((item) => {
+    const nextZIndex = nextZIndexById.get(item.id)
+    return nextZIndex === undefined ? item : { ...item, z_index: nextZIndex }
+  })
+}
+
 export const useCanvasStore = create<CanvasState>()(
   temporal(
     (set) => ({
       items: [],
-      selectedItemId: null,
-      activeTool: 'select',
+      selectedItemIds: [],
+      activeTool: 'pan',
+      canvasSize: null,
       zoom: 1,
       stagePosition: { x: 0, y: 0 },
       dirty: false,
@@ -288,16 +619,69 @@ export const useCanvasStore = create<CanvasState>()(
           return { serverIdMap: { ...merged, ...idMap } }
         }),
 
-      setItems: (items) => {
+      setItems: (items, canvasSize = null) => {
         // Server-driven re-baseline (see this action's doc comment on the
         // CanvasState interface above): never undoable, the canvas now
         // matches the server by definition (clear `dirty`), and item
         // identity comes straight from the server (reset `serverIdMap`).
+        // U8: the canvas dims seed rides the same paused set() — and the
+        // default `null` means the plan-switch reset's `setItems([])`
+        // clears any unsaved cropped dims along with the items.
         const temporalStore = useCanvasStore.temporal.getState()
         temporalStore.pause()
-        set({ items, dirty: false, serverIdMap: {} })
+        set({ items, canvasSize, dirty: false, serverIdMap: {} })
         temporalStore.resume()
       },
+
+      applyCrop: (rawRect) =>
+        set((state) => {
+          // Code-review fix: re-clamp against the CURRENT canvas at apply
+          // time — a pending region is plain UI state that survives
+          // undo/redo of canvasSize, so the rect captured at release time
+          // can be stale (e.g. a redo shrank the canvas while the confirm
+          // affordance was showing). Crop only ever trims: intersect with
+          // the live canvas and no-op on a degenerate result.
+          const current = state.canvasSize
+          if (!current) return {}
+          const x = Math.max(0, Math.min(rawRect.x, current.width))
+          const y = Math.max(0, Math.min(rawRect.y, current.height))
+          const rect = {
+            x,
+            y,
+            width: Math.min(rawRect.width, current.width - x),
+            height: Math.min(rawRect.height, current.height - y),
+          }
+          if (rect.width < 1 || rect.height < 1) return {}
+          return {
+          // ONE tracked set() replacing BOTH tracked references (see the
+          // action's interface doc): a single history entry restores dims
+          // and every coordinate together on undo.
+          items: state.items.map((item) => {
+            const rawPoints = item.properties.points
+            return {
+              ...item,
+              // Shifting x/y covers Lines' descriptive bbox metadata too —
+              // a rigid translation moves the points' bbox by the same
+              // delta.
+              x: item.x - rect.x,
+              y: item.y - rect.y,
+              ...(Array.isArray(rawPoints)
+                ? {
+                    properties: {
+                      ...item.properties,
+                      points: rawPoints.map((point: Point) => ({
+                        x: point.x - rect.x,
+                        y: point.y - rect.y,
+                      })),
+                    },
+                  }
+                : {}),
+            }
+          }),
+          canvasSize: { width: rect.width, height: rect.height },
+          dirty: true,
+          }
+        }),
 
       createItemLocal: (item) =>
         set((state) => ({
@@ -305,7 +689,67 @@ export const useCanvasStore = create<CanvasState>()(
           dirty: true,
         })),
 
-      selectItem: (id) => set({ selectedItemId: id }),
+      createItemsLocal: (items) =>
+        set((state) =>
+          items.length === 0
+            ? {}
+            : {
+                items: [...state.items, ...items],
+                dirty: true,
+              },
+        ),
+
+      replaceSelection: (ids) => set({ selectedItemIds: ids }),
+
+
+      toggleIdsInSelection: (ids) =>
+        set((state) => {
+          const selected = new Set(state.selectedItemIds)
+          const allSelected = ids.every((id) => selected.has(id))
+          return {
+            selectedItemIds: allSelected
+              ? state.selectedItemIds.filter((existing) => !ids.includes(existing))
+              : [...state.selectedItemIds, ...ids.filter((id) => !selected.has(id))],
+          }
+        }),
+
+      clearSelection: () => set({ selectedItemIds: [] }),
+
+      groupSelection: () =>
+        set((state) => {
+          const idSet = new Set(state.selectedItemIds)
+          const memberCount = state.items.reduce(
+            (count, item) => (idSet.has(item.id) ? count + 1 : count),
+            0,
+          )
+          // A group needs at least 2 real members — returning {} keeps the
+          // `items` reference, so no history entry and `dirty` untouched.
+          if (memberCount < 2) return {}
+          const groupKey = `group-${crypto.randomUUID()}`
+          return {
+            items: state.items.map((item) =>
+              idSet.has(item.id) ? { ...item, group_key: groupKey } : item,
+            ),
+            dirty: true,
+          }
+        }),
+
+      ungroupSelection: () =>
+        set((state) => {
+          const idSet = new Set(state.selectedItemIds)
+          const hasGroupedMember = state.items.some(
+            (item) => idSet.has(item.id) && item.group_key != null,
+          )
+          if (!hasGroupedMember) return {}
+          return {
+            items: state.items.map((item) =>
+              idSet.has(item.id) && item.group_key != null
+                ? { ...item, group_key: null }
+                : item,
+            ),
+            dirty: true,
+          }
+        }),
 
       updateItemGeometry: (id, patch) =>
         set((state) => ({
@@ -313,28 +757,76 @@ export const useCanvasStore = create<CanvasState>()(
           dirty: true,
         })),
 
-      deleteItem: (id) =>
-        set((state) => ({
-          items: state.items.filter((item) => item.id !== id),
-          selectedItemId: state.selectedItemId === id ? null : state.selectedItemId,
-          dirty: true,
-        })),
-
-      reorderZIndex: (id, direction) =>
+      updateItemsGeometry: (patches) =>
         set((state) => {
-          const item = state.items.find((candidate) => candidate.id === id)
-          if (!item || state.items.length < 2) return {}
-
-          const zIndexes = state.items.map((candidate) => candidate.z_index)
-          const nextZIndex =
-            direction === 'front' ? Math.max(...zIndexes) + 1 : Math.min(...zIndexes) - 1
-
+          const patchById = new Map<CanvasObject['id'], ItemGeometryPatch>()
+          for (const { id, patch } of patches) {
+            patchById.set(id, { ...patchById.get(id), ...patch })
+          }
+          if (!state.items.some((item) => patchById.has(item.id))) return {}
           return {
-            items: state.items.map((candidate) =>
-              candidate.id === id ? { ...candidate, z_index: nextZIndex } : candidate,
-            ),
+            items: state.items.map((item) => {
+              const patch = patchById.get(item.id)
+              if (!patch) return item
+              // U3: `points` isn't a top-level column — fold it into
+              // `properties.points` (same location `updateLinePoints`
+              // writes and `ObjectShape` renders from) inside this same
+              // single tracked set(). U7: `font_size` (a text member's
+              // transformer-resize fold) rides the same mechanism into
+              // `properties.font_size`.
+              const { points, font_size, ...geometry } = patch
+              const propertiesPatch = {
+                ...(points !== undefined ? { points } : {}),
+                ...(font_size !== undefined ? { font_size } : {}),
+              }
+              return {
+                ...item,
+                ...geometry,
+                ...(points !== undefined || font_size !== undefined
+                  ? { properties: { ...item.properties, ...propertiesPatch } }
+                  : {}),
+              }
+            }),
             dirty: true,
           }
+        }),
+
+
+      deleteItems: (ids) =>
+        set((state) => {
+          const idSet = new Set(ids)
+          let nextItems = state.items.filter((item) => !idSet.has(item.id))
+          if (nextItems.length === state.items.length) return {}
+          // Code-review fix: dissolve groups the deletion reduced to a
+          // single member — a one-member group is a state the UI can't
+          // otherwise create (groupSelection requires 2+), and it would
+          // persist as a junk key enabling Ungroup on a lone item. Same
+          // tracked set(), so delete + dissolve stay one history entry.
+          const survivorKeyCounts = new Map<string, number>()
+          for (const item of nextItems) {
+            if (item.group_key != null) {
+              survivorKeyCounts.set(item.group_key, (survivorKeyCounts.get(item.group_key) ?? 0) + 1)
+            }
+          }
+          if ([...survivorKeyCounts.values()].some((count) => count === 1)) {
+            nextItems = nextItems.map((item) =>
+              item.group_key != null && survivorKeyCounts.get(item.group_key) === 1
+                ? { ...item, group_key: null }
+                : item,
+            )
+          }
+          return {
+            items: nextItems,
+            selectedItemIds: state.selectedItemIds.filter((id) => !idSet.has(id)),
+            dirty: true,
+          }
+        }),
+
+
+      reorderZIndexItems: (ids, direction) =>
+        set((state) => {
+          const nextItems = applyZIndexReorder(state.items, ids, direction)
+          return nextItems ? { items: nextItems, dirty: true } : {}
         }),
 
       updateLinePoints: (id, pointIndex, point) =>
@@ -354,6 +846,47 @@ export const useCanvasStore = create<CanvasState>()(
             dirty: true,
           }
         }),
+
+      updateItemText: (id, text, size) =>
+        set((state) => {
+          const item = state.items.find((candidate) => candidate.id === id)
+          if (!item) return {}
+          return {
+            items: state.items.map((candidate) =>
+              candidate.id === id
+                ? {
+                    ...candidate,
+                    width: size.width,
+                    height: size.height,
+                    properties: { ...candidate.properties, text },
+                  }
+                : candidate,
+            ),
+            dirty: true,
+          }
+        }),
+
+      updateItemTextStyling: (id, properties, size) => {
+        // Untracked like `updateItemProperties` (R15 — styling edits push
+        // no history entry), via the same pause()/resume() bracket; the
+        // mirrored box update rides the same set() so the box can never
+        // drift from the styling that produced it.
+        const temporalStore = useCanvasStore.temporal.getState()
+        temporalStore.pause()
+        set((state) => {
+          const item = state.items.find((candidate) => candidate.id === id)
+          if (!item) return {}
+          return {
+            items: state.items.map((candidate) =>
+              candidate.id === id
+                ? { ...candidate, width: size.width, height: size.height, properties }
+                : candidate,
+            ),
+            dirty: true,
+          }
+        })
+        temporalStore.resume()
+      },
 
       updateItemProperties: (id, patch) => {
         // Suspend zundo tracking for exactly this set() call (R15: property
@@ -380,7 +913,18 @@ export const useCanvasStore = create<CanvasState>()(
 
       markSaved: () => set({ dirty: false }),
 
-      setActiveTool: (tool) => set({ activeTool: tool }),
+      setActiveTool: (tool) =>
+        // U8: entering the crop tool clears the selection (see the
+        // interface doc). `'pan'` clears it too: pan is the "no tool
+        // engaged" idle mode — the canvas doesn't respond to clicks there,
+        // so leaving a live selection behind would strand a transformer
+        // the user can't interact with. Neither key touches
+        // `items`/`canvasSize`, so no history entry either way.
+        set(
+          tool === 'crop' || tool === 'pan'
+            ? { activeTool: tool, selectedItemIds: [] }
+            : { activeTool: tool },
+        ),
 
       setZoomAndPosition: (zoom, position) => set({ zoom: clampZoom(zoom), stagePosition: position }),
 
@@ -395,21 +939,40 @@ export const useCanvasStore = create<CanvasState>()(
       resetZoom: () => set({ zoom: 1, stagePosition: { x: 0, y: 0 } }),
     }),
     {
-      // Only `items` is part of the tracked/restorable snapshot — undo()/
-      // redo() never touch selectedItemId, activeTool, zoom/pan, or dirty.
-      partialize: (state) => ({ items: state.items }),
-      // Reference equality on `items` is sufficient for the actions that
-      // rely on it: selectItem/setActiveTool/markSaved and the zoom/pan
-      // actions never reassign `items`, so its reference is unchanged
-      // across those calls and no entry is created. createItemLocal,
-      // updateItemGeometry, deleteItem, reorderZIndex, and updateLinePoints
-      // always build a new `items` array, so those do produce an entry.
-      // `setItems` and `updateItemProperties` ALSO build a new `items`
-      // array reference but are kept out of history via
+      // `items` AND `canvasSize` (U8) form the tracked/restorable snapshot —
+      // undo()/redo() never touch selectedItemIds, activeTool, zoom/pan, or
+      // dirty. (Selection stays out per the institutional invariant: a
+      // traversal must never restore a stale selection; the exported
+      // undo()/redo() wrappers below prune dead ids from it instead.
+      // `canvasSize` joins because a crop changes dims and coordinates as
+      // ONE user action — restoring one without the other would tear the
+      // document apart.)
+      partialize: (state) => ({ items: state.items, canvasSize: state.canvasSize }),
+      // Reference equality on BOTH tracked keys is sufficient for the
+      // actions that rely on it: the selection actions (replaceSelection/
+      // toggleIdsInSelection/clearSelection),
+      // setActiveTool, markSaved, and
+      // the zoom/pan actions never reassign `items` or `canvasSize`, so
+      // both references are
+      // unchanged across those calls and no entry is created.
+      // createItemLocal/createItemsLocal (U5's batched paste commit),
+      // updateItemGeometry/updateItemsGeometry,
+      // deleteItem/deleteItems, reorderZIndex/reorderZIndexItems,
+      // updateLinePoints, groupSelection/ungroupSelection (U4),
+      // updateItemText (U7's tracked content commit), and applyCrop (U8 —
+      // the one action that replaces BOTH references)
+      // always build a new `items` array, so those do
+      // produce an entry (the batched variants deliberately in ONE set()
+      // each — one history entry per gesture, however many items it
+      // touched). `setItems`, `updateItemProperties`, and U7's
+      // `updateItemTextStyling` ALSO build a new
+      // `items` array reference (and `setItems` reseeds `canvasSize`) but
+      // are kept out of history via
       // `temporal.pause()`/`resume()` instead of relying on this equality
       // check, since reference equality alone can't distinguish "a real
       // user action" from "a server resync"/"a property edit."
-      equality: (past, current) => past.items === current.items,
+      equality: (past, current) =>
+        past.items === current.items && past.canvasSize === current.canvasSize,
     },
   ),
 )
@@ -425,19 +988,53 @@ export const useCanvasStore = create<CanvasState>()(
  * no-op traversal, e.g. undo with an empty history, leave `dirty` alone).
  * `dirty` lives outside `partialize`, so setting it here pushes no history
  * entry of its own (`equality` sees the same `items` reference).
+ *
+ * U1 (canvas-tools): an effective traversal also PRUNES the selection —
+ * any selected id absent from the restored `items` (e.g. undoing a create,
+ * or redoing a delete, of a selected item) is dropped, closing the
+ * stale-selection class (ghost selections enabling z-order buttons or
+ * feeding Delete a nonexistent id) before it can ship. Pruning is the only
+ * way a traversal touches `selectedItemIds`: it never restores an old
+ * selection (selection is untracked, outside `partialize`), and like
+ * `dirty` the write here pushes no history entry of its own.
  */
+function markDirtyAndPruneSelection(): void {
+  const { items, selectedItemIds } = useCanvasStore.getState()
+  const prunedSelection = selectedItemIds.filter((id) =>
+    items.some((item) => item.id === id),
+  )
+  useCanvasStore.setState({
+    dirty: true,
+    ...(prunedSelection.length !== selectedItemIds.length
+      ? { selectedItemIds: prunedSelection }
+      : {}),
+  })
+}
+
+/** U8: true when a traversal actually changed the tracked snapshot — the
+ * dirty/prune trigger must cover EITHER tracked reference changing, since a
+ * dims-only entry (canvasSize replaced, items untouched) still leaves the
+ * canvas diverged from the last saved state. */
+function trackedSnapshotChanged(
+  beforeItems: CanvasObject[],
+  beforeCanvasSize: CanvasSize | null,
+): boolean {
+  const { items, canvasSize } = useCanvasStore.getState()
+  return items !== beforeItems || canvasSize !== beforeCanvasSize
+}
+
 export function undo(): void {
-  const before = useCanvasStore.getState().items
+  const { items: beforeItems, canvasSize: beforeCanvasSize } = useCanvasStore.getState()
   useCanvasStore.temporal.getState().undo()
-  if (useCanvasStore.getState().items !== before) {
-    useCanvasStore.setState({ dirty: true })
+  if (trackedSnapshotChanged(beforeItems, beforeCanvasSize)) {
+    markDirtyAndPruneSelection()
   }
 }
 
 export function redo(): void {
-  const before = useCanvasStore.getState().items
+  const { items: beforeItems, canvasSize: beforeCanvasSize } = useCanvasStore.getState()
   useCanvasStore.temporal.getState().redo()
-  if (useCanvasStore.getState().items !== before) {
-    useCanvasStore.setState({ dirty: true })
+  if (trackedSnapshotChanged(beforeItems, beforeCanvasSize)) {
+    markDirtyAndPruneSelection()
   }
 }

@@ -33,6 +33,12 @@ class Objects(models.Model):
         LINE_STRAIGHT = 'line_straight', 'Line: Straight'
         LINE_CURVED = 'line_curved', 'Line: Curved'
         LINE_S_CURVE = 'line_s_curve', 'Line: S-Curve'
+        # Text type (U7, canvas-tools): first-class auto-sizing text label.
+        # Requires a string `properties.text` (serializer-enforced, like the
+        # line rules); whole-object styling rides `properties`
+        # ({font_family, font_size, bold, italic, color}) and the row's
+        # width/height MIRROR the client's auto-sized text box.
+        TEXT = 'text', 'Text'
 
     floor_plan = models.ForeignKey(FloorPlan, on_delete=models.CASCADE, related_name='items')
     type = models.CharField(max_length=20, choices=ObjectType.choices)
@@ -49,6 +55,15 @@ class Objects(models.Model):
     # Type-specific data (e.g. wall thickness, desk seat count, AC unit BTU,
     # Line points/curve_style, Shape kind-specific sizing)
     properties = models.JSONField(default=dict, blank=True)
+
+    # U4 (canvas-tools): persistent-group membership tag. An OPAQUE,
+    # CLIENT-generated identity (`group-<uuid4>`, ~42 chars) shared by every
+    # member of one flat group — a plain writable passthrough with no
+    # server-side ownership semantics, no FK, and never server-assigned
+    # (client-generated identity keeps group keys valid inside frontend undo
+    # snapshots with zero id-map involvement). NULL means ungrouped. Scoped,
+    # like every field here, to the owning floor plan's own objects.
+    group_key = models.CharField(max_length=64, null=True, blank=True, db_index=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

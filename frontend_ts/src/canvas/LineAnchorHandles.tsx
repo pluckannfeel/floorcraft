@@ -10,6 +10,12 @@ import type { CanvasObject, Point } from './types'
  * (Lines have no width/height "box" to resize — see `ObjectShape.tsx`'s
  * Line branch and the plan's Key Technical Decisions).
  *
+ * U1 (canvas-tools): with the selection now a set, `CanvasStage` renders
+ * this component only when EXACTLY ONE item is selected and it's a Line —
+ * a multi-selection containing lines routes to `SelectionTransformer`
+ * instead (a no-op attach in U1, true multi-node transform from U3), so
+ * anchor-point editing remains a single-line affordance.
+ *
  * Each circle is positioned at the point's own absolute canvas coordinates
  * (matching the underlying `Konva.Line`'s own points, which are absolute —
  * the `Line` node's `x`/`y` stays at the Group's origin, never transformed

@@ -1,7 +1,15 @@
 import type Konva from 'konva'
 import { describe, expect, it } from 'vitest'
-import { MIN_ITEM_SIZE } from './coordinates'
-import { computeGeometryFromTransform, resolveTransformerNodes } from './SelectionTransformer'
+import { getRotatedBoundingBox, MIN_ITEM_SIZE } from './coordinates'
+import {
+  computeGeometryFromTransform,
+  computeTransformCommit,
+  isPersistentGroupSelection,
+  resolveTransformerNodes,
+} from './SelectionTransformer'
+import type { TransformSnapshot } from './SelectionTransformer'
+import { MIN_TEXT_FONT_SIZE } from './TextTool'
+import type { CanvasObject } from './types'
 
 /**
  * `SelectionTransformer` wraps Konva's `Transformer`, which requires a real
@@ -121,18 +129,35 @@ describe('resolveTransformerNodes', () => {
 
   it('resolves an empty array when nothing is selected', () => {
     const getNode = () => fakeNode('a')
-    expect(resolveTransformerNodes(null, getNode)).toEqual([])
+    expect(resolveTransformerNodes([], getNode)).toEqual([])
   })
 
-  it('resolves a single-element array for the selected id', () => {
+  it('resolves a single-element array for an exactly-one selection', () => {
     const nodeA = fakeNode('a')
     const getNode = (id: string | number) => (id === 'a' ? nodeA : undefined)
-    expect(resolveTransformerNodes('a', getNode)).toEqual([nodeA])
+    expect(resolveTransformerNodes(['a'], getNode)).toEqual([nodeA])
   })
 
   it('resolves an empty array when the selected id has no registered node', () => {
     const getNode = () => undefined
-    expect(resolveTransformerNodes('missing', getNode)).toEqual([])
+    expect(resolveTransformerNodes(['missing'], getNode)).toEqual([])
+  })
+
+  it('resolves EVERY selected node for a multi-selection, in selection order (U3 multi-node transformer)', () => {
+    const nodeA = fakeNode('a')
+    const nodeB = fakeNode('b')
+    const nodes = new Map<string | number, Konva.Node>([
+      ['a', nodeA],
+      ['b', nodeB],
+    ])
+    const getNode = (id: string | number) => nodes.get(id)
+    expect(resolveTransformerNodes(['b', 'a'], getNode)).toEqual([nodeB, nodeA])
+  })
+
+  it('skips unregistered ids inside a multi-selection instead of dropping the whole attach', () => {
+    const nodeA = fakeNode('a')
+    const getNode = (id: string | number) => (id === 'a' ? nodeA : undefined)
+    expect(resolveTransformerNodes(['missing', 'a'], getNode)).toEqual([nodeA])
   })
 
   it('switching selection resolves the new node only, not the old one (detach-then-attach)', () => {
@@ -144,11 +169,282 @@ describe('resolveTransformerNodes', () => {
     ])
     const getNode = (id: string | number) => nodes.get(id)
 
-    const first = resolveTransformerNodes('a', getNode)
+    const first = resolveTransformerNodes(['a'], getNode)
     expect(first).toEqual([nodeA])
 
-    const second = resolveTransformerNodes('b', getNode)
+    const second = resolveTransformerNodes(['b'], getNode)
     expect(second).toEqual([nodeB])
     expect(second).not.toContain(nodeA)
+  })
+})
+
+// U3: the pure multi-node `transformend` commit math — the component reads
+// each attached node into a `MemberTransformState` and delegates every
+// decision here, so the whole decomposition is jsdom-testable.
+describe('computeTransformCommit', () => {
+  it('folds each BOX member\'s scale into its own width/height (AE2 multi-resize)', () => {
+    const patches = computeTransformCommit([
+      {
+        id: 'a',
+        snapshot: { x: 0, y: 0, width: 40, height: 40, scaleX: 2, scaleY: 1.5, rotation: 0 },
+      },
+      {
+        id: 'b',
+        snapshot: { x: 100, y: 50, width: 80, height: 20, scaleX: 2, scaleY: 1.5, rotation: 0 },
+      },
+    ])
+
+    expect(patches).toEqual([
+      { id: 'a', patch: { x: 0, y: 0, width: 80, height: 60, rotation: 0 } },
+      { id: 'b', patch: { x: 100, y: 50, width: 160, height: 30, rotation: 0 } },
+    ])
+  })
+
+  it("scales a LINE member's points proportionally and recomputes its bbox metadata (AE2)", () => {
+    // The Line node ended the transform translated to (10, 20) and scaled
+    // (2, 0.5); its pre-bake points are still the store's absolute points.
+    const [patch] = computeTransformCommit([
+      {
+        id: 'wall',
+        snapshot: { x: 10, y: 20, width: 0, height: 0, scaleX: 2, scaleY: 0.5, rotation: 0 },
+        linePoints: [
+          { x: 100, y: 100 },
+          { x: 200, y: 300 },
+        ],
+      },
+    ])
+
+    expect(patch.id).toBe('wall')
+    expect(patch.patch.points).toEqual([
+      { x: 210, y: 70 },
+      { x: 410, y: 170 },
+    ])
+    // Segment deltas scaled by exactly (2, 0.5): proportional, not skewed.
+    expect(patch.patch).toMatchObject({ x: 210, y: 70, width: 200, height: 100 })
+  })
+
+  it('clamps each member to the minimum size independently during a group scale-down', () => {
+    const patches = computeTransformCommit([
+      // 100px wide: 100 * 0.2 = 20 — above MIN_ITEM_SIZE, folds normally.
+      { id: 'big', snapshot: { x: 0, y: 0, width: 100, height: 100, scaleX: 0.2, scaleY: 0.2, rotation: 0 } },
+      // 20px wide: 20 * 0.2 = 4 — below MIN_ITEM_SIZE, clamps to 10.
+      { id: 'small', snapshot: { x: 50, y: 50, width: 20, height: 20, scaleX: 0.2, scaleY: 0.2, rotation: 0 } },
+    ])
+
+    expect(patches[0].patch).toMatchObject({ width: 20, height: 20 })
+    expect(patches[1].patch).toMatchObject({ width: MIN_ITEM_SIZE, height: MIN_ITEM_SIZE })
+  })
+
+  it('a ROTATED member keeps its visual position through the decomposition (pure numeric check)', () => {
+    // A 40x60 member at 30° that ends a group transform scaled (1.5, 2):
+    // BEFORE the bake, Konva renders it as a 40x60 rect with scale (1.5, 2)
+    // at rotation 30° — visually identical to a 60x120 rect at the same
+    // x/y/rotation with scale 1 (Konva applies scale innermost). The folded
+    // patch must therefore produce the exact same rotated bounding box.
+    const snapshot = { x: 120, y: 80, width: 40, height: 60, scaleX: 1.5, scaleY: 2, rotation: 30 }
+    const [{ patch }] = computeTransformCommit([{ id: 'rotated', snapshot }])
+
+    const visualBoxBeforeBake = getRotatedBoundingBox(
+      { x: snapshot.x, y: snapshot.y },
+      snapshot.width * snapshot.scaleX,
+      snapshot.height * snapshot.scaleY,
+      snapshot.rotation,
+    )
+    const visualBoxAfterBake = getRotatedBoundingBox(
+      { x: patch.x ?? 0, y: patch.y ?? 0 },
+      patch.width ?? 0,
+      patch.height ?? 0,
+      patch.rotation ?? 0,
+    )
+
+    expect(visualBoxAfterBake.x).toBeCloseTo(visualBoxBeforeBake.x)
+    expect(visualBoxAfterBake.y).toBeCloseTo(visualBoxBeforeBake.y)
+    expect(visualBoxAfterBake.width).toBeCloseTo(visualBoxBeforeBake.width)
+    expect(visualBoxAfterBake.height).toBeCloseTo(visualBoxBeforeBake.height)
+    expect(patch.rotation).toBe(30)
+  })
+
+  it('a mixed box+line selection produces one patch per member, in member order', () => {
+    const patches = computeTransformCommit([
+      { id: 'box', snapshot: { x: 0, y: 0, width: 40, height: 40, scaleX: 1, scaleY: 1, rotation: 0 } },
+      {
+        id: 'line',
+        snapshot: { x: 0, y: 0, width: 0, height: 0, scaleX: 1, scaleY: 1, rotation: 0 },
+        linePoints: [
+          { x: 1, y: 2 },
+          { x: 3, y: 4 },
+        ],
+      },
+    ])
+
+    expect(patches.map((entry) => entry.id)).toEqual(['box', 'line'])
+    expect(patches[0].patch.points).toBeUndefined()
+    expect(patches[1].patch.points).toEqual([
+      { x: 1, y: 2 },
+      { x: 3, y: 4 },
+    ])
+  })
+
+  it('a degenerate 0-point line member commits empty points without bbox metadata (no NaN/Infinity)', () => {
+    const [{ patch }] = computeTransformCommit([
+      {
+        id: 'empty',
+        snapshot: { x: 5, y: 5, width: 0, height: 0, scaleX: 2, scaleY: 2, rotation: 0 },
+        linePoints: [],
+      },
+    ])
+
+    expect(patch.points).toEqual([])
+    expect(patch.x).toBeUndefined()
+    expect(patch.width).toBeUndefined()
+  })
+})
+
+// U4: the selection-visual discriminator behind the transformer's dashed
+// border — pure, so it's tested here like every other Konva-free helper in
+// this file (the borderDash/borderStroke props themselves are thin plumbing
+// per the module doc above).
+describe('isPersistentGroupSelection (U4)', () => {
+  function makeObject(overrides: Partial<CanvasObject> = {}): CanvasObject {
+    return {
+      id: 'a',
+      floor_plan: 1,
+      type: 'chairs',
+      name: '',
+      x: 0,
+      y: 0,
+      width: 40,
+      height: 40,
+      rotation: 0,
+      z_index: 0,
+      properties: {},
+      ...overrides,
+    }
+  }
+
+  const objects = [
+    makeObject({ id: 'a', group_key: 'group-1' }),
+    makeObject({ id: 'b', group_key: 'group-1' }),
+    makeObject({ id: 'c', group_key: 'group-2' }),
+    makeObject({ id: 'loose' }),
+  ]
+
+  it('true for a whole persistent group (2+ ids, one shared non-null key) — dashed border', () => {
+    expect(isPersistentGroupSelection(['a', 'b'], objects)).toBe(true)
+  })
+
+  it('false for an ad-hoc multi-select of loose items — solid border', () => {
+    expect(isPersistentGroupSelection(['loose', 'c'], objects)).toBe(false)
+  })
+
+  it('false for a mixed selection (group + loose item, or two different groups)', () => {
+    expect(isPersistentGroupSelection(['a', 'b', 'loose'], objects)).toBe(false)
+    expect(isPersistentGroupSelection(['a', 'b', 'c'], objects)).toBe(false)
+  })
+
+  it('false for single selections — member-mode has its own cue in CanvasStage', () => {
+    expect(isPersistentGroupSelection(['a'], objects)).toBe(false)
+    expect(isPersistentGroupSelection([], objects)).toBe(false)
+  })
+
+  it('false when a selected id resolves to no object (mid-delete race)', () => {
+    expect(isPersistentGroupSelection(['a', 'ghost'], objects)).toBe(false)
+  })
+})
+
+// U7: the TEXT member special case in the transformend decomposition —
+// resize folds min(scaleX, scaleY) into `font_size` (never a width/height
+// box-stretch) and remeasures the mirrored box through the injectable
+// measurer (jsdom can't run Konva's canvas-backed measurement).
+describe('computeTransformCommit text members (U7)', () => {
+  // Deliberately NOT proportional to the snapshot box (width from the
+  // text length, height with a 1.25 line factor) so a naive
+  // box-stretch commit could never accidentally produce these numbers.
+  const stubMeasurer = (text: string, styling: { font_size: number }) => ({
+    width: text.length * styling.font_size * 0.5,
+    height: styling.font_size * 1.25,
+  })
+
+  function textMember(snapshot: Partial<TransformSnapshot> = {}) {
+    return {
+      id: 'text-1',
+      snapshot: {
+        x: 100,
+        y: 80,
+        width: 96,
+        height: 16,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0,
+        ...snapshot,
+      },
+      text: {
+        text: 'Kitchen',
+        font_family: 'Arial',
+        font_size: 16,
+        bold: false,
+        italic: false,
+        color: '#111827',
+      },
+    }
+  }
+
+  it('folds min(scaleX, scaleY) into font_size — NOT into a width/height stretch — and mirrors the remeasured box', () => {
+    const [{ patch }] = computeTransformCommit(
+      [textMember({ scaleX: 2, scaleY: 1.5 })],
+      undefined,
+      stubMeasurer,
+    )
+
+    // min(2, 1.5) = 1.5 → 16 * 1.5 = 24.
+    expect(patch.font_size).toBe(24)
+    // width/height are the MEASURED box at the new font size ('Kitchen' =
+    // 7 chars * 24 * 0.5; height 24 * 1.25), not the old 96x16 box scaled
+    // by (2, 1.5) — i.e. not 192x24.
+    expect(patch.width).toBe(84)
+    expect(patch.height).toBe(30)
+    expect(patch.width).not.toBe(96 * 2)
+    expect(patch.height).not.toBe(16 * 1.5)
+  })
+
+  it('passes x/y/rotation through unchanged (position/rotation still commit like any box)', () => {
+    const [{ patch }] = computeTransformCommit(
+      [textMember({ x: 12, y: 34, rotation: 45, scaleX: 1, scaleY: 1 })],
+      undefined,
+      stubMeasurer,
+    )
+
+    expect(patch.x).toBe(12)
+    expect(patch.y).toBe(34)
+    expect(patch.rotation).toBe(45)
+    expect(patch.font_size).toBe(16) // scale 1 → unchanged
+  })
+
+  it('clamps the folded font_size at MIN_TEXT_FONT_SIZE on an extreme scale-down', () => {
+    const [{ patch }] = computeTransformCommit(
+      [textMember({ scaleX: 0.01, scaleY: 0.01 })],
+      undefined,
+      stubMeasurer,
+    )
+
+    expect(patch.font_size).toBe(MIN_TEXT_FONT_SIZE)
+  })
+
+  it('a mixed text+box selection folds each member by its own rule', () => {
+    const patches = computeTransformCommit(
+      [
+        textMember({ scaleX: 2, scaleY: 2 }),
+        {
+          id: 'box-1',
+          snapshot: { x: 0, y: 0, width: 40, height: 40, scaleX: 2, scaleY: 2, rotation: 0 },
+        },
+      ],
+      undefined,
+      stubMeasurer,
+    )
+
+    expect(patches[0].patch.font_size).toBe(32)
+    expect(patches[1].patch).toEqual({ x: 0, y: 0, width: 80, height: 80, rotation: 0 })
+    expect(patches[1].patch.font_size).toBeUndefined()
   })
 })

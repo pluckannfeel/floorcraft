@@ -62,17 +62,24 @@ class ObjectSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'floor_plan', 'type', 'name',
             'x', 'y', 'width', 'height', 'rotation', 'z_index',
-            'properties', 'created_at', 'updated_at',
+            # `group_key` (U4) is a plain writable passthrough: an opaque
+            # client-generated grouping tag (see models.py) with no
+            # ownership semantics of its own — plan-level ownership already
+            # gates every write path, and the key means nothing outside the
+            # plan's own objects. SyncObjectSerializer inherits it.
+            'properties', 'group_key', 'created_at', 'updated_at',
         ]
 
     def validate(self, attrs):
-        """Validate `properties` against the selected `type` (R21/R22/R24/R27):
-        Lines require a `points` array (curved lines also require a
-        `curve_style`); Shapes accept kind-specific sizing in `properties`
-        beyond the shared width/height/rotation fields, with no additional
-        required keys enforced here. (Ownership of the referenced
-        `floor_plan` is enforced at the field level — see
-        OwnedFloorPlanField.)
+        """Validate `properties` against the selected `type` (R21/R22/R24/R27,
+        and U7's text rule): Lines require a `points` array (curved lines
+        also require a `curve_style`); Text objects require a string
+        `properties.text` (the text content IS the object's substance — an
+        item without it has nothing to render or edit); Shapes accept
+        kind-specific sizing in `properties` beyond the shared
+        width/height/rotation fields, with no additional required keys
+        enforced here. (Ownership of the referenced `floor_plan` is enforced
+        at the field level — see OwnedFloorPlanField.)
         """
         obj_type = attrs.get('type', getattr(self.instance, 'type', None))
         properties = attrs.get('properties', getattr(self.instance, 'properties', None))
@@ -82,7 +89,25 @@ class ObjectSerializer(serializers.ModelSerializer):
         if obj_type in LINE_TYPES:
             self._validate_line_properties(obj_type, properties)
 
+        if obj_type == Objects.ObjectType.TEXT:
+            self._validate_text_properties(properties)
+
         return attrs
+
+    def _validate_text_properties(self, properties):
+        """U7: mirrors `_validate_line_properties`' pattern for the `text`
+        type — the styling keys ({font_family, font_size, bold, italic,
+        color}) are deliberately NOT required (the frontend defaults any
+        missing one), but the content itself must be a real string.
+        """
+        if not isinstance(properties, dict):
+            raise serializers.ValidationError({
+                'properties': 'Text objects require a properties object.',
+            })
+        if not isinstance(properties.get('text'), str):
+            raise serializers.ValidationError({
+                'properties': "Text objects require a string 'text' value.",
+            })
 
     def _validate_line_properties(self, obj_type, properties):
         if not isinstance(properties, dict):
