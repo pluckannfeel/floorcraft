@@ -127,6 +127,17 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# Media (uploaded user files, U1 of object-visuals)
+# https://docs.djangoproject.com/en/5.2/ref/settings/#media-root
+#
+# docker-compose already mounts ./volumes/media at /app/media (== BASE_DIR /
+# 'media' inside the container), so default FileSystemStorage lands uploads
+# on the pre-provisioned volume. Deliberately NO MEDIA_URL-based public
+# serving: variant files stream through an authenticated, owner-scoped API
+# view (U3) — a public /media/ path would bypass ownership entirely.
+
+MEDIA_ROOT = BASE_DIR / 'media'
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 

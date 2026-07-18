@@ -1,3 +1,5 @@
+import uuid
+
 from django.conf import settings
 from django.db import models
 
@@ -70,3 +72,90 @@ class Objects(models.Model):
 
     def __str__(self):
         return f'{self.get_type_display()} ({self.x}, {self.y})'
+
+
+def variant_upload_to(instance, filename):
+    """Storage path for an ObjectVariant's file (U1, object-visuals).
+
+    `uploads/user_<owner_id>/<uuid4hex>.<ext>` — the extension derives from
+    the row's sniffed `kind`, NEVER from the client-supplied filename
+    (`filename` is deliberately ignored: user filenames are untrusted and
+    live only in `original_name` for display). Keys off `instance.owner_id`
+    because upload_to runs BEFORE the row is saved — the variant's own pk
+    does not exist yet, but the owner is already a persisted user. UUID
+    names make files non-guessable and immutable-cacheable (U3), and can
+    never collide with or overwrite another upload.
+    """
+    return f'uploads/user_{instance.owner_id}/{uuid.uuid4().hex}.{instance.kind}'
+
+
+class ObjectVariant(models.Model):
+    """A user's uploaded per-type visual (U1, object-visuals; R6-R9).
+
+    Personal, cross-plan catalog entries: each row is one uploaded SVG/PNG/
+    JPEG a user can place on any of their plans as a variant of one of the
+    7 built-in catalog types. Placed canvas objects reference a variant by
+    its id inside their `properties` JSON — an OPAQUE reference with no FK
+    from Objects, the `group_key` precedent: rendering fails closed to the
+    type's default symbol on a dangling/foreign reference, so referential
+    integrity is deliberately not a database concern.
+    """
+
+    class Kind(models.TextChoices):
+        # The sniffed (magic-byte-verified, U2) content kind — never the
+        # client's claimed extension or Content-Type.
+        SVG = 'svg', 'SVG'
+        PNG = 'png', 'PNG'
+        JPEG = 'jpeg', 'JPEG'
+
+    # The 7 catalog types ONLY (reused from the Objects taxonomy). Shape/
+    # line/text types are excluded by design: variants attach to catalog
+    # cards in the sidebar; shapes/lines/text have no variant UI (plan
+    # Scope Boundaries: "shapes/lines/text untouched").
+    CATALOG_TYPE_CHOICES = [
+        (Objects.ObjectType.OUTLINES.value, Objects.ObjectType.OUTLINES.label),
+        (Objects.ObjectType.TABLES.value, Objects.ObjectType.TABLES.label),
+        (Objects.ObjectType.DOORS.value, Objects.ObjectType.DOORS.label),
+        (Objects.ObjectType.CHAIRS.value, Objects.ObjectType.CHAIRS.label),
+        (Objects.ObjectType.FURNITURES.value, Objects.ObjectType.FURNITURES.label),
+        (Objects.ObjectType.APPLIANCES.value, Objects.ObjectType.APPLIANCES.label),
+        (Objects.ObjectType.LIGHTING.value, Objects.ObjectType.LIGHTING.label),
+    ]
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='object_variants')
+    object_type = models.CharField(max_length=20, choices=CATALOG_TYPE_CHOICES)
+
+    # FileField, not ImageField — Pillow cannot parse SVG, and content
+    # validation is the U2 pipeline's job, not the storage field's.
+    file = models.FileField(upload_to=variant_upload_to, max_length=255)
+    kind = models.CharField(max_length=4, choices=Kind.choices)
+
+    # Natural (intrinsic) dimensions recorded by the U2 pipeline — rasters
+    # post-re-encode, SVGs normalized from the viewBox. The frontend's
+    # aspect-fit drop math reads these synchronously so image-load
+    # completion never has to touch the canvas store.
+    width = models.PositiveIntegerField()
+    height = models.PositiveIntegerField()
+
+    # Authoritative POST-pipeline size of the stored file. Rasters are
+    # re-encoded through Pillow and SVGs are rewritten by svg-hush (U2), so
+    # the upload's own byte count is NOT what lands on disk — the R19
+    # per-user byte quota aggregates this column, and it must match storage.
+    size_bytes = models.PositiveBigIntegerField()
+
+    # Display only (thumbnails/tooltips, R12) — length-capped and
+    # control-character-stripped at ingestion by U2. Never used for the
+    # storage path (see variant_upload_to).
+    original_name = models.CharField(max_length=255)
+
+    # Soft delete IS the R11 mechanism: destroy flips this flag, hiding the
+    # variant from the catalog list, while the owner-scoped file endpoint
+    # keeps serving it — placed objects and historical undo snapshots keep
+    # rendering forever. Files are never removed from disk in v1, and
+    # inactive rows still count toward the R19 quota (retention stance).
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'{self.original_name} ({self.get_object_type_display()}, user {self.owner_id})'
