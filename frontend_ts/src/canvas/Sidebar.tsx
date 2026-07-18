@@ -165,12 +165,11 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
     <aside aria-label="Object catalog" className="w-[180px] overflow-y-auto border-r p-3">
       {/* U9 tool strip. Selecting a tool sets `activeTool` (the draw tools
           watch it from ShapeTool/LineTool/TextTool/CropTool via
-          CanvasStage); clicking the already-active tool toggles back to
-          `'select'` so a tool can be cancelled without drawing anything —
-          the exact behavior these buttons had in `Toolbar.tsx`. The active
+          CanvasStage); clicking the already-active tool toggles back to the
+          idle `'pan'` mode (canvas-tools follow-up) so a tool can be
+          cancelled — a plain drag then navigates the canvas. The active
           tool is signalled via the filled `default` variant (plus
-          `aria-pressed`); the explicit Select button is simply the tool
-          whose toggle-off target is itself. */}
+          `aria-pressed`); `'pan'` leads the list as that idle home. */}
       <h2 className="mb-2 text-sm font-medium">Tools</h2>
       <div className="mb-4 flex flex-col gap-1">
         {TOOL_BUTTONS.map(({ type, label, Icon }) => {

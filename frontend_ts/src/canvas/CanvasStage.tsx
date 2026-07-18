@@ -856,10 +856,13 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   const textToolActive = isTextType(activeTool)
   const croppingTool = activeTool === 'crop'
   // The idle "no tool engaged" mode (canvas-tools follow-up): a plain drag
-  // navigates, exactly like Space+drag from any other mode. Deselecting any
-  // tool lands here, so it must behave like Space-held: the Stage is
-  // draggable and the objects layer stops listening (a drag starting over
-  // an object pans instead of moving it).
+  // navigates, exactly like Space+drag from any other mode (the Stage is
+  // draggable via `stageDraggable` below). Unlike Space-held, the objects
+  // layer KEEPS listening — a click still selects an object and engages the
+  // select tool (`onActivateSelectTool`); it's each object's
+  // `draggable={!panTool}=false` that makes a press-DRAG over one pan
+  // instead of move it, so a press either pans or a click selects, never
+  // both.
   const panTool = activeTool === 'pan'
 
   // U2: plain drag on empty canvas is the marquee now; panning is

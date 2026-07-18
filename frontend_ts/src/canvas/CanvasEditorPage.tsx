@@ -585,7 +585,13 @@ export function CanvasEditorPage() {
         { text: "", ...DEFAULT_TEXT_STYLING },
       );
       setTextEditor({ planId: floorPlan.id, mode: "create", draft });
-      setActiveTool("pan");
+      // Resets to 'select', NOT 'pan': the overlay's commit re-selects the
+      // new text object, and a live selection in the idle pan mode is the
+      // stranded, half-interactive state setActiveTool's pan/crop clear is
+      // built to prevent (handles draw over an object you can't body-drag
+      // or empty-click to deselect). Matches the shape/line one-shot tools,
+      // which likewise end with their new object selected.
+      setActiveTool("select");
     },
     [floorPlanQuery.data, buildLocalObject, setActiveTool],
   );

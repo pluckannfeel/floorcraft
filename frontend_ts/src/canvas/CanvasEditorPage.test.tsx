@@ -542,6 +542,14 @@ describe('text tool create flow (diagnostic)', () => {
       expect(items[0].type).toBe('text')
       expect(items[0].properties.text).toBe('Meeting Room')
     })
+
+    // Ends in 'select' with the new object selected — NOT 'pan' with a
+    // stranded selection (review finding): a selection in the idle pan mode
+    // draws transformer handles over an object you can't body-drag or
+    // empty-click to deselect.
+    const state = useCanvasStore.getState()
+    expect(state.activeTool).toBe('select')
+    expect(state.selectedItemIds).toEqual([state.items[0].id])
   })
 })
 
