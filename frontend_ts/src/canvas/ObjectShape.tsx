@@ -1,21 +1,23 @@
 import type Konva from 'konva'
-import { Group, Line, Rect, Text } from 'react-konva'
+import { Group, Line, Path, Rect, Text } from 'react-konva'
 import { NO_GUIDES, snapDragPosition } from './AlignmentGuides'
 import type { GuideLines } from './AlignmentGuides'
 import { clampToBounds } from './coordinates'
 import { flattenPoints, getEffectiveTension, isLineTool, parseLinePoints } from './LineTool'
+import { SYMBOLS, symbolScale } from './symbols'
 import { fontStyleFor, isTextType, parseTextProperties } from './TextTool'
 import type { CanvasObject, ObjectType, Point } from './types'
+import { BACKING_RECT_FILL, resolveBoxVisual, symbolLabelText } from './visuals'
 
 /**
- * Color palette for all 14 Object types (Key Technical Decisions: canvas-only
- * visual differentiation via color + text label is an accepted limitation
- * for this pass — no icons yet).
+ * Color palette for all 14 Object types. Originally (canvas-tools) the
+ * color WAS the whole visual; since U4 (object-visuals) the 7 catalog
+ * types render top-down symbols and the palette survives as their TINT
+ * (R3 — the `fill` on every symbol Path and Sidebar thumbnail), while
+ * Shapes/Lines still use it as their direct fill/stroke.
  *
- * Only the 7 catalog types are ever created in this unit (U7); Shape/Line
- * types are included so ObjectShape renders generically without crashing
- * once U15/U16 start creating them (they still render as a plain colored
- * rect for now — type-specific rendering/Transformer support comes later).
+ * Shape/Line types render as a plain colored rect/line — type-specific
+ * rendering for them stays out of object-visuals scope.
  *
  * `text` (canvas-tools U7) never actually FILLS with this color — a text
  * object's fill comes from its own `properties.color` — but the Record is
@@ -148,20 +150,25 @@ interface ObjectShapeProps {
 }
 
 /**
- * Renders one Object as a colored Konva.Rect + Konva.Text label, positioned
- * at x/y/width/height/rotation, draggable for U8's reposition-an-existing-
- * item interaction. Resize/rotate is handled externally by U8's
- * `SelectionTransformer`, attached via the `shapeRef`-registered node.
+ * Renders one Object positioned at x/y/width/height/rotation, draggable for
+ * U8's reposition-an-existing-item interaction. Resize/rotate is handled
+ * externally by U8's `SelectionTransformer`, attached via the
+ * `shapeRef`-registered node.
  *
- * Catalog Objects and Shapes render this generic Rect+label. Line-typed
- * Objects (U16) are structurally different — they have no meaningful
- * width/height "box," they're defined by `properties.points` — so they
- * branch to a dedicated `Konva.Line` render below instead.
+ * U4 (object-visuals): catalog Objects render their tinted top-down SYMBOL
+ * (`resolveBoxVisual` → `SYMBOLS` Paths over a hit-solid backing Rect —
+ * see the symbol branch below); Shapes keep the generic colored Rect+label.
+ * Line-typed Objects (U16) are structurally different — they have no
+ * meaningful width/height "box," they're defined by `properties.points` —
+ * so they branch to a dedicated `Konva.Line` render below instead.
  *
  * The Group is given an explicit `width`/`height` (matching the Rect's)
  * rather than leaving Konva to infer 0 — `SelectionTransformer` reads
  * `node.width()`/`node.height()` directly when folding resize scale back
  * into stored dimensions, which requires the Group to report its true size.
+ * That Group wrapper contract (position/size/rotation/drag/dragBound/select
+ * relays) is deliberately untouched by the U4 branch rework — every
+ * existing interaction inherits onto symbols for free.
  */
 export function ObjectShape({
   object,
@@ -271,6 +278,27 @@ export function ObjectShape({
   // backing Rect.
   const textProperties = isTextType(object.type) ? parseTextProperties(object.properties) : null
 
+  // U4 (object-visuals): the generic box branch's visual decision, made by
+  // the shared pure helper in visuals.ts (one derivation of one truth —
+  // U6's variant parser reads the same module; see the pan-tool learning on
+  // why the key/decision must not be re-derived here). Catalog types get
+  // the tinted top-down symbol; Shapes keep the plain colored Rect. The
+  // discriminated union's 'symbol' arm carries the narrowed CatalogType,
+  // so indexing the exhaustive SYMBOLS map needs no cast. Everything below
+  // is FULLY DECLARATIVE — scale/tint are props recomputed per render, no
+  // node.cache()/filters (the imperative-divergence hazard).
+  const boxVisual = resolveBoxVisual(object)
+  const symbolDefinition = boxVisual.kind === 'symbol' ? SYMBOLS[boxVisual.type] : null
+  // Pure viewBox→box mapping (tested standalone): non-uniform stretch is
+  // expected — the Transformer folds resize into width/height, and the
+  // filled-geometry symbol contract makes anisotropic scale safe.
+  const symbolScaling = symbolDefinition
+    ? symbolScale(symbolDefinition.viewBox, object.width, object.height)
+    : null
+  // Label rule R17: a user-given name still renders on symbols; the
+  // redundant `|| object.type` fallback is gone (the symbol IS the type).
+  const symbolLabel = symbolLabelText(object.name)
+
   return (
     <Group
       x={object.x}
@@ -316,8 +344,64 @@ export function ObjectShape({
           fontStyle={fontStyleFor(textProperties)}
           fill={textProperties.color}
         />
+      ) : symbolDefinition && symbolScaling ? (
+        <>
+          {/* U4 hit-area contract: a full-size, ALWAYS-MOUNTED backing Rect
+              owns the Group's hit area. Konva.Path hit regions are
+              painted-geometry-only, so without this an unselected sparse
+              symbol (door leaf + arc) would be clickable only on its
+              painted pixels — silently breaking click-select, group-drag
+              grabs, and pan-mode click-to-select. The zero-alpha rgba fill
+              (BACKING_RECT_FILL) is invisible on the scene canvas but keeps
+              the hit graph solid (an absent fill would make Konva skip it).
+              It also carries the selection stroke, exactly like the plain
+              box branch below. */}
+          <Rect
+            width={object.width}
+            height={object.height}
+            fill={BACKING_RECT_FILL}
+            stroke={isSelected ? '#111827' : undefined}
+            strokeWidth={isSelected ? 2 : 0}
+            cornerRadius={2}
+          />
+          {/* The symbol: one Path per authored sub-shape, at group-local
+              (0,0) so the Group's position/rotation apply, stretched to the
+              stored box by the pure scale helper, tinted via `fill` only
+              (R3; NO stroke props — filled-geometry contract, symbols.ts).
+              `listening={false}`: the backing Rect above is the one hit
+              surface, so the Paths never pay hit-canvas rendering. */}
+          {symbolDefinition.paths.map((data, index) => (
+            <Path
+              key={index}
+              data={data}
+              fill={fill}
+              scaleX={symbolScaling.scaleX}
+              scaleY={symbolScaling.scaleY}
+              listening={false}
+            />
+          ))}
+          {/* Label rule R17: only a non-empty user-given name renders (dark
+              text — symbols sit on the light canvas, unlike the solid
+              colored box the old white label sat on). */}
+          {symbolLabel != null && (
+            <Text
+              text={symbolLabel}
+              width={object.width}
+              height={object.height}
+              align="center"
+              verticalAlign="middle"
+              fontSize={11}
+              fill="#111827"
+              listening={false}
+            />
+          )}
+        </>
       ) : (
         <>
+          {/* Pre-U4 plain box branch, now Shapes-only (catalog types render
+              the symbol branch above): solid colored Rect + centered label
+              with the historical `name || type` fallback (R17 is scoped to
+              symbol/image visuals). */}
           <Rect
             width={object.width}
             height={object.height}

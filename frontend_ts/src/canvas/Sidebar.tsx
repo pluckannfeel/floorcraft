@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 import { useCanvasStore, type ActiveTool } from '../state/canvasStore'
 import { colorForType } from './ObjectShape'
 import { clampToBounds, screenToStagePoint, snapToGrid } from './coordinates'
+import { SYMBOLS } from './symbols'
 import type { CatalogType, Point } from './types'
 
 const CATALOG_LABELS: Record<CatalogType, string> = {
@@ -77,6 +78,9 @@ export const MIN_SIDEBAR_WIDTH = 240
 export const MAX_SIDEBAR_WIDTH = 600
 
 /** One clamp shared by every width writer (edge drag + arrow keys). */
+// Non-component export colocated with the width bounds it reads from; same
+// pattern as ObjectShape.tsx's `colorForType` export.
+// eslint-disable-next-line react-refresh/only-export-components
 export function clampSidebarWidth(width: number): number {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)))
 }
@@ -307,15 +311,24 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                       onPointerDown={(event) => handlePointerDown(type, event)}
                       className="flex cursor-grab items-center gap-2 rounded-md border bg-card px-2 py-2 shadow-xs transition-all select-none touch-none hover:border-ring/40 hover:shadow-sm active:translate-y-px"
                     >
-                      <span
+                      {/* U4 (object-visuals, R5): the card's thumbnail is
+                          the type's top-down symbol as an inline SVG — the
+                          SAME path data + viewBox the canvas Konva.Path
+                          branch renders (symbols.ts, one source of truth),
+                          tinted with the same `colorForType()` palette the
+                          old color chip used (R3). `fill` on the <svg>
+                          inherits to every child <path> (filled-geometry
+                          contract: the data carries no styling of its own). */}
+                      <svg
                         aria-hidden="true"
-                        className="size-5 shrink-0 rounded-sm"
-                        // Dynamic value: each entry's chip color comes from
-                        // `colorForType()` (the same per-type palette the
-                        // Konva shapes use), so it can't be a static
-                        // Tailwind class.
-                        style={{ backgroundColor: colorForType(type) }}
-                      />
+                        className="size-5 shrink-0"
+                        viewBox={`0 0 ${SYMBOLS[type].viewBox.width} ${SYMBOLS[type].viewBox.height}`}
+                        fill={colorForType(type)}
+                      >
+                        {SYMBOLS[type].paths.map((data, index) => (
+                          <path key={index} d={data} />
+                        ))}
+                      </svg>
                       <span className="truncate text-xs font-medium">{CATALOG_LABELS[type]}</span>
                     </div>
                   </li>

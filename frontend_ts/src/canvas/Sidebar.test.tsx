@@ -3,7 +3,10 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type Konva from 'konva'
 import { useCanvasStore } from '../state/canvasStore'
+import { colorForType } from './ObjectShape'
 import { Sidebar } from './Sidebar'
+import { SYMBOLS } from './symbols'
+import { CATALOG_TYPES } from './types'
 import type { Point } from './types'
 
 /**
@@ -175,6 +178,50 @@ describe('Sidebar grouped catalog (U9)', () => {
     fireEvent(window, new PointerEvent('pointerup', { clientX: 900, clientY: 700 }))
 
     expect(onDrop).not.toHaveBeenCalled()
+  })
+})
+
+describe('Sidebar catalog symbol thumbnails (U4 object-visuals)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({ activeTool: 'pan', selectedItemIds: [] })
+  })
+
+  it('every catalog card shows an inline-SVG thumbnail built from the SAME symbol data the canvas renders, tinted with its type color (R3/R5)', () => {
+    renderSidebar()
+
+    for (const type of CATALOG_TYPES) {
+      const card = screen.getByTestId(`catalog-item-${type}`)
+      const svg = card.querySelector('svg')
+      expect(svg, `${type} thumbnail present`).not.toBeNull()
+      // One source of truth: viewBox and every path's `d` come verbatim
+      // from symbols.ts — the exact data the Konva.Path branch draws.
+      expect(svg).toHaveAttribute(
+        'viewBox',
+        `0 0 ${SYMBOLS[type].viewBox.width} ${SYMBOLS[type].viewBox.height}`,
+      )
+      expect(svg).toHaveAttribute('fill', colorForType(type))
+      const paths = svg!.querySelectorAll('path')
+      expect(paths).toHaveLength(SYMBOLS[type].paths.length)
+      for (const [index, path] of [...paths].entries()) {
+        expect(path.getAttribute('d')).toBe(SYMBOLS[type].paths[index])
+        // Filled-geometry contract: tint inherits from the <svg> fill —
+        // no per-path styling, and never any stroke.
+        expect(path.getAttribute('stroke')).toBeNull()
+      }
+      // The card's label and drag surface are untouched by the swap.
+      expect(card.textContent).not.toBe('')
+    }
+  })
+
+  it('the thumbnail swap leaves the drag flow intact (pointerdown on a card still starts a drop)', () => {
+    const onDrop = vi.fn()
+    renderSidebar(onDrop)
+
+    fireEvent.pointerDown(screen.getByTestId('catalog-item-chairs'), { clientX: 10, clientY: 10 })
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 105, clientY: 95 }))
+
+    // Identity-transform stage → (105, 95) snapped to the 20px grid.
+    expect(onDrop).toHaveBeenCalledExactlyOnceWith('chairs', { x: 100, y: 100 })
   })
 })
 
