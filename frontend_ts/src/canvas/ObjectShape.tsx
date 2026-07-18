@@ -1,12 +1,13 @@
 import type Konva from 'konva'
-import { Group, Line, Path, Rect, Text } from 'react-konva'
+import { Group, Image as KonvaImage, Line, Path, Rect, Text } from 'react-konva'
 import { NO_GUIDES, snapDragPosition } from './AlignmentGuides'
 import type { GuideLines } from './AlignmentGuides'
 import { clampToBounds } from './coordinates'
+import { useRegistryImage } from './imageRegistry'
 import { flattenPoints, getEffectiveTension, isLineTool, parseLinePoints } from './LineTool'
 import { SYMBOLS, symbolScale } from './symbols'
 import { fontStyleFor, isTextType, parseTextProperties } from './TextTool'
-import type { CanvasObject, ObjectType, Point } from './types'
+import type { CanvasObject, CatalogType, ObjectType, Point } from './types'
 import { BACKING_RECT_FILL, resolveBoxVisual, symbolLabelText } from './visuals'
 
 /**
@@ -88,6 +89,103 @@ export interface GroupDragHandlers {
   onDragEnd: (id: CanvasObject['id'], node: Konva.Node, altKey: boolean) => void
 }
 
+/**
+ * U6 (object-visuals): the tinted symbol GLYPH — U4's symbol Paths,
+ * extracted so the artwork renders identically from BOTH consumers: the
+ * symbol branch proper, and the image branch's loading/failed PLACEHOLDER
+ * (R16: a pending or dead variant image renders its type's tinted default
+ * symbol, so plans always read as plans — on screen and, via U7, in
+ * exports). One component, one derivation of the Path props — not two
+ * copies that could drift (the pan-tool learning's two-derivations hazard).
+ *
+ * Everything here is FULLY DECLARATIVE (props recomputed per render; no
+ * node.cache()/filters — the imperative-divergence hazard), and
+ * `listening={false}` throughout: the backing Rect in ObjectShape owns the
+ * Group's hit area (U4 hit-area contract), so glyph Paths never pay
+ * hit-canvas rendering.
+ */
+function SymbolGlyph({
+  type,
+  fill,
+  width,
+  height,
+}: {
+  type: CatalogType
+  fill: string
+  width: number
+  height: number
+}) {
+  const definition = SYMBOLS[type]
+  // Pure viewBox→box mapping (tested standalone): non-uniform stretch is
+  // expected — the Transformer folds resize into width/height, and the
+  // filled-geometry symbol contract makes anisotropic scale safe.
+  const scaling = symbolScale(definition.viewBox, width, height)
+  return (
+    <>
+      {definition.paths.map((data, index) => (
+        <Path
+          key={index}
+          data={data}
+          fill={fill}
+          scaleX={scaling.scaleX}
+          scaleY={scaling.scaleY}
+          listening={false}
+        />
+      ))}
+    </>
+  )
+}
+
+/**
+ * U6: the placed-variant image visual (R8/R10/R16/R20). A dedicated child
+ * component — not inline in ObjectShape — because the registry hook must be
+ * called unconditionally (rules of hooks) while ObjectShape itself branches
+ * away for lines/text before the box visual is even resolved.
+ *
+ * The registry hook is the SINGLE load path (plan KTD: no `use-image` — it
+ * cannot be seeded from a cache, so it could never deliver the synchronous
+ * remount reuse an undo-of-delete needs): a cache hit hands back the
+ * decoded element during THIS render, so a remounted variant object paints
+ * its image on its first commit with no placeholder strobe. Load status
+ * lives in the registry module + this node's React state ONLY — never the
+ * zustand store (undo-redo learning: an image completion writing items
+ * would push junk undo entries and flip `dirty`).
+ *
+ * While no decoded element is available — 'pending' fetch or settled
+ * 'failed' (dead/foreign file; the R20 probe fires inside the registry so
+ * the auth interceptor owns any session-expiry redirect) — the type's
+ * tinted default symbol renders as the placeholder (R16). The one-render
+ * window where `status` is still 'pending' but `image` is non-null is
+ * exactly the commit the registry's 'loaded' flip is waiting on, so
+ * image-presence is the render key.
+ *
+ * Explicit `width`/`height` on the Konva Image (the object's stored box):
+ * required for correct stretch under the Transformer contract AND the
+ * Firefox SVG fix — Firefox reports zero intrinsic size for some
+ * SVG-as-image cases, so the drawn size must never rely on the element's
+ * natural dimensions. `listening={false}`: the backing Rect owns hits,
+ * exactly like the symbol Paths.
+ */
+function VariantImage({
+  url,
+  type,
+  fill,
+  width,
+  height,
+}: {
+  url: string
+  type: CatalogType
+  fill: string
+  width: number
+  height: number
+}) {
+  const { image } = useRegistryImage(url)
+  if (image == null) {
+    return <SymbolGlyph type={type} fill={fill} width={width} height={height} />
+  }
+  return <KonvaImage image={image} width={width} height={height} listening={false} />
+}
+
 interface ObjectShapeProps {
   object: CanvasObject
   isSelected?: boolean
@@ -157,7 +255,10 @@ interface ObjectShapeProps {
  *
  * U4 (object-visuals): catalog Objects render their tinted top-down SYMBOL
  * (`resolveBoxVisual` → `SYMBOLS` Paths over a hit-solid backing Rect —
- * see the symbol branch below); Shapes keep the generic colored Rect+label.
+ * see the symbol branch below); U6: a catalog Object carrying a valid
+ * variant reference renders its uploaded IMAGE instead (`VariantImage`
+ * above — registry-hook loading, symbol placeholder, store-free load
+ * state); Shapes keep the generic colored Rect+label.
  * Line-typed Objects (U16) are structurally different — they have no
  * meaningful width/height "box," they're defined by `properties.points` —
  * so they branch to a dedicated `Konva.Line` render below instead.
@@ -278,25 +379,22 @@ export function ObjectShape({
   // backing Rect.
   const textProperties = isTextType(object.type) ? parseTextProperties(object.properties) : null
 
-  // U4 (object-visuals): the generic box branch's visual decision, made by
-  // the shared pure helper in visuals.ts (one derivation of one truth —
-  // U6's variant parser reads the same module; see the pan-tool learning on
-  // why the key/decision must not be re-derived here). Catalog types get
-  // the tinted top-down symbol; Shapes keep the plain colored Rect. The
-  // discriminated union's 'symbol' arm carries the narrowed CatalogType,
+  // U4/U6 (object-visuals): the generic box branch's visual decision, made
+  // by the shared pure helper in visuals.ts (one derivation of one truth —
+  // the defensive variant parser lives in the same module; see the pan-tool
+  // learning on why the key/decision must not be re-derived here). Catalog
+  // types get the tinted top-down symbol; a catalog object whose properties
+  // carry a VALID variant reference gets the uploaded image (U6, with the
+  // symbol as its R16 placeholder — invalid references fail closed to the
+  // symbol inside resolveBoxVisual, AE1); Shapes keep the plain colored
+  // Rect. The union's 'symbol'/'image' arms carry the narrowed CatalogType,
   // so indexing the exhaustive SYMBOLS map needs no cast. Everything below
-  // is FULLY DECLARATIVE — scale/tint are props recomputed per render, no
-  // node.cache()/filters (the imperative-divergence hazard).
+  // is FULLY DECLARATIVE — scale/tint/image are props recomputed per
+  // render, no node.cache()/filters (the imperative-divergence hazard).
   const boxVisual = resolveBoxVisual(object)
-  const symbolDefinition = boxVisual.kind === 'symbol' ? SYMBOLS[boxVisual.type] : null
-  // Pure viewBox→box mapping (tested standalone): non-uniform stretch is
-  // expected — the Transformer folds resize into width/height, and the
-  // filled-geometry symbol contract makes anisotropic scale safe.
-  const symbolScaling = symbolDefinition
-    ? symbolScale(symbolDefinition.viewBox, object.width, object.height)
-    : null
-  // Label rule R17: a user-given name still renders on symbols; the
-  // redundant `|| object.type` fallback is gone (the symbol IS the type).
+  // Label rule R17: a user-given name still renders on symbols AND images;
+  // the redundant `|| object.type` fallback is gone (the visual IS the
+  // type).
   const symbolLabel = symbolLabelText(object.name)
 
   return (
@@ -344,14 +442,18 @@ export function ObjectShape({
           fontStyle={fontStyleFor(textProperties)}
           fill={textProperties.color}
         />
-      ) : symbolDefinition && symbolScaling ? (
+      ) : boxVisual.kind !== 'plain' ? (
         <>
-          {/* U4 hit-area contract: a full-size, ALWAYS-MOUNTED backing Rect
-              owns the Group's hit area. Konva.Path hit regions are
-              painted-geometry-only, so without this an unselected sparse
-              symbol (door leaf + arc) would be clickable only on its
-              painted pixels — silently breaking click-select, group-drag
-              grabs, and pan-mode click-to-select. The zero-alpha rgba fill
+          {/* U4 hit-area contract (U6: applies to the image branch
+              IDENTICALLY — it is a box-shaped branch): a full-size,
+              ALWAYS-MOUNTED backing Rect owns the Group's hit area.
+              Konva.Path hit regions are painted-geometry-only, so without
+              this an unselected sparse symbol (door leaf + arc) would be
+              clickable only on its painted pixels — silently breaking
+              click-select, group-drag grabs, and pan-mode click-to-select;
+              for the image branch it additionally keeps the hit surface
+              stable across the placeholder→image swap (the swap can never
+              change what is clickable). The zero-alpha rgba fill
               (BACKING_RECT_FILL) is invisible on the scene canvas but keeps
               the hit graph solid (an absent fill would make Konva skip it).
               It also carries the selection stroke, exactly like the plain
@@ -364,25 +466,33 @@ export function ObjectShape({
             strokeWidth={isSelected ? 2 : 0}
             cornerRadius={2}
           />
-          {/* The symbol: one Path per authored sub-shape, at group-local
-              (0,0) so the Group's position/rotation apply, stretched to the
-              stored box by the pure scale helper, tinted via `fill` only
-              (R3; NO stroke props — filled-geometry contract, symbols.ts).
-              `listening={false}`: the backing Rect above is the one hit
-              surface, so the Paths never pay hit-canvas rendering. */}
-          {symbolDefinition.paths.map((data, index) => (
-            <Path
-              key={index}
-              data={data}
+          {/* The visual: the uploaded image for a valid variant reference
+              (U6 — registry-hook loading, symbol placeholder while pending/
+              failed, R16), the tinted symbol Paths otherwise (U4 — R3 tint
+              via `fill` only; NO stroke props, filled-geometry contract).
+              Both draw at group-local (0,0) stretched to the stored box, so
+              the Group's position/rotation/drag/transform contract is
+              inherited unchanged. */}
+          {boxVisual.kind === 'image' ? (
+            <VariantImage
+              url={boxVisual.url}
+              type={boxVisual.type}
               fill={fill}
-              scaleX={symbolScaling.scaleX}
-              scaleY={symbolScaling.scaleY}
-              listening={false}
+              width={object.width}
+              height={object.height}
             />
-          ))}
-          {/* Label rule R17: only a non-empty user-given name renders (dark
-              text — symbols sit on the light canvas, unlike the solid
-              colored box the old white label sat on). */}
+          ) : (
+            <SymbolGlyph
+              type={boxVisual.type}
+              fill={fill}
+              width={object.width}
+              height={object.height}
+            />
+          )}
+          {/* Label rule R17 (symbol AND image visuals): only a non-empty
+              user-given name renders (dark text — these sit on the light
+              canvas, unlike the solid colored box the old white label sat
+              on). */}
           {symbolLabel != null && (
             <Text
               text={symbolLabel}

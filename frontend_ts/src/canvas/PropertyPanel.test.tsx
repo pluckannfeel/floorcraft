@@ -5,6 +5,7 @@ import { PropertyPanel } from './PropertyPanel'
 import { setTextMeasurer } from './TextTool'
 import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject } from './types'
+import { VISUAL_VARIANT_ID_KEY } from './visuals'
 
 /**
  * Unlike `ShapeTool`/`SelectionTransformer`, `PropertyPanel` renders plain
@@ -247,6 +248,137 @@ describe('PropertyPanel (U10)', () => {
 // U1 (canvas-tools): the panel's exactly-one contract over the selection
 // SET — the editable form renders only for exactly one selected item; 2+
 // shows a count placeholder; 0 renders nothing (covered above).
+/**
+ * U6 (object-visuals; R15): a catalog object's variant reference —
+ * `visual_variant_id` in `properties` — is structural data with the same
+ * hide-and-preserve treatment as a Line's `points`, PLUS the commit-side
+ * guard: hiding alone can't stop "+ Add property" from typing the reserved
+ * key by hand, and an unguarded commit would clobber the numeric reference
+ * with a string, silently demoting the placed image to its placeholder
+ * symbol forever (the C1 corruption vector; doc-review: adversarial).
+ */
+describe('PropertyPanel variant-reference safety (U6, object-visuals: R15)', () => {
+  const makeVariantChair = (overrides: Partial<CanvasObject> = {}) =>
+    makeItem({
+      id: 'chair-1',
+      type: 'chairs',
+      properties: { [VISUAL_VARIANT_ID_KEY]: 12, material: 'leather' },
+      ...overrides,
+    })
+
+  beforeEach(() => {
+    resetStore()
+  })
+
+  it('the reference key NEVER renders as an editable row (hide-and-preserve, like points)', () => {
+    resetStore([makeVariantChair()], ['chair-1'])
+    render(<PropertyPanel />)
+
+    expect(screen.queryByLabelText(`Property key ${VISUAL_VARIANT_ID_KEY}`)).not.toBeInTheDocument()
+    expect(
+      screen.queryByLabelText(`Property value for ${VISUAL_VARIANT_ID_KEY}`),
+    ).not.toBeInTheDocument()
+    // Ordinary keys still edit normally alongside it.
+    expect(screen.getByLabelText('Property value for material')).toHaveValue('leather')
+  })
+
+  it('editing an UNRELATED property (and the name) preserves the reference VERBATIM — a number, not a string', async () => {
+    resetStore([makeVariantChair()], ['chair-1'])
+    render(<PropertyPanel />)
+    const user = userEvent.setup()
+
+    const nameInput = screen.getByLabelText('Name')
+    await user.type(nameInput, 'Lounge chair')
+    const materialInput = screen.getByLabelText('Property value for material')
+    await user.clear(materialInput)
+    await user.type(materialInput, 'suede')
+    await user.tab()
+
+    await waitFor(() => {
+      expect(useCanvasStore.getState().items[0].properties.material).toBe('suede')
+    })
+    // VERBATIM: same key, same NUMBER — `rowsToProperties` stringifies
+    // everything it touches, so the reference surviving as a number proves
+    // it rode the excluded-keys preserve path, not the row editor
+    // (a stringified '12' would fail the defensive parser and kill the
+    // image render).
+    expect(useCanvasStore.getState().items[0].properties[VISUAL_VARIANT_ID_KEY]).toBe(12)
+    expect(useCanvasStore.getState().items[0].name).toBe('Lounge chair')
+    // Still untracked (R15's other half: property edits create no history).
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('"+ Add property" with the RESERVED key is dropped at commit — the stored reference survives', async () => {
+    resetStore([makeVariantChair()], ['chair-1'])
+    render(<PropertyPanel />)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: '+ Add property' }))
+    await user.type(screen.getByLabelText('New property key'), VISUAL_VARIANT_ID_KEY)
+    await user.click(document.body) // blur key field before typing value
+    await user.type(screen.getByLabelText(`Property value for ${VISUAL_VARIANT_ID_KEY}`), '999')
+    await user.tab()
+
+    // The reserved-key row was filtered out of the committed properties
+    // (commit-side guard) — the stored reference is untouched, still 12,
+    // still a number; nothing else changed either.
+    await waitFor(() => {
+      expect(useCanvasStore.getState().items[0].properties).toEqual({
+        [VISUAL_VARIANT_ID_KEY]: 12,
+        material: 'leather',
+      })
+    })
+  })
+
+  it('the commit-side guard covers EVERY excluded key: a hand-typed "points" row cannot clobber a Line', async () => {
+    resetStore(
+      [
+        makeItem({
+          id: 'line-1',
+          type: 'line_straight',
+          properties: {
+            points: [
+              { x: 0, y: 0 },
+              { x: 10, y: 10 },
+            ],
+            curve_style: 'straight',
+          },
+        }),
+      ],
+      ['line-1'],
+    )
+    render(<PropertyPanel />)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: '+ Add property' }))
+    await user.type(screen.getByLabelText('New property key'), 'points')
+    await user.click(document.body)
+    await user.type(screen.getByLabelText(/Property value for points/), 'garbage')
+    await user.tab()
+
+    await waitFor(() => {
+      expect(useCanvasStore.getState().items[0].properties.points).toEqual([
+        { x: 0, y: 0 },
+        { x: 10, y: 10 },
+      ])
+    })
+  })
+
+  it('a NON-catalog shape has no reserved visual key — the key stays freely editable there', () => {
+    // The exclusion is catalog-scoped: shapes/lines/text never render
+    // variants, so a user-authored `visual_variant_id` row on a shape is
+    // just data (and resolveBoxVisual ignores it — non-catalog types stay
+    // plain).
+    resetStore(
+      [makeItem({ id: 'shape-1', type: 'shape_rectangle', properties: { [VISUAL_VARIANT_ID_KEY]: 3 } })],
+      ['shape-1'],
+    )
+    render(<PropertyPanel />)
+
+    expect(screen.getByLabelText(`Property key ${VISUAL_VARIANT_ID_KEY}`)).toBeInTheDocument()
+  })
+})
+
 describe('PropertyPanel multi-selection (U1)', () => {
   beforeEach(() => {
     resetStore()

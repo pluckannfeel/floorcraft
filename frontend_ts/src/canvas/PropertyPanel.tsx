@@ -13,6 +13,7 @@ import {
 import type { TextStyling } from './TextTool'
 import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject, ObjectType } from './types'
+import { isCatalogType, VISUAL_VARIANT_ID_KEY } from './visuals'
 
 /**
  * R19/U10: a persistent side panel, visible whenever the selection is
@@ -81,9 +82,21 @@ const TEXT_STRUCTURAL_KEYS = new Set([
   'color',
 ])
 
+/** U6 (object-visuals; R15): a catalog object's variant reference —
+ * `visual_variant_id`, the opaque server id `resolveBoxVisual` renders the
+ * uploaded image from — is STRUCTURAL data exactly like a Line's `points`:
+ * hidden from the generic rows and preserved verbatim through every commit
+ * (the C1 corruption fix — `rowsToProperties` stringifies values, and a
+ * stringified reference would fail the defensive parser and silently
+ * demote the image to its placeholder symbol forever). All 7 catalog types
+ * get this exclusion whether or not a reference is currently present, so
+ * a user can't pre-plant the key either. */
+const VISUAL_STRUCTURAL_KEYS = new Set([VISUAL_VARIANT_ID_KEY])
+
 function excludedKeysForType(type: ObjectType): Set<string> {
   if (isLineTool(type)) return LINE_STRUCTURAL_KEYS
   if (isTextType(type)) return TEXT_STRUCTURAL_KEYS
+  if (isCatalogType(type)) return VISUAL_STRUCTURAL_KEYS
   return new Set()
 }
 
@@ -117,11 +130,25 @@ function rowsFromProperties(properties: Record<string, unknown>, excludedKeys: S
     .map(([key, value]) => ({ rowId: key, key, value: stringifyValue(value), isExisting: true }))
 }
 
-function rowsToProperties(rows: PropertyRow[]): Record<string, string> {
+/**
+ * U6 commit-side guard (doc-review: adversarial): rows whose TRIMMED key
+ * collides with an excluded (structural) key are dropped from the committed
+ * properties — hiding structural keys from the row editor
+ * (`rowsFromProperties`) alone doesn't stop "+ Add property" from typing
+ * the reserved key by hand, and without this filter such a row would ride
+ * `Object.assign` in `commit()` and clobber the preserved structural value
+ * (for a variant object: overwrite the numeric `visual_variant_id` with a
+ * string, silently killing the image, R15; for a Line: corrupt `points`).
+ * Filtering here keeps the guard symmetric with the diffing — a
+ * reserved-key row contributes nothing to `currentEditable`, so it can
+ * neither commit nor even mark the form changed.
+ */
+function rowsToProperties(rows: PropertyRow[], excludedKeys: Set<string>): Record<string, string> {
   const result: Record<string, string> = {}
   for (const row of rows) {
     const trimmedKey = row.key.trim()
     if (trimmedKey === '') continue
+    if (excludedKeys.has(trimmedKey)) continue
     result[trimmedKey] = row.value
   }
   return result
@@ -301,8 +328,11 @@ function PropertyPanelForm({ item, onCommit, onCommitTextStyling }: PropertyPane
       patch.name = nextName
     }
 
-    const currentEditable = rowsToProperties(nextRows)
-    const committedEditable = rowsToProperties(rowsFromProperties(committedRef.current.properties, excludedKeys))
+    const currentEditable = rowsToProperties(nextRows, excludedKeys)
+    const committedEditable = rowsToProperties(
+      rowsFromProperties(committedRef.current.properties, excludedKeys),
+      excludedKeys,
+    )
     if (!shallowEqualStringRecords(currentEditable, committedEditable)) {
       // Preserve excluded (structural) keys from the item's LIVE properties
       // (the `item` prop, always fresh on each render), not the possibly-

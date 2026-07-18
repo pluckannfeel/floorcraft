@@ -679,6 +679,62 @@ describe('canvasStore serverIdMap (explicit save)', () => {
 
     expect(useCanvasStore.getState().serverIdMap).toEqual({})
   })
+
+  // U6 (object-visuals): the established chain-repair scenario, extended
+  // with a PROPERTIES-CARRYING object — a placed variant's reference rides
+  // `items[].properties` (session-stable server id under
+  // `visual_variant_id`), so the delete → save → undo → save cycle must
+  // prove BOTH invariants at once: the id mapping keeps repointing at the
+  // live row (no duplicate-create churn) AND the properties payload
+  // survives every history traversal verbatim. The undo-redo learning is
+  // the backdrop: zundo snapshots hold whole items arrays, so as long as
+  // nothing rewrites items outside tracked actions — and image-load state
+  // NEVER writes the store, by the registry design — the reference in a
+  // resurrected snapshot is bit-identical to the one that was saved.
+  it('place variant → save → delete → save → undo → save: properties survive intact and the mapped id is chain-repaired', () => {
+    useCanvasStore.temporal.getState().clear()
+    const placed = makeItem({
+      id: 'local-variant',
+      type: 'chairs',
+      width: 40,
+      height: 20, // aspect-fit drop dims (wide 2:1 variant)
+      properties: { visual_variant_id: 12 },
+    })
+    useCanvasStore.getState().createItemLocal(placed)
+
+    // Save #1: the server creates row 10 for the placed variant object.
+    useCanvasStore.getState().mergeServerIdMap({ 'local-variant': 10 })
+
+    // Delete + save #2: row 10 is gone server-side (tracked delete).
+    useCanvasStore.getState().deleteItems(['local-variant'])
+    expect(useCanvasStore.getState().items).toHaveLength(0)
+
+    // Undo resurrects the item FROM THE HISTORY SNAPSHOT — the variant
+    // reference (and the aspect-fit geometry) must come back verbatim: the
+    // number 12, not a stringified or stripped copy.
+    undo()
+    const resurrected = useCanvasStore
+      .getState()
+      .items.find((item) => item.id === 'local-variant')
+    expect(resurrected).toBeDefined()
+    expect(resurrected?.properties).toEqual({ visual_variant_id: 12 })
+    expect(resurrected?.properties.visual_variant_id).toBe(12)
+    expect(resurrected).toMatchObject({ width: 40, height: 20 })
+
+    // Save #3 recreates the row as 11 and echoes the stale id ({"10": 11})
+    // — chain repair must repoint local-variant at the LIVE row, so the
+    // NEXT save's payload translation reuses 11 instead of resurrecting
+    // dead row 10 (the delete-and-recreate-forever churn the learning
+    // documents).
+    useCanvasStore.getState().mergeServerIdMap({ '10': 11 })
+    expect(useCanvasStore.getState().serverIdMap['local-variant']).toBe(11)
+
+    // And the whole cycle never disturbed the reference the next save will
+    // send verbatim.
+    expect(
+      useCanvasStore.getState().items.find((item) => item.id === 'local-variant')?.properties,
+    ).toEqual({ visual_variant_id: 12 })
+  })
 })
 
 // U1 (canvas-tools plan): the selection becomes an ordered id array with

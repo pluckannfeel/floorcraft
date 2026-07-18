@@ -8,8 +8,10 @@ import { apiClient } from '../api/client'
 import * as AuthContextModule from '../auth/AuthContext'
 import * as ToastContextModule from '../notifications/ToastContext'
 import { undo, useCanvasStore } from '../state/canvasStore'
+import type { VariantDragRef } from './Sidebar'
 import { setTextMeasurer } from './TextTool'
-import type { CanvasObject, FloorPlan } from './types'
+import type { CanvasObject, CatalogType, FloorPlan, Point } from './types'
+import { VISUAL_VARIANT_ID_KEY } from './visuals'
 import { CanvasEditorPage } from './CanvasEditorPage'
 
 /**
@@ -44,6 +46,45 @@ vi.mock('./CanvasStage', () => ({
     return <div data-testid="canvas-stage" />
   },
 }))
+
+/**
+ * U6 (object-visuals): the Sidebar is stubbed the same way, recording its
+ * props so `onDrop` (the page's `handleDrop`) can be driven directly — the
+ * real Sidebar's drop pipeline needs a live Konva stage rect
+ * (`getStage().container().getBoundingClientRect()`), which the CanvasStage
+ * stub above can never provide. The Sidebar's OWN drag/upload/delete
+ * behavior is covered in Sidebar.test.tsx; here only the page-side contract
+ * matters. `importOriginal` keeps the module's non-component exports
+ * (DEFAULT_ITEM_SIZE, VariantDragRef) intact for the page's imports.
+ */
+const sidebarProps = vi.hoisted(() => ({
+  current: null as Record<string, unknown> | null,
+}))
+vi.mock('./Sidebar', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./Sidebar')>()
+  return {
+    ...actual,
+    Sidebar: (props: Record<string, unknown>) => {
+      sidebarProps.current = props
+      return <div data-testid="sidebar" />
+    },
+  }
+})
+
+/** U6: spy wrapper around the REAL resetImageRegistry so the plan-switch
+ * reset wiring is assertable while the actual eviction still happens
+ * (imageRegistry.test.ts owns the eviction semantics themselves). */
+const resetImageRegistrySpy = vi.hoisted(() => ({ calls: 0 }))
+vi.mock('./imageRegistry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./imageRegistry')>()
+  return {
+    ...actual,
+    resetImageRegistry: () => {
+      resetImageRegistrySpy.calls += 1
+      actual.resetImageRegistry()
+    },
+  }
+})
 
 function makePlan(overrides: Partial<FloorPlan> = {}): FloorPlan {
   return {
@@ -156,6 +197,8 @@ beforeEach(() => {
   useCanvasStore.temporal.getState().clear()
   navigateRef.current = null
   canvasStageProps.current = null
+  sidebarProps.current = null
+  resetImageRegistrySpy.calls = 0
   logout.mockClear()
   vi.spyOn(AuthContextModule, 'useAuth').mockReturnValue({
     user: { id: 1, email: 'ada@example.com' },
@@ -651,5 +694,104 @@ describe('header restructure: File ribbon tab and account menu (final polish)', 
     await user.click(screen.getByRole('button', { name: 'Menu' }))
     await user.click(screen.getByRole('menuitem', { name: /log out/i }))
     expect(logout).toHaveBeenCalledTimes(1)
+  })
+})
+
+// U6 (object-visuals): the drop side of F2 — variant drops carry the
+// reference into `properties` with aspect-fit dimensions; default drops are
+// bit-identical to pre-U6; both end as a one-shot creation (selected, select
+// tool, ONE history entry). Driven through the recorded Sidebar `onDrop`
+// prop (the page's real handleDrop — see the Sidebar stub's doc comment).
+describe('variant drop and image-registry reset (U6, object-visuals)', () => {
+  type OnDrop = (type: CatalogType, point: Point, variant?: VariantDragRef) => void
+
+  async function renderPlanSeven(objects: CanvasObject[] = []) {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Visual Plan' }), objects },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Visual Plan')).toBeInTheDocument()
+    const onDrop = sidebarProps.current?.onDrop as OnDrop
+    expect(onDrop).toBeTypeOf('function')
+    return onDrop
+  }
+
+  it('dropping a VARIANT creates an aspect-fit object carrying the reference, selected in select mode (one history entry)', async () => {
+    const onDrop = await renderPlanSeven()
+    // Start from the idle pan mode so the one-shot ending is observable.
+    act(() => {
+      useCanvasStore.setState({ activeTool: 'pan' })
+    })
+
+    // A wide 2:1 chair photo (natural 200×100) → a 2:1 box, longest side on
+    // the 40px catalog default.
+    act(() => onDrop('chairs', { x: 100, y: 120 }, { id: 12, width: 200, height: 100 }))
+
+    const state = useCanvasStore.getState()
+    expect(state.items).toHaveLength(1)
+    const item = state.items[0]
+    expect(item).toMatchObject({
+      type: 'chairs',
+      x: 100,
+      y: 120,
+      width: 40,
+      height: 20,
+    })
+    // The reference rides `properties` as a NUMBER (the defensive parser
+    // rejects strings) under the shared key constant — session-stable by
+    // construction (the server row pre-exists the drop).
+    expect(item.properties).toEqual({ [VISUAL_VARIANT_ID_KEY]: 12 })
+    // One-shot creation flow: selected, in the select tool (pan-tool
+    // learning — never a stranded pan-mode selection).
+    expect(state.selectedItemIds).toEqual([item.id])
+    expect(state.activeTool).toBe('select')
+    // ONE tracked entry for the whole gesture (selection/tool untracked).
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+  })
+
+  it('a DEFAULT drop (no variant ref) is unchanged: 40×40 with empty properties', async () => {
+    const onDrop = await renderPlanSeven()
+
+    act(() => onDrop('tables', { x: 60, y: 80 }))
+
+    const state = useCanvasStore.getState()
+    expect(state.items).toHaveLength(1)
+    expect(state.items[0]).toMatchObject({ type: 'tables', x: 60, y: 80, width: 40, height: 40 })
+    expect(state.items[0].properties).toEqual({})
+    expect(state.selectedItemIds).toEqual([state.items[0].id])
+    expect(state.activeTool).toBe('select')
+  })
+
+  it('degenerate natural dimensions clamp to 40×40 — no NaN geometry can enter the store', async () => {
+    const onDrop = await renderPlanSeven()
+
+    act(() => onDrop('lighting', { x: 20, y: 20 }, { id: 5, width: 0, height: Number.NaN }))
+
+    const item = useCanvasStore.getState().items[0]
+    expect(item).toMatchObject({ width: 40, height: 40 })
+    // The reference still lands — only the geometry was degenerate.
+    expect(item.properties).toEqual({ [VISUAL_VARIANT_ID_KEY]: 5 })
+  })
+
+  it('the plan-switch reset path also resets the image registry (the ONLY eviction point)', async () => {
+    mockGetForPlans({
+      1: { plan: makePlan({ id: 1, name: 'Plan A' }), objects: [] },
+      2: { plan: makePlan({ id: 2, name: 'Plan B' }), objects: [] },
+    })
+    renderEditor('/floor-plans/1')
+    expect(await screen.findByText('Plan A')).toBeInTheDocument()
+    // The [floorPlanId]-keyed reset effect runs on mount too — a plan
+    // session always starts with an empty registry.
+    expect(resetImageRegistrySpy.calls).toBeGreaterThan(0)
+    const callsAfterMount = resetImageRegistrySpy.calls
+
+    act(() => {
+      navigateRef.current?.('/floor-plans/2')
+    })
+    expect(await screen.findByText('Plan B')).toBeInTheDocument()
+
+    // The switch evicted plan A's decoded elements alongside the store/
+    // history reset (export plan-switch isolation, U7's precondition).
+    expect(resetImageRegistrySpy.calls).toBeGreaterThan(callsAfterMount)
   })
 })

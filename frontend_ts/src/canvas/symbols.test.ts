@@ -3,10 +3,13 @@ import { SYMBOLS, symbolScale } from './symbols'
 import {
   BACKING_RECT_FILL,
   VISUAL_VARIANT_ID_KEY,
+  aspectFitDimensions,
   hasVariantReference,
   isCatalogType,
+  parseVariantReference,
   resolveBoxVisual,
   symbolLabelText,
+  variantFileUrl,
 } from './visuals'
 import { CATALOG_TYPES, SHAPE_TYPES } from './types'
 import type { CatalogType } from './types'
@@ -14,11 +17,12 @@ import type { CatalogType } from './types'
 /**
  * U4 (object-visuals): the symbol library + the visuals key module, tested
  * together at the pure level — jsdom can't mount Konva, so everything
- * ObjectShape feeds into its `Path`/`Rect` props (path data, scale factors,
- * branch decision, label rule, hit-fill) is asserted standalone here (the
- * repo's "pure logic, thin Konva plumbing" convention). visuals.ts is
- * colocated in this suite because U4 ships the two modules as one surface;
- * U6 grows the parser and its own coverage.
+ * ObjectShape feeds into its `Path`/`Rect`/`Image` props (path data, scale
+ * factors, branch decision, label rule, hit-fill) is asserted standalone
+ * here (the repo's "pure logic, thin Konva plumbing" convention).
+ * visuals.ts is colocated in this suite because U4 shipped the two modules
+ * as one surface; U6 grew the module (defensive parser, file-URL
+ * derivation, image arm, aspect-fit math) and its coverage lives here too.
  */
 
 describe('symbol library (U4: R1–R5)', () => {
@@ -129,14 +133,125 @@ describe('visuals key module (U4: variant reference + branch decision)', () => {
       ).toEqual({ kind: 'symbol', type: 'tables' })
     })
 
-    it('U6 SEAM: a variant reference still renders the SYMBOL for now (image branch lands in U6)', () => {
+    it('U6: a VALID variant reference resolves to the image arm — URL derived, type kept for the R16 placeholder', () => {
+      // U4's seam filled: the deliberate symbol-for-now behavior is gone.
       expect(
         resolveBoxVisual({ type: 'chairs', properties: { [VISUAL_VARIANT_ID_KEY]: 12 } }),
-      ).toEqual({ kind: 'symbol', type: 'chairs' })
+      ).toEqual({ kind: 'image', url: '/api/object-variants/12/file/', type: 'chairs' })
+    })
+
+    it('U6/AE1 (render half): an INVALID reference fails closed to the tinted symbol', () => {
+      for (const garbage of [null, 'garbage', '12', -3, 0, 1.5, Number.NaN, {}, []]) {
+        expect(
+          resolveBoxVisual({ type: 'chairs', properties: { [VISUAL_VARIANT_ID_KEY]: garbage } }),
+          `value ${JSON.stringify(garbage)} falls back to the symbol`,
+        ).toEqual({ kind: 'symbol', type: 'chairs' })
+      }
+    })
+
+    it('U6: a variant reference on a NON-catalog type stays plain (references are catalog-only)', () => {
+      expect(
+        resolveBoxVisual({ type: 'shape_rectangle', properties: { [VISUAL_VARIANT_ID_KEY]: 12 } }),
+      ).toEqual({ kind: 'plain' })
     })
 
     it.each([...SHAPE_TYPES])('%s keeps the pre-U4 plain colored box', (type) => {
       expect(resolveBoxVisual({ type, properties: {} })).toEqual({ kind: 'plain' })
+    })
+  })
+
+  describe('parseVariantReference (U6 defensive parser — parseTextProperties convention)', () => {
+    it('returns the id for a positive integer number value', () => {
+      expect(parseVariantReference({ [VISUAL_VARIANT_ID_KEY]: 12 })).toBe(12)
+      expect(parseVariantReference({ [VISUAL_VARIANT_ID_KEY]: 1 })).toBe(1)
+      // Other keys alongside never interfere (legacy rows carry anything).
+      expect(
+        parseVariantReference({ material: 'oak', [VISUAL_VARIANT_ID_KEY]: 7 }),
+      ).toBe(7)
+    })
+
+    it('returns null for a missing key / null / undefined properties', () => {
+      expect(parseVariantReference({})).toBeNull()
+      expect(parseVariantReference({ material: 'oak' })).toBeNull()
+      expect(parseVariantReference(null)).toBeNull()
+      expect(parseVariantReference(undefined)).toBeNull()
+    })
+
+    it('returns null for garbage values (fail closed, R16 — never throw, never coerce)', () => {
+      for (const garbage of [null, undefined, 'garbage', {}, [], true]) {
+        expect(
+          parseVariantReference({ [VISUAL_VARIANT_ID_KEY]: garbage }),
+          `garbage ${JSON.stringify(garbage)}`,
+        ).toBeNull()
+      }
+    })
+
+    it('returns null for numeric STRINGS — only the drop path writes this key, always as a number', () => {
+      // A string here means corruption (e.g. a hand-typed row before the
+      // PropertyPanel guard existed) — coercing would mask it.
+      expect(parseVariantReference({ [VISUAL_VARIANT_ID_KEY]: '12' })).toBeNull()
+    })
+
+    it('returns null for non-positive / fractional / non-finite numbers (server PKs are positive integers)', () => {
+      for (const bad of [0, -1, -12, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        expect(parseVariantReference({ [VISUAL_VARIANT_ID_KEY]: bad }), `value ${bad}`).toBeNull()
+      }
+    })
+  })
+
+  describe('variantFileUrl (U6: the ONE frontend derivation of the file endpoint)', () => {
+    it('builds the U3 serving-contract URL — the same convention as useVariants file_url rows', () => {
+      // Pinned verbatim: this string must match the backend route
+      // (backend/fm_generator/variants.py `variant_file_url`) or every
+      // placed variant 404s into its placeholder.
+      expect(variantFileUrl(12)).toBe('/api/object-variants/12/file/')
+      expect(variantFileUrl(1)).toBe('/api/object-variants/1/file/')
+    })
+  })
+
+  describe('aspectFitDimensions (U6 drop math — R8, synchronous by design)', () => {
+    it.each([
+      // [natural, longest, expected] — longest side lands ON `longest`.
+      [{ width: 100, height: 100 }, 40, { width: 40, height: 40 }], // square
+      [{ width: 200, height: 100 }, 40, { width: 40, height: 20 }], // wide 2:1
+      [{ width: 120, height: 40 }, 40, { width: 40, height: 13 }], // wide 3:1 (rounded)
+      [{ width: 100, height: 300 }, 40, { width: 13, height: 40 }], // tall 1:3 (rounded)
+      [{ width: 50, height: 400 }, 40, { width: 5, height: 40 }], // very tall
+      [{ width: 20, height: 10 }, 40, { width: 40, height: 20 }], // upscale too
+      [{ width: 640, height: 480 }, 40, { width: 40, height: 30 }], // 4:3 photo
+    ])('fits natural %o (longest %d) → %o', (natural, longest, expected) => {
+      expect(aspectFitDimensions(natural, longest)).toEqual(expected)
+    })
+
+    it('defaults `longest` to the 40px catalog default', () => {
+      expect(aspectFitDimensions({ width: 200, height: 100 })).toEqual({ width: 40, height: 20 })
+    })
+
+    it('DEGENERATE CLAMP: zero/negative/NaN/non-finite/absent dims → 40×40, never NaN geometry', () => {
+      // NaN geometry must never enter the store, its undo history, or the
+      // save payload (deepening + doc-review) — the clamp is the last line
+      // of defense behind the server-side dimension validation.
+      const degenerates = [
+        { width: 0, height: 100 },
+        { width: 100, height: 0 },
+        { width: -50, height: 100 },
+        { width: Number.NaN, height: 100 },
+        { width: 100, height: Number.NaN },
+        { width: Number.POSITIVE_INFINITY, height: 100 },
+        {},
+        { width: '200', height: '100' },
+        null,
+        undefined,
+      ]
+      for (const natural of degenerates) {
+        const result = aspectFitDimensions(natural as never, 40)
+        expect(result, `natural ${JSON.stringify(natural)}`).toEqual({ width: 40, height: 40 })
+      }
+    })
+
+    it('extreme aspect ratios floor the short side at 1 (never 0-height geometry)', () => {
+      expect(aspectFitDimensions({ width: 4000, height: 1 }, 40)).toEqual({ width: 40, height: 1 })
+      expect(aspectFitDimensions({ width: 1, height: 4000 }, 40)).toEqual({ width: 1, height: 40 })
     })
   })
 
