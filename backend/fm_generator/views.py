@@ -1,5 +1,6 @@
 from django.db import transaction
 from django.db.models import Count, Sum
+from django.http import FileResponse
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -192,7 +193,11 @@ class ObjectVariantViewSet(
           * destroy must NOT filter on is_active, so deleting an
             already-deleted variant finds the row and succeeds again
             (idempotent 204, R18) instead of 404ing — while a foreign or
-            nonexistent id still 404s via the owner scope.
+            nonexistent id still 404s via the owner scope;
+          * the `file` action must NOT filter on is_active either — a
+            soft-deleted variant KEEPS SERVING its file (the R11
+            keep-rendering mechanism: placed objects and historical undo
+            snapshots reference it forever).
 
         Ordering is stable (created_at, then id as the tiebreak for
         same-instant rows) so the catalog strip never reshuffles between
@@ -268,6 +273,68 @@ class ObjectVariantViewSet(
         # no-op write, which is what makes the second DELETE a clean 204.
         instance.is_active = False
         instance.save(update_fields=['is_active'])
+
+    # Content-Type per sniffed kind (U2's pipeline guarantees `kind` is the
+    # verified truth about the stored bytes, so this map can never be
+    # steered by a client-claimed extension or Content-Type).
+    FILE_CONTENT_TYPES = {
+        ObjectVariant.Kind.SVG: 'image/svg+xml',
+        ObjectVariant.Kind.PNG: 'image/png',
+        ObjectVariant.Kind.JPEG: 'image/jpeg',
+    }
+
+    @action(detail=True, methods=['get'], url_path='file')
+    def file(self, request, pk=None):
+        """The authenticated file endpoint (U3, object-visuals; R10/R11/
+        R13/R14): GET /api/object-variants/<id>/file/ streams the stored
+        bytes to their owner — and ONLY their owner.
+
+        Ownership and retention ride get_queryset: owner-scoped (foreign
+        and nonexistent ids 404 uniformly — the R14 anti-oracle pattern),
+        WITHOUT the is_active filter (soft-deleted variants keep serving;
+        see get_queryset's docstring). Throttle-free by get_throttles'
+        create-only scoping — image fetches are cheap streams and the
+        canvas may legitimately request many at once.
+
+        Header contract (the plan's U3 serving decisions):
+
+          * `Cache-Control: private, max-age=31536000, immutable` — UUID
+            filenames (variant_upload_to) make the stored bytes genuinely
+            immutable, so repeat catalog/canvas use and PNG export hit the
+            browser cache instead of re-fetching; `private` keeps shared
+            proxies from caching an authenticated body.
+          * `Content-Disposition: attachment` BARE — deliberately no
+            filename parameter: `original_name` is client-supplied text and
+            a response-header injection surface; if a filename is ever
+            wanted here, it is the UUID basename, never the original name.
+            Attachment disposition only affects direct navigation — <img>/
+            Konva subresource rendering is unaffected, so the canvas still
+            draws these responses while a pasted URL downloads instead of
+            rendering.
+          * `X-Content-Type-Options: nosniff` on every kind — the declared
+            image type is final; browsers must not content-sniff their way
+            to something executable.
+          * SVG only: a restrictive `Content-Security-Policy` as direct-
+            navigation hardening (defense-in-depth behind U2's sanitizer) —
+            if an SVG were ever viewed as a document, nothing can execute
+            or fetch; inline style-attributes (which svg-hush's output may
+            legitimately carry) stay allowed. Subresource <img> rendering
+            ignores the document CSP, so the canvas is unaffected here too.
+        """
+        variant = self.get_object()
+        response = FileResponse(
+            variant.file.open('rb'),
+            content_type=self.FILE_CONTENT_TYPES[variant.kind],
+        )
+        response['Cache-Control'] = 'private, max-age=31536000, immutable'
+        # Overwrites FileResponse's derived disposition — bare, no filename.
+        response['Content-Disposition'] = 'attachment'
+        response['X-Content-Type-Options'] = 'nosniff'
+        if variant.kind == ObjectVariant.Kind.SVG:
+            response['Content-Security-Policy'] = (
+                "default-src 'none'; style-src 'unsafe-inline'"
+            )
+        return response
 
 
 class ObjectViewSet(viewsets.ModelViewSet):

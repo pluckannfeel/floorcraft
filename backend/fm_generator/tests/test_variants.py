@@ -10,7 +10,14 @@ PNG/JPEG/SVG uploads, size caps, format sniffing, polyglot re-encoding,
 the SVG active-content scan (OURS, not svg-hush's — hush cannot reject),
 the DOCTYPE/ENTITY pre-reject, viewBox normalization, EXIF transposition,
 per-user quota (count + bytes, atomic under concurrency; R19), the upload
-throttle, and soft-delete semantics (R11/R18). File SERVING belongs to U3.
+throttle, and soft-delete semantics (R11/R18).
+
+U3 half (file serving): the authenticated `file` action — correct bytes and
+Content-Type per sniffed kind, the hardened header contract (private/
+immutable caching, BARE attachment disposition, nosniff, CSP on SVG),
+soft-deleted variants still serving (AE1's serving half — the R11
+keep-rendering mechanism), uniform 404 for foreign/nonexistent ids, and
+anonymous rejection.
 """
 
 import shutil
@@ -873,6 +880,12 @@ class VariantPermissionTests(TestCase):
     def test_anonymous_destroy_rejected(self):
         self.assertIn(self.client.delete(f'{VARIANTS_URL}1/').status_code, (401, 403))
 
+    def test_anonymous_file_fetch_rejected(self):
+        # U3: the serving action sits behind the same IsAuthenticated wall
+        # as every other variant route — rejection happens before any
+        # lookup, so no id (real or not) leaks anything to anonymous.
+        self.assertIn(self.client.get(f'{VARIANTS_URL}1/file/').status_code, (401, 403))
+
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
 class VariantQuotaTests(VariantApiTestCase):
@@ -1008,3 +1021,130 @@ class VariantQuotaConcurrencyTests(TransactionTestCase):
             ObjectVariant.objects.filter(owner=user).count(),
             variants.MAX_VARIANT_COUNT,
         )
+
+
+# ===========================================================================
+# U3: authenticated file serving
+# ===========================================================================
+
+FILE_CACHE_CONTROL = 'private, max-age=31536000, immutable'
+SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'"
+
+
+def file_url(variant_id):
+    return f'{VARIANTS_URL}{variant_id}/file/'
+
+
+def fetch_file(client, variant_id):
+    return client.get(file_url(variant_id))
+
+
+def streamed(response):
+    """FileResponse bodies are streaming — drain them for byte assertions."""
+    return b''.join(response.streaming_content)
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class VariantFileServingTests(VariantApiTestCase):
+    """The U3 serving contract: exact stored bytes, kind-derived
+    Content-Type, and the hardened headers on EVERY response — private/
+    immutable caching (UUID filenames make immutable safe; repeat catalog/
+    canvas use and export must hit the browser cache), BARE attachment
+    disposition (never a filename parameter — original_name in a response
+    header would be an injection surface), and nosniff."""
+
+    def tearDown(self):
+        cache.clear()  # the throttle-exhaustion test writes a ledger
+
+    def assert_hardened_headers(self, response):
+        self.assertEqual(response['Cache-Control'], FILE_CACHE_CONTROL)
+        # BARE attachment: assertEqual (not assertIn) proves no filename
+        # parameter — original_name must never ride a response header.
+        self.assertEqual(response['Content-Disposition'], 'attachment')
+        self.assertEqual(response['X-Content-Type-Options'], 'nosniff')
+
+    def upload_and_get(self, name, content):
+        response = post_variant(self.client, name, content)
+        self.assertEqual(response.status_code, 201, response.content)
+        variant = ObjectVariant.objects.get()
+        return variant, fetch_file(self.client, variant.id)
+
+    def test_owner_fetches_png_with_exact_bytes_and_hardened_headers(self):
+        variant, response = self.upload_and_get('chair.png', png_bytes(40, 20))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'image/png')
+        # The exact post-pipeline bytes that live on disk — not the upload.
+        self.assertEqual(streamed(response), stored_bytes(variant))
+        self.assert_hardened_headers(response)
+        # The CSP is SVG-only hardening; rasters must not carry it.
+        self.assertNotIn('Content-Security-Policy', response)
+
+    def test_jpeg_served_with_jpeg_content_type_and_caching_headers(self):
+        variant, response = self.upload_and_get('photo.jpg', jpeg_bytes(10, 8))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'image/jpeg')
+        self.assertEqual(streamed(response), stored_bytes(variant))
+        self.assert_hardened_headers(response)
+        self.assertNotIn('Content-Security-Policy', response)
+
+    def test_svg_served_with_svg_content_type_and_restrictive_csp(self):
+        # Direct-navigation hardening: were the SVG ever viewed as a
+        # document, nothing executes or fetches. <img>/Konva subresource
+        # rendering ignores the document CSP (and the attachment
+        # disposition), so the canvas is unaffected.
+        variant, response = self.upload_and_get('plan.svg', SVG_HAPPY)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'image/svg+xml')
+        self.assertEqual(streamed(response), stored_bytes(variant))
+        self.assert_hardened_headers(response)
+        self.assertEqual(response['Content-Security-Policy'], SVG_CSP)
+
+    def test_soft_deleted_variant_still_serves_its_file(self):
+        # AE1's serving half — soft delete is the R11 keep-rendering
+        # mechanism: the catalog forgets the variant, but placed objects
+        # and undo snapshots reference it forever, so the file action's
+        # queryset deliberately skips the is_active filter.
+        variant, first = self.upload_and_get('keeper.png', png_bytes(6, 6))
+        expected = streamed(first)
+        self.assertEqual(
+            self.client.delete(f'{VARIANTS_URL}{variant.id}/').status_code, 204,
+        )
+        variant.refresh_from_db()
+        self.assertFalse(variant.is_active)  # really soft-deleted...
+
+        response = fetch_file(self.client, variant.id)
+
+        self.assertEqual(response.status_code, 200)  # ...and still serving
+        self.assertEqual(streamed(response), expected)
+        self.assert_hardened_headers(response)
+
+    def test_foreign_and_nonexistent_ids_get_identical_404s(self):
+        # Uniform 404 (the R14 anti-oracle pattern): same status AND same
+        # body, so the endpoint cannot be used as an existence oracle over
+        # other users' variant ids.
+        other = make_verified_user(email='other@example.com')
+        foreign = ObjectVariant.objects.create(**variant_kwargs(other))
+
+        foreign_response = fetch_file(self.client, foreign.id)
+        missing_response = fetch_file(self.client, 999999)
+
+        self.assertEqual(foreign_response.status_code, 404)
+        self.assertEqual(missing_response.status_code, 404)
+        self.assertEqual(foreign_response.json(), missing_response.json())
+
+    def test_file_serving_survives_an_exhausted_upload_throttle(self):
+        # The throttle stays create-only (R19 guards the expensive action):
+        # a user who has burned their upload budget must still be able to
+        # RENDER — the canvas fetches many files at once.
+        variant, first = self.upload_and_get('chair.png', png_bytes())
+        self.assertEqual(first.status_code, 200)
+        for _ in range(21):  # exhaust the 20/min create budget past 429
+            post_variant(self.client, 'junk.txt', b'not an image')
+
+        response = fetch_file(self.client, variant.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(streamed(response), stored_bytes(variant))
