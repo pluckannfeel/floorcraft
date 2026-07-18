@@ -1,7 +1,9 @@
+from django.core.files.base import ContentFile
 from django.http import Http404
 from rest_framework import serializers
 
-from .models import FloorPlan, Objects
+from . import variants
+from .models import FloorPlan, Objects, ObjectVariant
 
 LINE_TYPES = {
     Objects.ObjectType.LINE_STRAIGHT,
@@ -144,6 +146,89 @@ class SyncObjectSerializer(ObjectSerializer):
     """
 
     floor_plan = serializers.PrimaryKeyRelatedField(read_only=True)
+
+
+class ObjectVariantSerializer(serializers.ModelSerializer):
+    """Upload/list serializer for ObjectVariant (U2, object-visuals;
+    R6-R9, R12).
+
+    `file` is WRITE-ONLY: reading back the raw stored bytes through the
+    list API would both bloat every catalog fetch and bypass U3's hardened
+    serving headers — consumers get `file_url` instead and stream the file
+    through the authenticated endpoint.
+
+    `owner` is deliberately omitted (the FloorPlanSerializer precedent):
+    never client-writable, injected server-side via perform_create — a
+    writable owner field would be a variant-donation/impersonation hole.
+
+    Everything the pipeline derives (kind, width, height, size_bytes,
+    original_name) is read-only to the client and injected by validate():
+    the client's claims about its own upload are worthless — the sniffed/
+    re-encoded truth is what lands on the row.
+    """
+
+    # FileField, NOT ImageField: Pillow cannot parse SVG, so DRF's
+    # ImageField (which runs Pillow verification on everything) would
+    # reject a third of the allowed formats. Content validation is the U2
+    # pipeline's job (see validate()).
+    file = serializers.FileField(write_only=True)
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ObjectVariant
+        fields = [
+            'id', 'object_type', 'file', 'width', 'height', 'size_bytes',
+            'original_name', 'created_at', 'file_url',
+        ]
+        read_only_fields = ['width', 'height', 'size_bytes', 'original_name', 'created_at']
+
+    def get_file_url(self, obj):
+        # Built by URL convention — U3 owns the real route (see the
+        # variant_file_url docstring for why this is not a reverse()).
+        return variants.variant_file_url(obj.id)
+
+    def validate(self, attrs):
+        """Run the full U2 validation pipeline on the upload, mirroring
+        ObjectSerializer's `_validate_<kind>` dispatch style: `validate()`
+        stays a thin router, `_validate_upload` owns the work. On success
+        the pipeline's OUTPUT replaces the client's bytes entirely —
+        rasters store the Pillow re-encode, SVGs store svg-hush's filtered/
+        normalized output; the original buffer is never persisted.
+        """
+        upload = attrs.get('file')
+        processed = self._validate_upload(upload)
+
+        # A fresh ContentFile of the pipeline's bytes: the name is a
+        # placeholder — variant_upload_to ignores filenames and derives the
+        # stored path from owner + uuid + the sniffed kind (U1).
+        attrs['file'] = ContentFile(processed.content, name=f'variant.{processed.kind}')
+        attrs['kind'] = processed.kind
+        attrs['width'] = processed.width
+        attrs['height'] = processed.height
+        # Authoritative POST-pipeline size — what actually lands on disk,
+        # and what the R19 byte quota aggregates (models.ObjectVariant).
+        attrs['size_bytes'] = len(processed.content)
+        attrs['original_name'] = variants.clean_original_name(
+            upload.name, fallback=f'upload.{processed.kind}'
+        )
+        return attrs
+
+    def _validate_upload(self, upload):
+        """Pipeline order per the plan: extension allowlist (cheapest) ->
+        per-format byte cap on the REPORTED size (before reading bytes into
+        memory) -> magic-byte sniff -> the format branch (Pillow re-encode
+        or the SVG scan/hush/normalize chain). Every VariantRejected
+        carries its specific human message (format vs size vs
+        active-content vs DOCTYPE — R9's friendly-rejection contract) and
+        surfaces as a 400 on the `file` field.
+        """
+        try:
+            extension = variants.check_extension(upload.name)
+            variants.check_byte_cap(extension, upload.size)
+            upload.seek(0)
+            return variants.process_upload(upload.read())
+        except variants.VariantRejected as rejected:
+            raise serializers.ValidationError({'file': str(rejected)})
 
 
 class FloorPlanSerializer(serializers.ModelSerializer):
