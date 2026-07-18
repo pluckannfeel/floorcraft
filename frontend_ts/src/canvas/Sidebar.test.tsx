@@ -1,7 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type Konva from 'konva'
+import { apiClient } from '../api/client'
+import {
+  MAX_RASTER_UPLOAD_BYTES,
+  UPLOAD_BAD_EXTENSION_MESSAGE,
+  UPLOAD_RASTER_TOO_BIG_MESSAGE,
+  type ObjectVariant,
+} from '../hooks/useVariants'
+import * as ToastContextModule from '../notifications/ToastContext'
 import { useCanvasStore } from '../state/canvasStore'
 import { colorForType } from './ObjectShape'
 import { Sidebar } from './Sidebar'
@@ -48,17 +57,64 @@ function makeFakeStage(): Konva.Stage {
   } as unknown as Konva.Stage
 }
 
+/**
+ * U5 (object-visuals): Sidebar now consumes the useVariants hooks, so every
+ * render needs a QueryClientProvider (retries off, the repo convention) and
+ * a mocked `useToast` (vi.spyOn on the module — same as useObjects.test.tsx
+ * / CanvasEditorPage.test.tsx; no ToastProvider needed). `apiClient.get` is
+ * stubbed pending-forever by default (see the file-level beforeEach):
+ * pre-U5 tests exercise the resilience contract for free — defaults render
+ * and drag with the variants query still in flight — and variant tests
+ * override the spy with real fixtures.
+ */
 function renderSidebar(onDrop: (type: string, point: Point) => void = () => {}) {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  })
   return render(
-    <Sidebar
-      getStage={makeFakeStage}
-      gridSize={20}
-      canvasWidth={800}
-      canvasHeight={600}
-      onDrop={onDrop}
-    />,
+    <QueryClientProvider client={queryClient}>
+      <Sidebar
+        getStage={makeFakeStage}
+        gridSize={20}
+        canvasWidth={800}
+        canvasHeight={600}
+        onDrop={onDrop}
+      />
+    </QueryClientProvider>,
   )
 }
+
+function makeVariant(overrides: Partial<ObjectVariant> = {}): ObjectVariant {
+  return {
+    id: 1,
+    object_type: 'chairs',
+    width: 300,
+    height: 150,
+    size_bytes: 1234,
+    original_name: 'my-chair.png',
+    created_at: '2026-07-18T00:00:00Z',
+    file_url: '/api/object-variants/1/file/',
+    ...overrides,
+  }
+}
+
+const showError = vi.fn()
+
+beforeEach(() => {
+  showError.mockClear()
+  vi.spyOn(ToastContextModule, 'useToast').mockReturnValue({
+    toasts: [],
+    showError,
+    dismiss: vi.fn(),
+  })
+  // Pending-forever default: no test-end act() noise for suites that never
+  // await the variants list; variant-specific tests re-stub with fixtures.
+  vi.spyOn(apiClient, 'get').mockReturnValue(new Promise(() => {}) as never)
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 const TOOL_LABELS = [
   'Pan',
@@ -269,5 +325,249 @@ describe('resizable sidebar (final polish)', () => {
     // Clamped at the max however long the key is held.
     for (let i = 0; i < 30; i += 1) fireEvent.keyDown(handle, { key: 'ArrowRight' })
     expect(aside).toHaveStyle({ width: '600px' })
+  })
+})
+
+describe('Sidebar variant catalog (U5 object-visuals)', () => {
+  beforeEach(() => {
+    useCanvasStore.setState({ activeTool: 'pan', selectedItemIds: [] })
+  })
+
+  /** Re-stubs the shared get spy with a resolved fixture list. */
+  function mockVariants(variants: ObjectVariant[]) {
+    return vi.spyOn(apiClient, 'get').mockResolvedValue({ data: variants } as never)
+  }
+
+  it('renders a variant strip under each type that has uploads — thumbnails named from original_name, no empty tray otherwise (R7/R12)', async () => {
+    mockVariants([
+      makeVariant({ id: 1, original_name: 'my-chair.png', file_url: '/api/object-variants/1/file/' }),
+      makeVariant({ id: 2, original_name: 'stool.svg', file_url: '/api/object-variants/2/file/' }),
+      makeVariant({ id: 3, object_type: 'tables', original_name: 'oak-table.jpg' }),
+    ])
+    renderSidebar()
+
+    // Both chair uploads land in the chairs strip, the table upload in its
+    // own — grouping happens client-side over the single flat list.
+    const chairStrip = await screen.findByTestId('variant-strip-chairs')
+    expect(within(chairStrip).getByTestId('variant-item-1')).toBeInTheDocument()
+    expect(within(chairStrip).getByTestId('variant-item-2')).toBeInTheDocument()
+    expect(within(screen.getByTestId('variant-strip-tables')).getByTestId('variant-item-3')).toBeInTheDocument()
+
+    // R12: the file-derived name is the tooltip AND the accessible name;
+    // the thumbnail streams from the authenticated file endpoint.
+    const tile = screen.getByTestId('variant-item-1')
+    expect(tile).toHaveAttribute('title', 'my-chair.png')
+    expect(tile).toHaveAttribute('aria-label', 'Drag my-chair.png')
+    expect(tile.querySelector('img')).toHaveAttribute('src', '/api/object-variants/1/file/')
+
+    // Zero variants for a type → no strip row at all (no empty tray).
+    for (const type of ['outlines', 'doors', 'furnitures', 'appliances', 'lighting']) {
+      expect(screen.queryByTestId(`variant-strip-${type}`)).not.toBeInTheDocument()
+    }
+  })
+
+  it('dragging a variant tile shows its thumbnail preview and passes the variant ref + natural dims into onDrop (F2 seam for U6 aspect-fit)', async () => {
+    mockVariants([makeVariant({ id: 7, width: 300, height: 150 })])
+    const onDrop = vi.fn()
+    renderSidebar(onDrop)
+
+    fireEvent.pointerDown(await screen.findByTestId('variant-item-7'), {
+      clientX: 10,
+      clientY: 10,
+    })
+    // Mid-drag: the floating preview renders the variant's thumbnail (the
+    // tinted square stays painted beneath as the loading fallback).
+    const preview = screen.getByTestId('catalog-drag-preview')
+    expect(preview.querySelector('img')).toHaveAttribute('src', '/api/object-variants/1/file/')
+
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 105, clientY: 95 }))
+
+    // Identity-transform stage → (105, 95) snapped to the 20px grid, PLUS
+    // the optional third argument carrying id + NATURAL dims.
+    expect(onDrop).toHaveBeenCalledExactlyOnceWith(
+      'chairs',
+      { x: 100, y: 100 },
+      { id: 7, width: 300, height: 150 },
+    )
+  })
+
+  it('pressing [+] opens the picker and never starts a drag (pointer ownership, doc-review)', async () => {
+    mockVariants([])
+    const onDrop = vi.fn()
+    const pickerSpy = vi
+      .spyOn(HTMLInputElement.prototype, 'click')
+      .mockImplementation(() => {})
+    renderSidebar(onDrop)
+    await waitFor(() => expect(apiClient.get).toHaveBeenCalled())
+
+    const uploadButton = screen.getByRole('button', { name: 'Upload Chair image' })
+    // The pointerdown that would have started a card-level ghost drag:
+    // stopPropagation + tile-owned handlers mean NO preview appears and a
+    // release over the canvas drops nothing.
+    fireEvent.pointerDown(uploadButton, { clientX: 10, clientY: 10 })
+    expect(screen.queryByTestId('catalog-drag-preview')).not.toBeInTheDocument()
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 305, clientY: 195 }))
+    expect(onDrop).not.toHaveBeenCalled()
+
+    // The click is what opens the hidden file input.
+    fireEvent.click(uploadButton)
+    expect(pickerSpy).toHaveBeenCalled()
+  })
+
+  it('client-side pre-check rejects wrong-extension and oversize files with the friendly toast and NO request (AE2 client half)', async () => {
+    mockVariants([])
+    const postSpy = vi.spyOn(apiClient, 'post')
+    vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {})
+    renderSidebar()
+    await waitFor(() => expect(apiClient.get).toHaveBeenCalled())
+
+    // Arm the picker for chairs, then feed it a text file.
+    fireEvent.click(screen.getByRole('button', { name: 'Upload Chair image' }))
+    const input = screen.getByTestId('variant-upload-input')
+    fireEvent.change(input, {
+      target: { files: [new File(['x'], 'notes.txt', { type: 'text/plain' })] },
+    })
+    expect(showError).toHaveBeenCalledWith(UPLOAD_BAD_EXTENSION_MESSAGE)
+
+    // Oversize raster: same toast convention, still no request.
+    const big = new File(['x'], 'huge.png', { type: 'image/png' })
+    Object.defineProperty(big, 'size', { value: MAX_RASTER_UPLOAD_BYTES + 1 })
+    fireEvent.click(screen.getByRole('button', { name: 'Upload Chair image' }))
+    fireEvent.change(input, { target: { files: [big] } })
+    expect(showError).toHaveBeenCalledWith(UPLOAD_RASTER_TOO_BIG_MESSAGE)
+
+    expect(postSpy).not.toHaveBeenCalled()
+  })
+
+  it('a valid pick uploads in flight with [+] disabled (spinner; second click no-ops), then the new variant appears with NO refetch', async () => {
+    const getSpy = mockVariants([])
+    let releasePost: ((value: unknown) => void) | null = null
+    const postSpy = vi.spyOn(apiClient, 'post').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releasePost = resolve
+        }) as never,
+    )
+    vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {})
+    renderSidebar()
+    await waitFor(() => expect(getSpy).toHaveBeenCalled())
+
+    const uploadButton = screen.getByRole('button', { name: 'Upload Chair image' })
+    fireEvent.click(uploadButton)
+    fireEvent.change(screen.getByTestId('variant-upload-input'), {
+      target: { files: [new File(['png'], 'chair.png', { type: 'image/png' })] },
+    })
+
+    // In flight (doc-review): [+] disabled with a spinner — a second click
+    // no-ops instead of double-submitting against the R19 quota.
+    await waitFor(() => expect(uploadButton).toBeDisabled())
+    expect(uploadButton.querySelector('.animate-spin')).not.toBeNull()
+    fireEvent.click(uploadButton)
+    expect(postSpy).toHaveBeenCalledTimes(1)
+
+    // Release: the server echo MERGES into the cache (setQueryData, never
+    // invalidate-and-refetch — the superseded resync learning) and the
+    // strip shows the new tile with the list GET still at one call.
+    releasePost!({ data: makeVariant({ id: 99, original_name: 'chair.png' }) })
+    expect(await screen.findByTestId('variant-item-99')).toBeInTheDocument()
+    expect(getSpy).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(uploadButton).toBeEnabled())
+  })
+
+  it('delete flows through ConfirmDialog with the exact R18 copy — Cancel keeps, Confirm soft-deletes and removes the tile only', async () => {
+    mockVariants([makeVariant({ id: 4, original_name: 'my-chair.png' })])
+    const deleteSpy = vi.spyOn(apiClient, 'delete').mockResolvedValue({} as never)
+    renderSidebar()
+
+    const removeButton = within(await screen.findByTestId('variant-strip-chairs')).getByRole(
+      'button',
+      { name: 'Remove my-chair.png' },
+    )
+    // Always-visible + keyboard-focusable (doc-review: a11y — never
+    // hover-reveal): a real button, present without any hover simulation.
+    expect(removeButton).not.toHaveAttribute('tabindex', '-1')
+
+    fireEvent.click(removeButton)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    // R18 copy VERBATIM: placed objects unaffected, no erasure implied.
+    expect(within(dialog).getByText('Remove from catalog?')).toBeInTheDocument()
+    expect(
+      within(dialog).getByText(
+        'Remove this item from your catalog? Objects already placed keep this image, and the upload still counts toward your storage.',
+      ),
+    ).toBeInTheDocument()
+    // Initial focus on the SAFE action: Enter can never destroy by default.
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus()
+
+    // Cancel keeps the variant — nothing fired, tile intact.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(deleteSpy).not.toHaveBeenCalled()
+    expect(screen.getByTestId('variant-item-4')).toBeInTheDocument()
+
+    // Confirm removes it from the strip only (soft-delete server-side; the
+    // cache filter is the client half — no refetch).
+    fireEvent.click(removeButton)
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove' }))
+    // The mutationFn runs in a microtask after mutate() — same waitFor
+    // convention as useObjects.test.tsx's save assertions.
+    await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith('/object-variants/4/'))
+    await waitFor(() =>
+      expect(screen.queryByTestId('variant-item-4')).not.toBeInTheDocument(),
+    )
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it("the delete button's pointerdown never starts a drag, and Escape closes the dialog WITHOUT reaching window-level handlers", async () => {
+    mockVariants([makeVariant({ id: 5 })])
+    const onDrop = vi.fn()
+    renderSidebar(onDrop)
+
+    const removeButton = await screen.findByRole('button', { name: 'Remove my-chair.png' })
+    // Pointer ownership: pressing delete must NEVER begin a ghost drag.
+    fireEvent.pointerDown(removeButton, { clientX: 10, clientY: 10 })
+    expect(screen.queryByTestId('catalog-drag-preview')).not.toBeInTheDocument()
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 305, clientY: 195 }))
+    expect(onDrop).not.toHaveBeenCalled()
+
+    // Escape ownership (UserMenu pattern): dismissing the dialog stops
+    // propagation, so the canvas's window-level Escape handler never sees
+    // the keystroke.
+    const windowKeydown = vi.fn()
+    window.addEventListener('keydown', windowKeydown)
+    try {
+      fireEvent.click(removeButton)
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Cancel' }), { key: 'Escape' })
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(windowKeydown).not.toHaveBeenCalled()
+      // Cancelled — the variant survives.
+      expect(screen.getByTestId('variant-item-5')).toBeInTheDocument()
+    } finally {
+      window.removeEventListener('keydown', windowKeydown)
+    }
+  })
+
+  it('defaults render and drag even when the variants query ERRORS — the catalog is never gated on the network (resilience)', async () => {
+    const getSpy = vi.spyOn(apiClient, 'get').mockRejectedValue({
+      isAxiosError: true,
+      response: { status: 500, data: {} },
+    })
+    const onDrop = vi.fn()
+    renderSidebar(onDrop)
+    await waitFor(() => expect(getSpy).toHaveBeenCalled())
+
+    // Defaults have zero network dependency: all 7 tiles present, no strips,
+    // no toast (read-only query errors degrade silently, like useObjects).
+    for (const type of CATALOG_TYPES) {
+      expect(screen.getByTestId(`catalog-item-${type}`)).toBeInTheDocument()
+      expect(screen.queryByTestId(`variant-strip-${type}`)).not.toBeInTheDocument()
+    }
+    expect(showError).not.toHaveBeenCalled()
+
+    // ...and the default drag contract is untouched (exact two-arg call).
+    fireEvent.pointerDown(screen.getByTestId('catalog-item-tables'), { clientX: 10, clientY: 10 })
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 305, clientY: 195 }))
+    expect(onDrop).toHaveBeenCalledExactlyOnceWith('tables', { x: 300, y: 200 })
   })
 })
