@@ -19,6 +19,7 @@ import {
   unionBoundingBoxes,
 } from './coordinates'
 import type { BoundingBox, ZoomPanState } from './coordinates'
+import { CURSOR_CROSSHAIR, CURSOR_GRAB, CURSOR_GRABBING, CURSOR_TEXT } from './cursors'
 import { buildClipboardPayload } from './clipboard'
 import type { ClipboardPayload } from './clipboard'
 import { CropConfirmControls, CropRegionOverlay, useCropTool } from './CropTool'
@@ -1149,15 +1150,18 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     if (!container) return
     // One cursor per interaction mode (canvas-tools follow-up: every tool
     // gets a cursor that names what a press will do). Order matters —
-    // in-flight gestures beat mode defaults.
+    // in-flight gestures beat mode defaults. The values are the outlined
+    // SVG cursors from `cursors.ts` (white glyph, black outline) so the
+    // cursor stays visible over the white canvas on platform themes whose
+    // native crosshair/I-beam/hand render plain white.
     container.style.cursor = panDragging
-      ? 'grabbing'
+      ? CURSOR_GRABBING
       : marqueeActive || croppingTool || drawingShape || drawingLine
-        ? 'crosshair'
+        ? CURSOR_CROSSHAIR
         : spaceHeld || panTool
-          ? 'grab'
+          ? CURSOR_GRAB
           : textToolActive
-            ? 'text'
+            ? CURSOR_TEXT
             : ''
   }, [
     marqueeActive,

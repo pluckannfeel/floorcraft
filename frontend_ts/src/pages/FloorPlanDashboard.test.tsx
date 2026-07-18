@@ -142,7 +142,7 @@ describe('FloorPlanDashboard', () => {
     expect(screen.getAllByRole('button', { name: /create new/i })).toHaveLength(1)
   })
 
-  it('offers a logout button', async () => {
+  it('offers logout via the hamburger account menu', async () => {
     vi.spyOn(apiClient, 'get').mockResolvedValueOnce({
       data: [makePlan({ id: 1 })],
     } as never)
@@ -151,7 +151,11 @@ describe('FloorPlanDashboard', () => {
     renderDashboard()
     await screen.findByText('Office layout')
 
-    await user.click(screen.getByRole('button', { name: /log out/i }))
+    // Final-polish round: Log out lives inside the hamburger menu, not as
+    // a standalone header button.
+    expect(screen.queryByRole('menuitem', { name: /log out/i })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Menu' }))
+    await user.click(screen.getByRole('menuitem', { name: /log out/i }))
 
     expect(logout).toHaveBeenCalledTimes(1)
   })

@@ -179,6 +179,10 @@ export function TextEditOverlay({
         fontStyle: styling.italic ? 'italic' : 'normal',
         lineHeight: 1,
         color: styling.color,
+        // The blinking caret defaults to `color` — a white text color would
+        // make it (and the insertion point) invisible on the near-white
+        // surface below. Pin it to the border's blue so it always reads.
+        caretColor: '#2563eb',
         // CSS rotation for rotated text (nice-to-have per the plan) — the
         // Group rotates around its top-left, so the same origin here.
         transform: object.rotation ? `rotate(${object.rotation}deg)` : undefined,

@@ -493,7 +493,9 @@ describe('CanvasEditorPage (route-driven floor plan, U5)', () => {
     expect(confirmSpy).toHaveBeenCalled()
     expect(screen.queryByText('Dashboard Placeholder')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: /log out/i }))
+    // Log out lives in the hamburger menu now (final-polish round).
+    await user.click(screen.getByRole('button', { name: 'Menu' }))
+    await user.click(screen.getByRole('menuitem', { name: /log out/i }))
     expect(logout).not.toHaveBeenCalled()
 
     // Saving clears the divergence and releases every guard.
@@ -595,5 +597,59 @@ describe('background deselect returns to pan (canvas-tools follow-up)', () => {
     // A shape tool is not "select" — the deselect must not yank the user
     // out of the tool they deliberately picked.
     expect(useCanvasStore.getState().activeTool).toBe('shape_rectangle')
+  })
+})
+
+describe('header restructure: File ribbon tab and account menu (final polish)', () => {
+  it('the ribbon is open by default and the File tab collapses/reopens it', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Ribbon Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Ribbon Plan')).toBeInTheDocument()
+
+    // Ribbon actions render on load (File tab open by default).
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
+    const fileTab = screen.getByRole('button', { name: 'File' })
+    expect(fileTab).toHaveAttribute('aria-expanded', 'true')
+
+    const user = userEvent.setup()
+    await user.click(fileTab)
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument()
+    expect(fileTab).toHaveAttribute('aria-expanded', 'false')
+
+    await user.click(fileTab)
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
+  })
+
+  it('logout lives in the hamburger menu and keeps the unsaved-changes guard', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Menu Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Menu Plan')).toBeInTheDocument()
+
+    // No standalone Log out button anymore — only the menu trigger.
+    expect(screen.queryByRole('button', { name: /log out/i })).not.toBeInTheDocument()
+
+    // Dirty store + declined confirm: logout must NOT fire.
+    act(() => {
+      useCanvasStore.setState({ dirty: true })
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValueOnce(false)
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Menu' }))
+    await user.click(screen.getByRole('menuitem', { name: /log out/i }))
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(logout).not.toHaveBeenCalled()
+
+    // Clean store: logout goes straight through (no confirm needed).
+    act(() => {
+      useCanvasStore.setState({ dirty: false })
+    })
+    await user.click(screen.getByRole('button', { name: 'Menu' }))
+    await user.click(screen.getByRole('menuitem', { name: /log out/i }))
+    expect(logout).toHaveBeenCalledTimes(1)
   })
 })

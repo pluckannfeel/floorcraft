@@ -1,5 +1,6 @@
 import { Link, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
+import { UserMenu } from '@/components/UserMenu'
 import { useAuth } from '../auth/AuthContext'
 import type { FloorPlan } from '../canvas/types'
 import { useCreateFloorPlan, useFloorPlans } from '../hooks/useFloorPlans'
@@ -136,9 +137,9 @@ export function FloorPlanDashboard() {
         <h1 className="text-2xl font-semibold">Your floor plans</h1>
         <div className="flex items-center gap-2">
           {!isEmpty && createButton}
-          <Button type="button" variant="outline" onClick={() => logout()}>
-            Log out
-          </Button>
+          {/* Log out lives in the hamburger account menu (final-polish
+              round) — the same `UserMenu` the editor header uses. */}
+          <UserMenu onLogout={() => logout()} />
         </div>
       </header>
       {content}

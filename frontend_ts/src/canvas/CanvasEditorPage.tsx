@@ -5,6 +5,7 @@ import type { AxiosError } from "axios";
 import type Konva from "konva";
 import { Save, SaveCheck, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { UserMenu } from "@/components/UserMenu";
 import { apiClient } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { useObjects, useSaveObjects } from "../hooks/useObjects";
@@ -321,6 +322,13 @@ export function CanvasEditorPage() {
     planId: number;
     request: ContextMenuRequest;
   } | null>(null);
+  // Header "File" tab (final-polish round): the action ribbon (undo/redo,
+  // zoom, export, z-order, align — `Toolbar.tsx`) lives under a File tab
+  // beside Home, Office-ribbon style. Open by default (the actions ARE the
+  // editor); clicking the tab collapses/reopens the ribbon to reclaim
+  // vertical space. Plain local state — no persistence, like the sidebar's
+  // collapsible catalog sections.
+  const [fileTabOpen, setFileTabOpen] = useState(true);
   const openContextMenu = useCallback(
     (request: ContextMenuRequest) =>
       setContextMenu({ planId: floorPlanId, request }),
@@ -756,23 +764,41 @@ export function CanvasEditorPage() {
             name={floorPlan.name}
           />
           <span aria-hidden="true" className="h-4 w-px bg-border" />
-          {/* Page navigation: "Home" is the floor-plan dashboard ("/" just
-              redirects there, so link to it directly). */}
-          <nav aria-label="Page navigation">
+          {/* Page navigation, tab-styled (final-polish round): "Home" is
+              the floor-plan dashboard ("/" just redirects there, so link
+              to it directly); "File" is the ribbon tab — a toggle BUTTON,
+              not a route — whose active (open) state gets the same filled
+              treatment a current tab would. */}
+          <nav aria-label="Page navigation" className="flex items-center gap-1">
             <Link
               to="/floor-plans"
-              className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+              className="rounded-md px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               onClick={(event) => {
                 if (!confirmLeaveWithUnsavedChanges()) event.preventDefault();
               }}
             >
               Home
             </Link>
+            <button
+              type="button"
+              aria-expanded={fileTabOpen}
+              onClick={() => setFileTabOpen((current) => !current)}
+              className={
+                fileTabOpen
+                  ? "rounded-md bg-muted px-3 py-1 text-sm font-medium text-foreground"
+                  : "rounded-md px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              }
+            >
+              File
+            </button>
           </nav>
-          {/* Save button doubling as the save-state indicator: canvas edits
-              stay local until the user explicitly saves (Ctrl+S works too),
-              so its label is the "you have unsaved changes" signal — Save
-              (unsaved) / Saving… (PUT in flight) / Saved (clean). */}
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Save button doubling as the save-state indicator (top-right,
+              final-polish round): canvas edits stay local until the user
+              explicitly saves (Ctrl+S works too), so its label is the
+              "you have unsaved changes" signal — Save (unsaved) / Saving…
+              (PUT in flight) / Saved (clean). */}
           <Button
             variant={dirty ? "default" : "ghost"}
             size="sm"
@@ -794,26 +820,26 @@ export function CanvasEditorPage() {
               </>
             )}
           </Button>
+          {/* Log out moved into the hamburger account menu — same
+              unsaved-changes guard every in-app exit uses. */}
+          <UserMenu
+            onLogout={() => {
+              if (confirmLeaveWithUnsavedChanges()) logout();
+            }}
+          />
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            if (confirmLeaveWithUnsavedChanges()) logout();
-          }}
-        >
-          Log out
-        </Button>
       </header>
 
-      <Toolbar
-        getStage={getStage}
-        selectedItemIds={selectedItemIds}
-        onReorderZIndex={reorderZIndexItems}
-        onAlignSelection={handleAlignSelection}
-        onDistributeSelection={handleDistributeSelection}
-      />
+      {/* The File tab's ribbon — collapsible via the tab above. */}
+      {fileTabOpen && (
+        <Toolbar
+          getStage={getStage}
+          selectedItemIds={selectedItemIds}
+          onReorderZIndex={reorderZIndexItems}
+          onAlignSelection={handleAlignSelection}
+          onDistributeSelection={handleDistributeSelection}
+        />
+      )}
 
       <div className="flex flex-1 overflow-hidden">
         {/* U8: canvas dims come from the STORE (live, crop-aware) — only

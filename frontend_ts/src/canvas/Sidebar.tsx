@@ -15,7 +15,7 @@ import {
   Waves,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 import { useCanvasStore, type ActiveTool } from '../state/canvasStore'
 import { colorForType } from './ObjectShape'
 import { clampToBounds, screenToStagePoint, snapToGrid } from './coordinates'
@@ -47,18 +47,21 @@ const CATALOG_SECTIONS: { title: string; types: CatalogType[] }[] = [
  * (only Crop had an icon in the toolbar). */
 /** Every tool carries an icon (canvas-tools follow-up: icon + label reads
  * faster than a wall of text labels). `'pan'` leads because it's the idle
- * mode every other tool toggles back to. */
-const TOOL_BUTTONS: { type: ActiveTool; label: string; Icon: LucideIcon }[] = [
-  { type: 'pan', label: 'Pan', Icon: Hand },
-  { type: 'select', label: 'Select', Icon: MousePointer2 },
-  { type: 'shape_rectangle', label: 'Rectangle', Icon: RectangleHorizontal },
-  { type: 'shape_square', label: 'Square', Icon: Square },
-  { type: 'shape_circle', label: 'Circle', Icon: Circle },
-  { type: 'line_straight', label: 'Line', Icon: Minus },
-  { type: 'line_curved', label: 'Curved Line', Icon: Spline },
-  { type: 'line_s_curve', label: 'S-Curve Line', Icon: Waves },
-  { type: 'text', label: 'Text', Icon: Type },
-  { type: 'crop', label: 'Crop', Icon: Crop },
+ * mode every other tool toggles back to. `label` is the accessible name
+ * (aria-label + tooltip — tests and screen readers see the full name);
+ * `short` is the tiny caption under the icon, abbreviated where the full
+ * label wouldn't fit a grid cell. */
+const TOOL_BUTTONS: { type: ActiveTool; label: string; short: string; Icon: LucideIcon }[] = [
+  { type: 'pan', label: 'Pan', short: 'Pan', Icon: Hand },
+  { type: 'select', label: 'Select', short: 'Select', Icon: MousePointer2 },
+  { type: 'shape_rectangle', label: 'Rectangle', short: 'Rect', Icon: RectangleHorizontal },
+  { type: 'shape_square', label: 'Square', short: 'Square', Icon: Square },
+  { type: 'shape_circle', label: 'Circle', short: 'Circle', Icon: Circle },
+  { type: 'line_straight', label: 'Line', short: 'Line', Icon: Minus },
+  { type: 'line_curved', label: 'Curved Line', short: 'Curve', Icon: Spline },
+  { type: 'line_s_curve', label: 'S-Curve Line', short: 'S-Curve', Icon: Waves },
+  { type: 'text', label: 'Text', short: 'Text', Icon: Type },
+  { type: 'crop', label: 'Crop', short: 'Crop', Icon: Crop },
 ]
 
 /** Matches the backend `Objects` model's default `width`/`height` (40) —
@@ -162,37 +165,52 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
   }
 
   return (
-    <aside aria-label="Object catalog" className="w-[180px] overflow-y-auto border-r p-3">
-      {/* U9 tool strip. Selecting a tool sets `activeTool` (the draw tools
-          watch it from ShapeTool/LineTool/TextTool/CropTool via
-          CanvasStage); clicking the already-active tool toggles back to the
-          idle `'pan'` mode (canvas-tools follow-up) so a tool can be
-          cancelled — a plain drag then navigates the canvas. The active
-          tool is signalled via the filled `default` variant (plus
-          `aria-pressed`); `'pan'` leads the list as that idle home. */}
-      <h2 className="mb-2 text-sm font-medium">Tools</h2>
-      <div className="mb-4 flex flex-col gap-1">
-        {TOOL_BUTTONS.map(({ type, label, Icon }) => {
+    <aside aria-label="Object catalog" className="w-[360px] overflow-y-auto border-r bg-background p-4">
+      {/* U9 tool strip, regridded (canvas-tools follow-up): a 5-column
+          palette of stacked icon+caption buttons — the editor-program
+          convention — instead of the original one-per-row text list.
+          Selecting a tool sets `activeTool` (the draw tools watch it from
+          ShapeTool/LineTool/TextTool/CropTool via CanvasStage); clicking
+          the already-active tool toggles back to the idle `'pan'` mode so
+          a tool can be cancelled — a plain drag then navigates the canvas.
+          The active tool is signalled via the filled primary treatment
+          (plus `aria-pressed`); `'pan'` leads the grid as that idle home.
+          `aria-label` carries the FULL tool name (the visible caption may
+          be abbreviated), so accessible names are unchanged from the list
+          layout. */}
+      <h2 className="mb-2 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
+        Tools
+      </h2>
+      <div className="mb-5 grid grid-cols-5 gap-1.5">
+        {TOOL_BUTTONS.map(({ type, label, short, Icon }) => {
           const isActive = activeTool === type
           return (
-            <Button
+            <button
               key={type}
               type="button"
-              variant={isActive ? 'default' : 'outline'}
-              size="sm"
-              className="justify-start"
+              aria-label={label}
+              title={label}
               aria-pressed={isActive}
               // Clicking the ACTIVE tool deselects it, landing on the idle
               // pan mode where a plain drag navigates the canvas.
               onClick={() => setActiveTool(isActive ? 'pan' : type)}
+              className={cn(
+                'flex flex-col items-center justify-center gap-1 rounded-md border py-2 outline-none transition-all select-none focus-visible:ring-2 focus-visible:ring-ring/50',
+                isActive
+                  ? 'border-primary bg-primary text-primary-foreground shadow-inner'
+                  : 'border-border bg-card text-muted-foreground shadow-xs hover:border-ring/40 hover:bg-muted hover:text-foreground hover:shadow-sm active:translate-y-px',
+              )}
             >
-              <Icon aria-hidden="true" /> {label}
-            </Button>
+              <Icon className="size-4.5" aria-hidden="true" />
+              <span className="text-[10px] leading-none font-medium">{short}</span>
+            </button>
           )
         })}
       </div>
 
-      <h2 className="mb-2 text-sm font-medium">Catalog</h2>
+      <h2 className="mb-2 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
+        Catalog
+      </h2>
       {CATALOG_SECTIONS.map(({ title, types }) => {
         const isOpen = openSections[title]
         return (
@@ -213,7 +231,11 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
               {title}
             </button>
             {isOpen && (
-              <ul className="flex flex-col gap-2">
+              <ul className="grid grid-cols-2 gap-1.5">
+                {/* Card treatment (canvas-tools follow-up): a color chip +
+                    label on a bordered card, in a 2-column grid — replacing
+                    the original full-width solid-color blocks. Same custom
+                    pointer-drag flow; only the presentation changed. */}
                 {types.map((type) => (
                   <li key={type}>
                     <div
@@ -221,13 +243,18 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                       tabIndex={0}
                       data-testid={`catalog-item-${type}`}
                       onPointerDown={(event) => handlePointerDown(type, event)}
-                      className="cursor-grab touch-none rounded px-2.5 py-2 text-[13px] text-white select-none"
-                      // Dynamic value: each catalog entry's fill comes from
-                      // `colorForType()` (the same per-type palette the Konva
-                      // shapes use), so it can't be a static Tailwind class.
-                      style={{ backgroundColor: colorForType(type) }}
+                      className="flex cursor-grab items-center gap-2 rounded-md border bg-card px-2 py-2 shadow-xs transition-all select-none touch-none hover:border-ring/40 hover:shadow-sm active:translate-y-px"
                     >
-                      {CATALOG_LABELS[type]}
+                      <span
+                        aria-hidden="true"
+                        className="size-5 shrink-0 rounded-sm"
+                        // Dynamic value: each entry's chip color comes from
+                        // `colorForType()` (the same per-type palette the
+                        // Konva shapes use), so it can't be a static
+                        // Tailwind class.
+                        style={{ backgroundColor: colorForType(type) }}
+                      />
+                      <span className="truncate text-xs font-medium">{CATALOG_LABELS[type]}</span>
                     </div>
                   </li>
                 ))}
