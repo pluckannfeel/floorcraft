@@ -760,3 +760,82 @@ describe('fast hover tooltips (object-visuals follow-up)', () => {
     }
   })
 })
+
+describe('drag-machine hardening (final review fixes)', () => {
+  function mockVariants(variants: ObjectVariant[]) {
+    return vi.spyOn(apiClient, 'get').mockResolvedValue({ data: variants } as never)
+  }
+
+  it('a drag that dropped over the canvas cannot swallow the NEXT genuine tile click (stale suppress flag)', async () => {
+    mockVariants([])
+    const onDrop = vi.fn()
+    renderSidebar(onDrop)
+    const tile = screen.getByTestId('catalog-item-chairs')
+
+    // Drag 1: completes over the canvas — no tile click ever fires, so the
+    // suppress flag would previously go stale.
+    fireEvent.pointerDown(tile, { clientX: 10, clientY: 10 })
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 105, clientY: 95 }))
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 105, clientY: 95 }))
+    expect(onDrop).toHaveBeenCalledTimes(1)
+
+    // A genuine press-release-click on the tile must ARM, not be eaten.
+    fireEvent.pointerDown(tile, { clientX: 10, clientY: 10 })
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 10, clientY: 10 }))
+    fireEvent.click(tile)
+    expect(useCanvasStore.getState().activeTool).toBe('place')
+  })
+
+  it('pointercancel resets the drag machine — the next unrelated pointerup commits nothing', async () => {
+    mockVariants([])
+    const onDrop = vi.fn()
+    renderSidebar(onDrop)
+
+    fireEvent.pointerDown(screen.getByTestId('catalog-item-tables'), { clientX: 10, clientY: 10 })
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 60, clientY: 60 }))
+    expect(screen.getByTestId('catalog-drag-preview')).toBeInTheDocument()
+
+    fireEvent(window, new PointerEvent('pointercancel'))
+    expect(screen.queryByTestId('catalog-drag-preview')).not.toBeInTheDocument()
+
+    // The interrupted gesture is fully dead: a later pointerup anywhere
+    // must not commit a spurious drop.
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 305, clientY: 195 }))
+    expect(onDrop).not.toHaveBeenCalled()
+  })
+
+  it('tooltips never arm while a button is held (mid-drag sweeps over neighbouring tiles)', () => {
+    vi.useFakeTimers()
+    try {
+      mockVariants([])
+      renderSidebar()
+      const tile = screen.getByTestId('catalog-item-chairs')
+
+      fireEvent.pointerEnter(tile, { buttons: 1 })
+      act(() => vi.advanceTimersByTime(200))
+      expect(screen.queryByRole('tooltip', { hidden: true })).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an open ConfirmDialog owns Enter — the key never reaches bubble-phase window listeners', async () => {
+    mockVariants([makeVariant({ id: 6, original_name: 'sofa.png' })])
+    const user = userEvent.setup()
+    renderSidebar()
+
+    await user.click(await screen.findByRole('button', { name: 'Remove sofa.png' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+
+    const bubbleSpy = vi.fn()
+    window.addEventListener('keydown', bubbleSpy)
+    fireEvent.keyDown(document.body, { key: 'Enter' })
+    window.removeEventListener('keydown', bubbleSpy)
+
+    // Capture-phase stopPropagation: the page-level Enter-to-save shortcut
+    // (a bubble-phase window listener) can never see it.
+    expect(bubbleSpy).not.toHaveBeenCalled()
+    // And the dialog itself stays open (Enter is swallowed, not a cancel).
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+})

@@ -231,6 +231,22 @@ describe('ContextMenu (U5)', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('owns Enter while open: closes, and the key never reaches bubble-phase listeners (final review fix)', () => {
+    const onClose = vi.fn()
+    renderMenu(allEnabled, { onClose })
+
+    const bubbleSpy = vi.fn()
+    window.addEventListener('keydown', bubbleSpy)
+    fireEvent.keyDown(document.body, { key: 'Enter' })
+    window.removeEventListener('keydown', bubbleSpy)
+
+    // The menu never takes focus, so the page-level Enter-to-save shortcut
+    // would otherwise clear the selection the menu is about to act on —
+    // the capture-phase stopPropagation keeps Enter away from it entirely.
+    expect(bubbleSpy).not.toHaveBeenCalled()
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('closes on pointerdown outside the menu (click-away)', () => {
     const onClose = vi.fn()
     renderMenu(allEnabled, { onClose })

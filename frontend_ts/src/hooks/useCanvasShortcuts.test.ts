@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
+import { beginCanvasGesture, endCanvasGesture, resetCanvasGestures } from "../canvas/gesture";
 import { useCanvasStore } from "../state/canvasStore";
 import { resolveCanvasShortcut, useCanvasShortcuts } from "./useCanvasShortcuts";
 
@@ -233,6 +234,30 @@ describe("Enter finalizes: deselect + pan + save (listener behavior)", () => {
 
     expect(useCanvasStore.getState().selectedItemIds).toEqual([1]);
     expect(useCanvasStore.getState().activeTool).toBe("select");
+    expect(onSave).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+});
+
+describe("Enter never finalizes mid-gesture (final review fix)", () => {
+  afterEach(() => resetCanvasGestures());
+
+  it("no-ops while a canvas gesture is in flight; works again once it ends", () => {
+    useCanvasStore.setState({ selectedItemIds: [1], activeTool: "select" });
+    const onSave = vi.fn();
+    const { unmount } = renderHook(() => useCanvasShortcuts(onSave));
+
+    beginCanvasGesture();
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    // Mid-gesture: nothing moved — selection intact, tool intact, no save.
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([1]);
+    expect(useCanvasStore.getState().activeTool).toBe("select");
+    expect(onSave).not.toHaveBeenCalled();
+
+    endCanvasGesture();
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([]);
+    expect(useCanvasStore.getState().activeTool).toBe("pan");
     expect(onSave).toHaveBeenCalledTimes(1);
     unmount();
   });

@@ -1804,6 +1804,12 @@ describe('catalog placement arming (object-visuals follow-up)', () => {
     expect(useCanvasStore.getState().dirty).toBe(dirtyBefore)
   })
 
+  it('ARMING clears the selection too (final review fix: a retained transformer both resized and placed)', () => {
+    useCanvasStore.setState({ selectedItemIds: [1] })
+    useCanvasStore.getState().setPlacement({ type: 'chairs', variant: null })
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+  })
+
   it('disarming (null) lands on pan and clears the selection (the pan invariant)', () => {
     useCanvasStore.setState({ selectedItemIds: [1] })
     useCanvasStore.getState().setPlacement({ type: 'chairs', variant: null })

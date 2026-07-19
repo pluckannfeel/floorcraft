@@ -182,13 +182,16 @@ const DRAG_START_THRESHOLD_PX = 4
  * is untouched by U9's regrouping: a collapsed section simply doesn't
  * render its entries, and re-expanding restores the exact same nodes.
  *
- * U5 (object-visuals; R6–R9, R12, R18; F1/F3): each catalog entry is now a
- * two-row CARD — header row (default symbol tile + label + [+] upload
- * button) over a horizontally-scrollable strip of the user's uploaded
- * variants for that type, each tile draggable exactly like the default and
- * deletable behind the R18 confirm. Pointer ownership moved from the card
- * to the individual tiles (doc-review: design) so the +/delete buttons can
- * never start a ghost drag.
+ * U5 (object-visuals; R6–R9, R12, R18; F1/F3), reshaped by the follow-up
+ * rounds: each catalog entry is a HEADER (small symbol + type label,
+ * non-interactive) over ONE horizontally-scrollable tile row —
+ * [default symbol tile][built-in preset tiles…][uploaded variant tiles…]
+ * [+ upload tile]. Every tile is a square click-to-ARM button (press-
+ * release under the drag threshold arms a placement; the next canvas
+ * click places it) that still drag-and-drops once the pointer crosses the
+ * threshold; variant tiles carry the R18 delete behind the confirm.
+ * Pointer ownership lives on the individual tiles (doc-review: design) so
+ * the +/delete buttons can never start a ghost drag.
  */
 export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop }: SidebarProps) {
   const [drag, setDrag] = useState<DragState | null>(null)
@@ -294,11 +297,21 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
       setDrag(null)
     }
 
+    // Final review pass: pointercancel (OS dialogs, edge gestures, palm
+    // rejection — touch never delivers a pointerup after one) must reset
+    // the machine, or the NEXT unrelated pointerup anywhere would commit a
+    // spurious drop at that point.
+    function handlePointerCancel() {
+      setDrag(null)
+    }
+
     window.addEventListener('pointermove', handlePointerMove)
     window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerCancel)
     return () => {
       window.removeEventListener('pointermove', handlePointerMove)
       window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerCancel)
     }
   }, [drag, endDrag])
 
@@ -311,6 +324,11 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
   // until it travels past the drag threshold — see the drag effect.
   function handlePointerDown(type: CatalogType, event: ReactPointerEvent<HTMLDivElement>) {
     event.stopPropagation()
+    // Final review pass: a drag that ended over the CANVAS never fires a
+    // tile click, so a stale suppress flag from it would swallow the NEXT
+    // genuine click — every new press starts with a clean flag (its own
+    // click can still be suppressed by ITS drag).
+    suppressClickRef.current = false
     setDrag({
       type,
       startX: event.clientX,
@@ -330,6 +348,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
     event.stopPropagation()
+    suppressClickRef.current = false
     setDrag({
       type,
       variant: { id: variant.id, width: variant.width, height: variant.height },
@@ -350,6 +369,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
     event.stopPropagation()
+    suppressClickRef.current = false
     setDrag({
       type,
       preset: presetId,
@@ -442,8 +462,13 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
       setResizing(false)
     }
 
+    function handlePointerCancel() {
+      setResizing(false)
+    }
+
     window.addEventListener('pointermove', handlePointerMove)
     window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerCancel)
     const previousCursor = document.body.style.cursor
     const previousUserSelect = document.body.style.userSelect
     document.body.style.cursor = 'col-resize'
@@ -451,6 +476,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
     return () => {
       window.removeEventListener('pointermove', handlePointerMove)
       window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerCancel)
       document.body.style.cursor = previousCursor
       document.body.style.userSelect = previousUserSelect
     }

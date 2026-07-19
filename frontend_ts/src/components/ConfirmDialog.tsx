@@ -55,9 +55,19 @@ export function ConfirmDialog({
   // sits — the ContextMenu.tsx convention.
   useEffect(() => {
     function handleWindowKeyDown(event: KeyboardEvent) {
-      if (event.key !== 'Escape') return
-      event.stopPropagation()
-      onCancel()
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        onCancel()
+        return
+      }
+      // Final review pass: the dialog owns ENTER too. With focus dropped
+      // to <body> (no focus trap), the page-level Enter-to-save shortcut's
+      // closest() guard can't see the open dialog and would finalize the
+      // canvas BEHIND the modal. stopPropagation without preventDefault:
+      // a focused Confirm/Cancel button keeps its native Enter activation.
+      if (event.key === 'Enter') {
+        event.stopPropagation()
+      }
     }
     window.addEventListener('keydown', handleWindowKeyDown, true)
     return () => window.removeEventListener('keydown', handleWindowKeyDown, true)

@@ -32,7 +32,12 @@ export function Tooltip({ label, children }: { label: string; children: ReactNod
     [],
   )
 
-  const show = () => {
+  const show = (event: React.PointerEvent) => {
+    // Final review pass: never arm while a button is held — during a
+    // catalog drag the pointer sweeps tiles beneath the (pointer-events-
+    // none) preview, and popping THEIR tooltips over the drag is the exact
+    // jank this component exists to avoid.
+    if (event.buttons !== 0) return
     if (timerRef.current != null) window.clearTimeout(timerRef.current)
     timerRef.current = window.setTimeout(() => {
       // The wrapper has no box (display: contents) — measure its first

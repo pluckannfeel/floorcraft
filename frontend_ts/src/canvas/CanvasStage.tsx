@@ -20,6 +20,7 @@ import {
 } from './coordinates'
 import type { BoundingBox, ZoomPanState } from './coordinates'
 import { CURSOR_CROSSHAIR, CURSOR_GRAB, CURSOR_GRABBING, CURSOR_TEXT } from './cursors'
+import { beginCanvasGesture, endCanvasGesture } from './gesture'
 import { buildClipboardPayload } from './clipboard'
 import type { ClipboardPayload } from './clipboard'
 import { CropConfirmControls, CropRegionOverlay, useCropTool } from './CropTool'
@@ -755,6 +756,11 @@ export function useMarquee({
   const [gesture, setGesture] = useState<{ origin: Point; current: Point } | null>(null)
 
   const begin = useCallback((containerPoint: Point) => {
+    // Final review pass: the marquee is a canvas gesture — Enter-finalize
+    // must not fire mid-drag (it would flip the tool to pan and the
+    // release commit would plant a selection there, violating the pan
+    // no-live-selection invariant).
+    beginCanvasGesture()
     setGesture({ origin: containerPoint, current: containerPoint })
   }, [])
 
@@ -762,7 +768,12 @@ export function useMarquee({
     setGesture((active) => (active ? { ...active, current: containerPoint } : active))
   }, [])
 
-  const cancel = useCallback(() => setGesture(null), [])
+  const cancel = useCallback(() => {
+    setGesture((active) => {
+      if (active) endCanvasGesture()
+      return null
+    })
+  }, [])
 
   const commit = useCallback(
     (additive: boolean) => {
@@ -784,6 +795,7 @@ export function useMarquee({
       } else if (action.kind === 'select') {
         onReplaceSelection(action.ids)
       }
+      endCanvasGesture()
       setGesture(null)
     },
     [
@@ -1136,12 +1148,18 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         event.stopPropagation()
         cropRef.current.cancel()
       } else if (event.key === 'Enter' && cropRef.current.isPending) {
+        // Own the key fully (final review pass): the page-level
+        // Enter-to-save listener registered EARLIER and same-phase window
+        // listeners run in registration order — without capture +
+        // stopPropagation it would save the PRE-crop state on the very
+        // keypress that confirms the crop.
         event.preventDefault()
+        event.stopPropagation()
         cropRef.current.confirm()
       }
     }
-    window.addEventListener('keydown', handleWindowKeyDown)
-    return () => window.removeEventListener('keydown', handleWindowKeyDown)
+    window.addEventListener('keydown', handleWindowKeyDown, true)
+    return () => window.removeEventListener('keydown', handleWindowKeyDown, true)
   }, [cropActive])
 
   // U8: leaving the crop tool (Toolbar toggle, confirm's switch back to
@@ -1622,7 +1640,19 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // so the press reaches the Stage wherever it lands — placement
         // works over existing objects too, like the crop tool's routing.
         if (placingTool) {
-          if (event.evt.button === 0) {
+          // Touch keeps single-finger panning even while a placement is
+          // armed (final review pass: a touch contact's pointerdown has
+          // button === 0, so without this carve-out the first finger of a
+          // pan/pinch PLACED an item) — the same exemption the crop tool
+          // makes above. Touch users place via the tiles' drag-and-drop.
+          if (event.evt.pointerType === 'touch') {
+            stage.draggable(true)
+            return
+          }
+          // Belt-and-suspenders target check (arming clears the selection,
+          // so no transformer chrome should exist — but a press must
+          // never both manipulate overlay chrome AND place).
+          if (event.evt.button === 0 && event.target === stage) {
             onPlaceAt?.(screenToStagePoint(stage, event.evt.clientX, event.evt.clientY))
           }
           return

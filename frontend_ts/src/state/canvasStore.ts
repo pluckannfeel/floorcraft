@@ -958,7 +958,12 @@ export const useCanvasStore = create<CanvasState>()(
         // toggles follow. Untracked keys only: no history entry.
         set(
           placement
-            ? { activeTool: 'place', placement }
+            ? // Arming ALSO clears the selection (final review pass): a
+              // retained selection kept its Transformer chrome live and
+              // listening while 'place' owned the canvas — pressing an
+              // anchor then BOTH resized the old selection AND placed the
+              // armed item. Same convention as entering crop/pan.
+              { activeTool: 'place', placement, selectedItemIds: [] }
             : // Disarm lands on pan, and pan's no-live-selection invariant
               // applies here exactly as in setActiveTool.
               { activeTool: 'pan', placement: null, selectedItemIds: [] },

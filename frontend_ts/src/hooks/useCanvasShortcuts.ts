@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { isCanvasGestureInFlight } from "../canvas/gesture";
 import { undo, redo, useCanvasStore } from "../state/canvasStore";
 import { isEditableTarget } from "../canvas/coordinates";
 
@@ -159,6 +160,13 @@ export function useCanvasShortcuts(
         // stays a pure save: it deliberately works mid-edit without
         // disturbing the selection.
         if (event.key === "Enter") {
+          // Final review pass: NEVER finalize mid-gesture. Enter during a
+          // live transform would detach the Transformer before its scale
+          // folds into the store (object stays visually scaled, save
+          // captures stale dims); mid-marquee it flips the tool to pan and
+          // the release plants a selection there; mid-drag it force-ends
+          // the drag against pre-drag state. The gesture keeps the key.
+          if (isCanvasGestureInFlight()) return;
           const store = useCanvasStore.getState();
           store.clearSelection();
           if (store.activeTool === "select") {
