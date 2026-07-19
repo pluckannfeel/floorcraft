@@ -1,6 +1,6 @@
 from django.db import transaction
 from django.db.models import Count, Sum
-from django.http import FileResponse
+from django.http import FileResponse, Http404
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -322,8 +322,17 @@ class ObjectVariantViewSet(
             ignores the document CSP, so the canvas is unaffected here too.
         """
         variant = self.get_object()
+        # A row whose media file is gone (volume mishap, partial restore —
+        # the retention stance means rows are never deleted, so orphans are
+        # the plausible drift) must fall into the SAME uniform 404 as
+        # foreign/nonexistent ids, not a 500 (review-pass find). The
+        # frontend registry degrades a 404 to the placeholder identically.
+        try:
+            file_handle = variant.file.open('rb')
+        except FileNotFoundError:
+            raise Http404
         response = FileResponse(
-            variant.file.open('rb'),
+            file_handle,
             content_type=self.FILE_CONTENT_TYPES[variant.kind],
         )
         response['Cache-Control'] = 'private, max-age=31536000, immutable'

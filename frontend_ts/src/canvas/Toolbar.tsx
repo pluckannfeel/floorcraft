@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import type Konva from 'konva'
 import {
   AlignCenterHorizontal,
@@ -127,9 +128,21 @@ export function Toolbar({
   // (R16). `getStage` is passed through (not a resolved stage) so a
   // mid-await navigation bails silently.
   const { showError } = useToast()
+  // Airtight in-flight guard, the handleSave saveInFlightRef pattern
+  // (review-pass find): the export now awaits pending images for up to
+  // ~3s, so unguarded rapid clicks would run overlapping exports —
+  // duplicate downloads or duplicate timeout toasts. The ref flips
+  // synchronously at dispatch; exportStageToPng's promise settles only
+  // after the capture/bail actually ran, so the guard covers the whole
+  // export.
+  const exportInFlightRef = useRef(false)
   const handleExport = () => {
+    if (exportInFlightRef.current) return
+    exportInFlightRef.current = true
     void exportStageToPng(getStage, selectedItemIds, clearSelection, items, {
       onImagesTimeout: showError,
+    }).finally(() => {
+      exportInFlightRef.current = false
     })
   }
 

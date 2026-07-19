@@ -227,16 +227,30 @@ describe('exportStageToPng', () => {
     const stage = makeFakeStage()
     const clearSelection = vi.fn()
 
-    await exportStageToPng(() => stage, ['obj-1', 'obj-2'], clearSelection, [])
-
+    // The promise now settles only after the CAPTURE runs (in-flight-guard
+    // contract), so hold it un-awaited and drive the frame queue manually.
+    const run = exportStageToPng(() => stage, ['obj-1', 'obj-2'], clearSelection, [])
+    // One macrotask flush lets the pre-capture await chain (registry wait +
+    // liveness checks) run to the afterNextPaint call — without polluting
+    // the stubbed rAF queue the way an rAF-polling waitFor would.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
     expect(clearSelection).toHaveBeenCalledTimes(1)
     expect(stage.toDataURL).not.toHaveBeenCalled()
 
-    frames[0](0)
+    // Flush in ROUNDS (splice the queue so newly-scheduled callbacks land
+    // in the NEXT round) — this models real rAF frame semantics and stays
+    // correct even when the jsdom environment slips an unrelated stray
+    // callback into the stubbed queue: the contract under test is "not
+    // before the SECOND frame", not absolute queue indices.
+    const flushFrameRound = () => {
+      for (const frame of frames.splice(0)) frame(0)
+    }
+    flushFrameRound() // frame 1: afterNextPaint's outer callback
     expect(stage.toDataURL).not.toHaveBeenCalled()
 
-    frames[1](0)
+    flushFrameRound() // frame 2: the inner callback -> capture
     expect(stage.toDataURL).toHaveBeenCalledTimes(1)
+    await run
 
     rafSpy.mockRestore()
   })
@@ -321,6 +335,25 @@ describe('exportStageToPng', () => {
       expect(clickSpy).not.toHaveBeenCalled()
     } finally {
       clickSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('review fix: a pending-timeout with the stage GONE stays silent (no toast over the next plan)', async () => {
+    vi.useFakeTimers()
+    try {
+      const onImagesTimeout = vi.fn()
+      // Stage is gone by the time the await times out (user switched
+      // plans); the timeout branch must bail silently BEFORE toasting.
+      const run = exportStageToPng(() => null, [], vi.fn(), VARIANT_ITEMS, {
+        onImagesTimeout,
+        timeoutMs: 3000,
+        waitDeps: pendingForeverDeps(),
+      })
+      vi.advanceTimersByTime(3001)
+      await run
+      expect(onImagesTimeout).not.toHaveBeenCalled()
+    } finally {
       vi.useRealTimers()
     }
   })

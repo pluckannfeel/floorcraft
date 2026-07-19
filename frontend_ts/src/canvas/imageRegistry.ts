@@ -17,11 +17,15 @@
  * store-free.
  *
  * LIFETIME CONTRACT (plan U6, deepening + doc-review):
- * - Refcounts track mounted nodes for EXPORT BOOKKEEPING ONLY (U7 consumes
- *   them). The decoded element's cache lifetime is decoupled: it SURVIVES
- *   refcount-zero, because undo-of-delete remounts necessarily pass through
- *   zero — evicting there would strobe the exact placeholder this cache
- *   exists to prevent.
+ * - Refcounts track mounted nodes as DIAGNOSTIC bookkeeping only — nothing
+ *   consumes them today (U7's export derives its await-set from the plan's
+ *   items and reads only `status`; verified by the final review pass).
+ *   They are retained because they cost two integer ops and answer "is
+ *   anything still showing this?" in devtools. Cache lifetime is fully
+ *   decoupled from them: the decoded element SURVIVES refcount-zero,
+ *   because undo-of-delete remounts necessarily pass through zero —
+ *   evicting there would strobe the exact placeholder this cache exists
+ *   to prevent.
  * - Eviction happens ONLY via `resetImageRegistry()`, which
  *   CanvasEditorPage calls from its plan-switch reset effect — consistent
  *   with export's plan-switch isolation (a stale entry from a previous plan
@@ -58,7 +62,8 @@ interface RegistryEntry {
   /** The decoded element, set by the raw onload (status stays 'pending'
    * until a commit — see module doc). Survives refcount-zero. */
   image: HTMLImageElement | null
-  /** Mounted-node count — export bookkeeping ONLY, never cache lifetime. */
+  /** Mounted-node count — unconsumed diagnostic bookkeeping (see the
+   * module doc's lifetime contract), never cache lifetime. */
   refcount: number
   listeners: Set<() => void>
   /** Cached immutable view for `useSyncExternalStore` (stable identity
@@ -181,8 +186,17 @@ function probeSession(): void {
  * `registry.get(url) !== entry` guard in startLoad).
  */
 export function resetImageRegistry(): void {
+  // Notify BEFORE clearing (review-pass find): an export's
+  // `awaitVariantImages` may be subscribed to entries this reset is about
+  // to evict — without a notification its recheck can never fire again
+  // (peek() will return null, i.e. "not pending", but nothing invokes it),
+  // stranding the wait until its timeout and surfacing a spurious
+  // "images haven't finished loading" toast on the NEXT plan. Notifying
+  // lets the wait re-check, observe nothing pending, and resolve cleanly.
+  const allListeners = [...registry.values()].flatMap((entry) => [...entry.listeners])
   registry.clear()
   lastProbeAt = null
+  for (const listener of allListeners) listener()
 }
 
 /** Read-only view of one entry for U7's export await-set + tests. `null`

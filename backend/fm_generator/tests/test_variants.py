@@ -1148,3 +1148,108 @@ class VariantFileServingTests(VariantApiTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(streamed(response), stored_bytes(variant))
+
+
+class ReviewPassFixTests(VariantApiTestCase):
+    """Final review-pass fixes (post-U8): the widened url()-attribute scan,
+    element-text scanning, post-pipeline output caps, and the missing-file
+    uniform 404.
+    """
+
+    def test_external_url_in_presentation_attributes_rejected(self):
+        """Review find: stroke/filter/mask (etc.) are func-IRI-capable and
+        must reject exactly like fill/style — svg-hush would only silently
+        rewrite them (verified empirically), the opposite of R9's friendly
+        rejection."""
+        template = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+            '<rect width="10" height="10" {attribute}="url(https://evil.example/leak)"/>'
+            '</svg>'
+        )
+        for attribute in ('stroke', 'filter', 'mask', 'clip-path', 'marker-start', 'cursor'):
+            with self.subTest(attribute):
+                self.assert_rejected(
+                    'active.svg', template.format(attribute=attribute).encode(), 'active content'
+                )
+
+    def test_external_url_and_import_in_style_element_content_rejected(self):
+        """Review find: <style> CHILDREN carry CSS the attribute walk never
+        sees — an @import previously survived into the STORED bytes."""
+        css_url = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+            '<style>rect{fill:url(https://evil.example/y)}</style><rect width="10" height="10"/>'
+            '</svg>'
+        )
+        css_import = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+            '<style>@import url("#local");</style><rect width="10" height="10"/>'
+            '</svg>'
+        )
+        self.assert_rejected('style-url.svg', css_url.encode(), 'active content')
+        self.assert_rejected('style-import.svg', css_import.encode(), 'active content')
+
+    def test_internal_fragment_urls_in_presentation_attributes_still_accepted(self):
+        """The widened attribute set must not reject the LEGITIMATE use:
+        same-document fragment references (gradients/clip paths)."""
+        fixture = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+            '<defs><clipPath id="c"><rect width="5" height="5"/></clipPath></defs>'
+            '<rect width="10" height="10" clip-path="url(#c)" stroke="url(#c)"/>'
+            '</svg>'
+        )
+        response = post_variant(self.client, 'fragments.svg', fixture.encode())
+        self.assertEqual(response.status_code, 201, response.content)
+
+    def test_raster_reencode_exceeding_cap_is_rejected(self):
+        """Review find: re-encoding can INFLATE (q30 noise -> q90). The cap
+        must bound the STORED bytes, so the output is re-checked. The cap is
+        patched to exactly the input size: the input checks (strictly
+        greater-than) pass, and only the output check can trip."""
+        import random
+        from unittest import mock
+
+        random.seed(1234)
+        side = 64
+        noise = Image.new('RGB', (side, side))
+        noise.putdata([
+            (random.randrange(256), random.randrange(256), random.randrange(256))
+            for _ in range(side * side)
+        ])
+        out = BytesIO()
+        noise.save(out, format='JPEG', quality=30)
+        payload = out.getvalue()
+
+        with mock.patch('fm_generator.variants.MAX_RASTER_BYTES', len(payload)):
+            response = post_variant(self.client, 'noise.jpg', payload)
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn('too large', str(response.json()))
+        self.assertEqual(ObjectVariant.objects.count(), 0)
+
+    def test_svg_normalization_exceeding_cap_is_rejected(self):
+        """Same contract for SVG: normalization (added width/height + XML
+        declaration) grows the bytes; the OUTPUT must pass the cap."""
+        from unittest import mock
+
+        viewbox_only = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60">'
+            '<rect width="120" height="60"/></svg>'
+        ).encode()
+
+        with mock.patch('fm_generator.variants.MAX_SVG_BYTES', len(viewbox_only)):
+            response = post_variant(self.client, 'grow.svg', viewbox_only)
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn('too large', str(response.json()))
+
+    def test_missing_media_file_serves_uniform_404(self):
+        """Review find: a row whose media file is gone must 404 like
+        foreign/nonexistent ids (the anti-oracle contract), never 500 —
+        the frontend registry degrades a 404 to the placeholder."""
+        import os
+
+        response = post_variant(self.client, 'chair.png', png_bytes(8, 8))
+        self.assertEqual(response.status_code, 201, response.content)
+        variant = ObjectVariant.objects.get()
+        os.remove(variant.file.path)
+
+        fetched = self.client.get(f'{VARIANTS_URL}{variant.pk}/file/')
+        self.assertEqual(fetched.status_code, 404)

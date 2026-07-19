@@ -199,23 +199,36 @@ export async function exportStageToPng(
 
   const urls = collectVariantImageUrls(items)
   const waited = await awaitVariantImages(urls, timeoutMs, waitDeps ?? REAL_REGISTRY_DEPS)
+
+  // Navigated away during the await → silent bail (doc-review): no toast
+  // (EVEN on the timeout branch — a plan-switch mid-await must never toast
+  // over the next plan; review-pass find), no download, and crucially no
+  // toDataURL against a destroyed stage. The registry's reset also
+  // notifies waiters on plan switch, so this branch is belt-and-suspenders
+  // for any other stage-teardown path.
+  if (!getStage()) return
+
   if (waited === 'timeout') {
     onImagesTimeout?.(EXPORT_IMAGES_TIMEOUT_MESSAGE)
     return
   }
 
-  // Navigated away during the await → silent bail (doc-review): no toast,
-  // no download, and crucially no toDataURL against a destroyed stage.
-  if (!getStage()) return
-
   if (selectedItemIds.length > 0) {
     clearSelection()
   }
-  afterNextPaint(() => {
-    // The two-rAF window is itself asynchronous — re-check liveness once
-    // more before touching the canvas.
-    const stage = getStage()
-    if (!stage) return
-    downloadDataUrl(stage.toDataURL(), filename)
+  // The returned promise settles only after the capture/bail actually ran
+  // (not merely when it was scheduled) so callers can hold an in-flight
+  // guard across the ENTIRE export (review-pass find: double-click =
+  // double download without this).
+  await new Promise<void>((resolve) => {
+    afterNextPaint(() => {
+      // The two-rAF window is itself asynchronous — re-check liveness once
+      // more before touching the canvas.
+      const stage = getStage()
+      if (stage) {
+        downloadDataUrl(stage.toDataURL(), filename)
+      }
+      resolve()
+    })
   })
 }

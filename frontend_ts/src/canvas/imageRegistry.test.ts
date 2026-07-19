@@ -238,3 +238,18 @@ describe('imageRegistry: failure contract (R16 + R20)', () => {
     expect(getSpy).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('resetImageRegistry notifies waiters (review-pass fix)', () => {
+  it('subscribed listeners fire when the registry resets, so an export await can re-check instead of stranding until timeout', () => {
+    const listener = vi.fn()
+    const unsubscribe = subscribeImageRegistry('/api/object-variants/1/file/', listener)
+
+    resetImageRegistry()
+
+    // The listener ran (post-clear: peek() now reports no entry, which an
+    // export's recheck reads as "nothing pending" and resolves cleanly).
+    expect(listener).toHaveBeenCalled()
+    expect(peekImageRegistry('/api/object-variants/1/file/')).toBeNull()
+    unsubscribe()
+  })
+})

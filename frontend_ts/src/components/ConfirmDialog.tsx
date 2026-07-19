@@ -1,4 +1,4 @@
-import { useId } from 'react'
+import { useEffect, useId } from 'react'
 import { Button } from '@/components/ui/button'
 
 /**
@@ -45,6 +45,24 @@ export function ConfirmDialog({
   const titleId = useId()
   const messageId = useId()
 
+  // Escape ownership via a CAPTURE-phase window listener, not a React
+  // onKeyDown on the dialog subtree (review-pass find): keydown dispatches
+  // from document.activeElement, and with no focus trap a click on the
+  // dialog's non-focusable text drops focus to <body> — a subtree handler
+  // then never fires, so Escape would leak to the canvas's window-level
+  // handlers (exit-tool) while the dialog stayed open. Capture-phase +
+  // stopPropagation makes the open dialog own Escape no matter where focus
+  // sits — the ContextMenu.tsx convention.
+  useEffect(() => {
+    function handleWindowKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      onCancel()
+    }
+    window.addEventListener('keydown', handleWindowKeyDown, true)
+    return () => window.removeEventListener('keydown', handleWindowKeyDown, true)
+  }, [onCancel])
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
@@ -52,15 +70,6 @@ export function ConfirmDialog({
         // Backdrop-only: a press inside the panel bubbles here with a
         // deeper target and must not dismiss.
         if (event.target === event.currentTarget) onCancel()
-      }}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') {
-          // Ownership (see module doc): the canvas's window-level Escape
-          // handler must NOT also fire — dismissing the dialog is the whole
-          // gesture. Same pattern as UserMenu.tsx.
-          event.stopPropagation()
-          onCancel()
-        }
       }}
     >
       <div

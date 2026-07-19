@@ -364,7 +364,18 @@ def _process_raster(data, kind):
         # format message.
         raise VariantRejected(MSG_NOT_AN_IMAGE)
 
-    return ProcessedUpload(kind=kind, content=out.getvalue(), width=width, height=height)
+    content = out.getvalue()
+    # Post-pipeline cap re-check (review-pass find): the input cap ran on
+    # the UPLOADED bytes, but re-encoding can inflate — a quality-30
+    # 2.5 MB JPEG re-encoded at quality 90 measured 6.2 MB. The stored
+    # file is what the caps promise to bound, so the OUTPUT is what must
+    # pass them (the plan's deferred "size re-check after sanitization"
+    # question, resolved: yes, and reject rather than silently store over
+    # the limit).
+    if len(content) > MAX_RASTER_BYTES:
+        raise VariantRejected(MSG_RASTER_TOO_BIG)
+
+    return ProcessedUpload(kind=kind, content=content, width=width, height=height)
 
 
 # ---------------------------------------------------------------------------
@@ -459,10 +470,25 @@ _ACTIVE_ELEMENTS = {
     'foreignobject': 'a <foreignObject> element',
 }
 
-# Attributes whose values can reference external resources via url(...).
-# The plan names style/fill; internal fragment references (url(#gradient))
+# Attributes whose values can reference external resources via url(...):
+# the FULL func-IRI-capable presentation set, not just style/fill — the
+# review pass proved stroke/filter/mask/clip-path/marker/cursor slipped
+# through and svg-hush then silently rewrote them (the exact opposite of
+# R9's friendly rejection). Internal fragment references (url(#gradient))
 # are the legitimate use and stay allowed.
-_URL_BEARING_ATTRIBUTES = {'style', 'fill'}
+_URL_BEARING_ATTRIBUTES = {
+    'style',
+    'fill',
+    'stroke',
+    'filter',
+    'mask',
+    'clip-path',
+    'marker',
+    'marker-start',
+    'marker-mid',
+    'marker-end',
+    'cursor',
+}
 
 
 def _localname(qualified):
@@ -504,6 +530,25 @@ def _scan_svg_tree(root):
             if name in _URL_BEARING_ATTRIBUTES and _has_external_url_reference(value):
                 raise VariantRejected(
                     MSG_ACTIVE_CONTENT.format(found=f'an external url() reference in {name}')
+                )
+
+        # Element TEXT is scannable content too: <style> children carry CSS
+        # whose url(...)/@import can reference external resources — the
+        # attribute walk above never sees them (review-pass find: an
+        # @import survived into the STORED bytes). Scan text and tail of
+        # every element; only CSS-ish text can trip these checks, so false
+        # positives on ordinary <text> content are not a concern
+        # (`url(#frag)` stays allowed by _has_external_url_reference).
+        for chunk in (element.text, element.tail):
+            if not chunk:
+                continue
+            if _has_external_url_reference(chunk):
+                raise VariantRejected(
+                    MSG_ACTIVE_CONTENT.format(found='an external url() reference in element content')
+                )
+            if '@import' in chunk.lower():
+                raise VariantRejected(
+                    MSG_ACTIVE_CONTENT.format(found='a CSS @import in element content')
                 )
 
 
@@ -556,6 +601,7 @@ def _normalize_svg_dimensions(hushed):
         # Root already carries usable absolute dimensions: store svg-hush's
         # bytes VERBATIM (no re-serialization to introduce drift), just
         # validate/clamp what we record.
+        _enforce_svg_output_cap(hushed)
         return ProcessedUpload(
             kind='svg',
             content=hushed,
@@ -581,7 +627,17 @@ def _normalize_svg_dimensions(hushed):
     root.set('width', str(clamped_width))
     root.set('height', str(clamped_height))
     content = ET.tostring(root, encoding='utf-8')  # includes the XML declaration
+    _enforce_svg_output_cap(content)
     return ProcessedUpload(kind='svg', content=content, width=clamped_width, height=clamped_height)
+
+
+def _enforce_svg_output_cap(content):
+    """Post-pipeline cap re-check for SVG, mirroring the raster one: the
+    input cap ran on the UPLOADED bytes; filtering/normalization can shift
+    the size (usually shrinking, but the stored file is what the cap
+    promises to bound, so the OUTPUT is what must pass it)."""
+    if len(content) > MAX_SVG_BYTES:
+        raise VariantRejected(MSG_SVG_TOO_BIG)
 
 
 def _parse_length(value):

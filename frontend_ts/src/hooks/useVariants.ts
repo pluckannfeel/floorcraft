@@ -144,6 +144,13 @@ export function useVariants() {
       const { data } = await apiClient.get<ObjectVariant[]>('/object-variants/')
       return data
     },
+    // Review-pass find: with the app-default refetchOnWindowFocus, a
+    // focus-triggered refetch whose GET was built BEFORE a slow upload
+    // committed can land AFTER the mutation's setQueryData append and
+    // clobber it (thumbnail vanishes; a just-deleted variant can
+    // resurrect). The mutations' cache merges are the only writers this
+    // list needs — matching the module doc's no-background-refetch stance.
+    refetchOnWindowFocus: false,
   })
 }
 

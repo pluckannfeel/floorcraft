@@ -186,3 +186,40 @@ describe('Toolbar align/distribute section (U6)', () => {
     expect(screen.queryByRole('button', { name: 'Align left' })).not.toBeInTheDocument()
   })
 })
+
+describe('export in-flight guard (review-pass fix)', () => {
+  it('rapid Export clicks run ONE export (no duplicate downloads/toasts)', async () => {
+    // The export now awaits pending images (up to ~3s) before capturing,
+    // so an unguarded second click would start an overlapping export —
+    // the exact double-fire class handleSave's saveInFlightRef guards.
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const stage = {
+      toDataURL: vi.fn(() => 'data:image/png;base64,fake'),
+    } as unknown as import('konva').default.Stage
+
+    render(
+      <Toolbar
+        getStage={() => stage}
+        selectedItemIds={[]}
+        onReorderZIndex={() => {}}
+        onAlignSelection={() => {}}
+        onDistributeSelection={() => {}}
+      />,
+    )
+
+    const user = userEvent.setup()
+    const exportButton = screen.getByRole('button', { name: /export png/i })
+    // Two immediate clicks: the second lands while the first export's
+    // await chain (registry wait + two-rAF capture window) is in flight.
+    await user.click(exportButton)
+    await user.click(exportButton)
+
+    // Give the rAF-driven capture time to complete fully.
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    expect(stage.toDataURL).toHaveBeenCalledTimes(1)
+    expect(clickSpy).toHaveBeenCalledTimes(1)
+
+    clickSpy.mockRestore()
+  })
+})
