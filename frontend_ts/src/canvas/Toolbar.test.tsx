@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import * as ToastContextModule from '../notifications/ToastContext'
 import { Toolbar } from './Toolbar'
 import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject } from './types'
@@ -59,6 +60,13 @@ const ALIGN_LABELS = [
 
 describe('Toolbar align/distribute section (U6)', () => {
   beforeEach(() => {
+  // U7 (object-visuals): Toolbar consumes useToast for the export
+  // pending-timeout message — spied like every other suite (no provider).
+  vi.spyOn(ToastContextModule, 'useToast').mockReturnValue({
+    toasts: [],
+    showError: vi.fn(),
+    dismiss: vi.fn(),
+  })
     useCanvasStore.setState({ items: [], selectedItemIds: [] })
     useCanvasStore.temporal.getState().clear()
   })

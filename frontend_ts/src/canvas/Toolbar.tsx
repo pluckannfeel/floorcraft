@@ -20,6 +20,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { useStore } from 'zustand'
 import { Button } from '@/components/ui/button'
+import { useToast } from '../notifications/ToastContext'
 import { redo, undo, useCanvasStore } from '../state/canvasStore'
 import { resolveAlignmentAvailability } from './alignment'
 import type { AlignKind, DistributeAxis } from './alignment'
@@ -119,11 +120,17 @@ export function Toolbar({
   // U12: clears selection (detaching Transformer/anchor handles), waits for
   // that to actually redraw, then downloads a PNG snapshot — see
   // `export.ts`'s doc comment for why the clear-then-wait sequencing is
-  // needed instead of exporting immediately.
+  // needed instead of exporting immediately. U7 (object-visuals): the
+  // export first awaits the plan's still-loading variant images; a
+  // pending-timeout surfaces through the app's toast convention and
+  // aborts, while settled-failed images export as their placeholders
+  // (R16). `getStage` is passed through (not a resolved stage) so a
+  // mid-await navigation bails silently.
+  const { showError } = useToast()
   const handleExport = () => {
-    const stage = getStage()
-    if (!stage) return
-    exportStageToPng(stage, selectedItemIds, clearSelection)
+    void exportStageToPng(getStage, selectedItemIds, clearSelection, items, {
+      onImagesTimeout: showError,
+    })
   }
 
   return (
