@@ -222,6 +222,54 @@ describe('useSaveObjects', () => {
     expect(secondBody.objects.map((o) => o.id)).toEqual([99])
   })
 
+  it('variant properties ride the payload verbatim, and survive undo-after-save with mapped-id reuse (U8, object-visuals)', async () => {
+    // R13/AE-adjacent: a placed variant object's `properties` carry the
+    // opaque visual_variant_id reference. The sync payload must send
+    // properties VERBATIM (toSaveObjectPayload passes them through), and
+    // the undo-after-save chain (the stable-id invariant from
+    // docs/solutions/ui-bugs/undo-redo-broken-after-save-2026-07-16.md)
+    // must keep the reference intact while translating the id.
+    const variantProperties = { visual_variant_id: 42 }
+    act(() => {
+      useCanvasStore.getState().createItemLocal(
+        makeObject({
+          id: 'local-variant' as never,
+          x: 0,
+          properties: variantProperties,
+        }),
+      )
+    })
+    act(() => {
+      useCanvasStore.getState().updateItemGeometry('local-variant' as never, { x: 80 })
+    })
+
+    const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: {
+        objects: [makeObject({ id: 77, x: 80, properties: variantProperties })],
+        id_map: { 'local-variant': 77 },
+      },
+    } as never)
+
+    const { result } = renderHook(() => useSaveObjects(7), { wrapper })
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    // Save #1 sent the reference untouched.
+    const firstBody = putSpy.mock.calls[0][1] as { objects: Record<string, unknown>[] }
+    expect(firstBody.objects[0].properties).toEqual(variantProperties)
+
+    // Undo, then save #2: mapped id reused, properties still verbatim.
+    act(() => undo())
+    expect(useCanvasStore.getState().items[0]).toEqual(
+      expect.objectContaining({ id: 'local-variant', x: 0, properties: variantProperties }),
+    )
+    act(() => result.current.mutate())
+    await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(2))
+    const secondBody = putSpy.mock.calls[1][1] as { objects: Record<string, unknown>[] }
+    expect(secondBody.objects.map((o) => o.id)).toEqual([77])
+    expect(secondBody.objects[0].properties).toEqual(variantProperties)
+  })
+
   it('carries group_key in every payload item — the stored key for grouped items, an explicit null otherwise (U4)', async () => {
     useCanvasStore.setState({
       items: [

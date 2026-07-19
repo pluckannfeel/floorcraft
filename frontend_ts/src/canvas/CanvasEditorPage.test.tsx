@@ -795,3 +795,115 @@ describe('variant drop and image-registry reset (U6, object-visuals)', () => {
     expect(resetImageRegistrySpy.calls).toBeGreaterThan(callsAfterMount)
   })
 })
+
+describe('persistence regression sweep (U8, object-visuals)', () => {
+  /** R13: place a variant → save → "reload" (navigate away and back, which
+   * re-fetches and re-seeds the store) → the seeded items still carry the
+   * variant reference. The PUT echo is what a real backend returns (the
+   * sync contract passes properties through verbatim — see test_sync.py's
+   * U8 cases for the server half). */
+  it('place variant → save → reload seeds objects that still carry the reference (R13)', async () => {
+    const variantProperties = { [VISUAL_VARIANT_ID_KEY]: 12 }
+    const savedObject = makeObject({
+      id: 501,
+      floor_plan: 7,
+      type: 'chairs',
+      x: 100,
+      y: 120,
+      width: 40,
+      height: 20,
+      properties: variantProperties,
+    })
+
+    // Phase 1: an empty plan; the PUT echoes the created row.
+    const getSpy = mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Persist Plan' }), objects: [] },
+      8: { plan: makePlan({ id: 8, name: 'Other Plan' }), objects: [] },
+    })
+    vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: { objects: [savedObject], id_map: {} },
+    } as never)
+
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Persist Plan')).toBeInTheDocument()
+    const onDrop = sidebarProps.current?.onDrop as (
+      type: CatalogType,
+      point: Point,
+      variant?: VariantDragRef,
+    ) => void
+    act(() => onDrop('chairs', { x: 100, y: 120 }, { id: 12, width: 200, height: 100 }))
+    expect(useCanvasStore.getState().items[0].properties).toEqual(variantProperties)
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /save changes/i }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /save changes/i })).toHaveTextContent('Saved'),
+    )
+
+    // Phase 2: the "reload" — navigate to another plan and back. The
+    // return trip re-fetches objects (now serving the saved row) and the
+    // seed-once effect re-seeds the store for the plan.
+    getSpy.mockRestore()
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Persist Plan' }), objects: [savedObject] },
+      8: { plan: makePlan({ id: 8, name: 'Other Plan' }), objects: [] },
+    })
+    act(() => navigateRef.current!('/floor-plans/8'))
+    expect(await screen.findByText('Other Plan')).toBeInTheDocument()
+    act(() => navigateRef.current!('/floor-plans/7'))
+    expect(await screen.findByText('Persist Plan')).toBeInTheDocument()
+
+    await waitFor(() => {
+      const items = useCanvasStore.getState().items
+      expect(items).toHaveLength(1)
+      expect(items[0]).toEqual(
+        expect.objectContaining({ id: 501, width: 40, height: 20, properties: variantProperties }),
+      )
+    })
+  })
+
+  /** AE3 (R4): a pre-feature plan — objects with empty or legacy-keyed
+   * properties, no visual keys — loads with geometry unchanged and
+   * properties EXACTLY as served (no migration, no mutation; symbols are a
+   * pure render-time decision). */
+  it('a pre-feature plan loads with properties and geometry served verbatim (AE3)', async () => {
+    const legacyObjects = [
+      makeObject({ id: 1, type: 'chairs', x: 10, y: 20, width: 40, height: 40, properties: {} }),
+      makeObject({
+        id: 2,
+        type: 'tables',
+        x: 200,
+        y: 80,
+        width: 120,
+        height: 60,
+        rotation: 45,
+        // Legacy rows may carry arbitrary keys (models.py mentions wall
+        // thickness/BTU) — branch selection keys on the visual key's
+        // PRESENCE, never on properties emptiness.
+        properties: { wall_thickness: 5, custom_note: 'BTU 9000' },
+      }),
+    ]
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Legacy Plan' }), objects: legacyObjects },
+    })
+
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Legacy Plan')).toBeInTheDocument()
+
+    await waitFor(() => {
+      const items = useCanvasStore.getState().items
+      expect(items).toHaveLength(2)
+      expect(items[0]).toEqual(
+        expect.objectContaining({ x: 10, y: 20, width: 40, height: 40, properties: {} }),
+      )
+      expect(items[1]).toEqual(
+        expect.objectContaining({
+          rotation: 45,
+          properties: { wall_thickness: 5, custom_note: 'BTU 9000' },
+        }),
+      )
+    })
+    // No mutation happened: the store is clean (seeding is not an edit).
+    expect(useCanvasStore.getState().dirty).toBe(false)
+  })
+})

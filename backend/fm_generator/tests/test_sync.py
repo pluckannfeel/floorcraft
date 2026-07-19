@@ -628,3 +628,72 @@ class SyncAuthenticationTests(SyncEndpointTestCase):
 
         self.assertIn(response.status_code, (401, 403))
         self.assertEqual(Objects.objects.filter(floor_plan=self.floor_plan).count(), 1)
+
+
+class SyncVariantPropertiesTests(SyncEndpointTestCase):
+    """U8 (object-visuals): the sync contract treats catalog-type
+    `properties` as opaque JSON — a placed variant's `visual_variant_id`
+    reference (and any other keys riding alongside) must round-trip the
+    atomic PUT verbatim, on both the create and the update path, with the
+    echo response preserving it. The frontend's whole R11/R13 keep-rendering
+    story rests on the server never touching this field (the reference is
+    deliberately opaque: no FK, no serializer validation — rendering fails
+    closed client-side; see docs/plans/2026-07-18-001-feat-object-visuals-plan.md).
+    """
+
+    def test_variant_reference_round_trips_on_create(self):
+        """R13: create echoes the reference (and neighbors) verbatim."""
+        self.login_as()
+        properties = {'visual_variant_id': 42, 'custom_note': 'walnut finish'}
+        response = self.sync(
+            self.floor_plan.pk,
+            [object_payload(type='chairs', properties=properties)],
+        )
+        self.assertEqual(response.status_code, 200)
+        echoed = response.json()['objects'][0]['properties']
+        self.assertEqual(echoed, properties)
+        stored = Objects.objects.get(floor_plan=self.floor_plan)
+        self.assertEqual(stored.properties, properties)
+
+    def test_variant_reference_round_trips_on_update(self):
+        """R13: updating geometry leaves the reference untouched, and the
+        reference itself can be updated/removed like any opaque JSON."""
+        self.login_as()
+        created = self.sync(
+            self.floor_plan.pk,
+            [object_payload(type='chairs', properties={'visual_variant_id': 42})],
+        ).json()['objects'][0]
+
+        # Geometry-only update: properties sent verbatim, preserved verbatim.
+        moved = self.sync(
+            self.floor_plan.pk,
+            [
+                object_payload(
+                    id=created['id'],
+                    type='chairs',
+                    x=200,
+                    properties={'visual_variant_id': 42},
+                )
+            ],
+        )
+        self.assertEqual(moved.status_code, 200)
+        echoed = moved.json()['objects'][0]
+        self.assertEqual(echoed['x'], 200)
+        self.assertEqual(echoed['properties'], {'visual_variant_id': 42})
+
+    def test_dangling_or_foreign_reference_passes_untouched(self):
+        """The reference is OPAQUE: a nonexistent (or another user's)
+        variant id is not the sync endpoint's concern — rendering fails
+        closed to the default symbol client-side, and the owner-scoped
+        file endpoint 404s foreign fetches (U3). Validating here would
+        break R11's keep-rendering guarantee for soft-deleted variants."""
+        self.login_as()
+        response = self.sync(
+            self.floor_plan.pk,
+            [object_payload(type='tables', properties={'visual_variant_id': 999999})],
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()['objects'][0]['properties'],
+            {'visual_variant_id': 999999},
+        )
