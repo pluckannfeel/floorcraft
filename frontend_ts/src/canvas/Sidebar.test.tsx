@@ -16,6 +16,18 @@ import { colorForType } from './ObjectShape'
 import { Sidebar } from './Sidebar'
 import { SYMBOLS } from './symbols'
 import { CATALOG_TYPES } from './types'
+
+/** Mirror of Sidebar's internal CATALOG_LABELS (not exported): the header
+ * text each type's card shows. */
+const CATALOG_LABELS_FOR_TEST: Record<(typeof CATALOG_TYPES)[number], string> = {
+  outlines: 'Outline',
+  tables: 'Table',
+  doors: 'Door',
+  chairs: 'Chair',
+  furnitures: 'Furniture',
+  appliances: 'Appliance',
+  lighting: 'Lighting',
+}
 import type { Point } from './types'
 
 /**
@@ -264,8 +276,12 @@ describe('Sidebar catalog symbol thumbnails (U4 object-visuals)', () => {
         // no per-path styling, and never any stroke.
         expect(path.getAttribute('stroke')).toBeNull()
       }
-      // The card's label and drag surface are untouched by the swap.
-      expect(card.textContent).not.toBe('')
+      // The type label moved to the card HEADER (object-visuals
+      // follow-up: header + tile-row anatomy). Scope the lookup to the
+      // card (the 'Furniture' TYPE label collides with the 'Furniture'
+      // SECTION header at document level).
+      const cardRoot = card.closest('li')!
+      expect(within(cardRoot as HTMLElement).getByText(CATALOG_LABELS_FOR_TEST[type])).toBeInTheDocument()
     }
   })
 
@@ -274,6 +290,10 @@ describe('Sidebar catalog symbol thumbnails (U4 object-visuals)', () => {
     renderSidebar(onDrop)
 
     fireEvent.pointerDown(screen.getByTestId('catalog-item-chairs'), { clientX: 10, clientY: 10 })
+    // Threshold model (object-visuals follow-up): the press only becomes a
+    // DRAG once the pointer travels past the threshold — the move below
+    // both crosses it and positions the drop.
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 105, clientY: 95 }))
     fireEvent(window, new PointerEvent('pointerup', { clientX: 105, clientY: 95 }))
 
     // Identity-transform stage → (105, 95) snapped to the 20px grid.
@@ -346,23 +366,31 @@ describe('Sidebar variant catalog (U5 object-visuals)', () => {
     ])
     renderSidebar()
 
-    // Both chair uploads land in the chairs strip, the table upload in its
-    // own — grouping happens client-side over the single flat list.
-    const chairStrip = await screen.findByTestId('variant-strip-chairs')
-    expect(within(chairStrip).getByTestId('variant-item-1')).toBeInTheDocument()
-    expect(within(chairStrip).getByTestId('variant-item-2')).toBeInTheDocument()
-    expect(within(screen.getByTestId('variant-strip-tables')).getByTestId('variant-item-3')).toBeInTheDocument()
+    // Both chair uploads land in the chairs tile row, the table upload in
+    // its own — grouping happens client-side over the single flat list.
+    // (Object-visuals follow-up: the row is `catalog-tiles-<type>` and
+    // ALWAYS exists — it holds the default tile + [+] even with zero
+    // variants; the variant tiles slot between them.)
+    // The tile row exists synchronously (default + [+]); the variant
+    // tiles arrive when the query resolves — await THEM, not the row.
+    const firstTile = await screen.findByTestId('variant-item-1')
+    const chairRow = screen.getByTestId('catalog-tiles-chairs')
+    expect(within(chairRow).getByTestId('variant-item-1')).toBe(firstTile)
+    expect(within(chairRow).getByTestId('variant-item-2')).toBeInTheDocument()
+    expect(within(screen.getByTestId('catalog-tiles-tables')).getByTestId('variant-item-3')).toBeInTheDocument()
 
-    // R12: the file-derived name is the tooltip AND the accessible name;
-    // the thumbnail streams from the authenticated file endpoint.
+    // R12: the file-derived name is the tooltip AND part of the accessible
+    // name; the thumbnail streams from the authenticated file endpoint.
     const tile = screen.getByTestId('variant-item-1')
     expect(tile).toHaveAttribute('title', 'my-chair.png')
-    expect(tile).toHaveAttribute('aria-label', 'Drag my-chair.png')
+    expect(tile).toHaveAttribute('aria-label', 'Place my-chair.png')
     expect(tile.querySelector('img')).toHaveAttribute('src', '/api/object-variants/1/file/')
 
-    // Zero variants for a type → no strip row at all (no empty tray).
+    // Zero variants for a type → the row still shows default + [+], but no
+    // variant tiles (the no-empty-tray spirit, new anatomy).
     for (const type of ['outlines', 'doors', 'furnitures', 'appliances', 'lighting']) {
-      expect(screen.queryByTestId(`variant-strip-${type}`)).not.toBeInTheDocument()
+      const row = screen.getByTestId(`catalog-tiles-${type}`)
+      expect(row.querySelector('[data-testid^="variant-item-"]')).toBeNull()
     }
   })
 
@@ -375,8 +403,10 @@ describe('Sidebar variant catalog (U5 object-visuals)', () => {
       clientX: 10,
       clientY: 10,
     })
-    // Mid-drag: the floating preview renders the variant's thumbnail (the
-    // tinted square stays painted beneath as the loading fallback).
+    // Threshold model: the preview appears only once the pointer commits
+    // to a DRAG (movement past the threshold) — a bare press is a click.
+    expect(screen.queryByTestId('catalog-drag-preview')).not.toBeInTheDocument()
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 60, clientY: 40 }))
     const preview = screen.getByTestId('catalog-drag-preview')
     expect(preview.querySelector('img')).toHaveAttribute('src', '/api/object-variants/1/file/')
 
@@ -479,7 +509,8 @@ describe('Sidebar variant catalog (U5 object-visuals)', () => {
     const deleteSpy = vi.spyOn(apiClient, 'delete').mockResolvedValue({} as never)
     renderSidebar()
 
-    const removeButton = within(await screen.findByTestId('variant-strip-chairs')).getByRole(
+    await screen.findByTestId('variant-item-4')
+    const removeButton = within(screen.getByTestId('catalog-tiles-chairs')).getByRole(
       'button',
       { name: 'Remove my-chair.png' },
     )
@@ -561,13 +592,84 @@ describe('Sidebar variant catalog (U5 object-visuals)', () => {
     // no toast (read-only query errors degrade silently, like useObjects).
     for (const type of CATALOG_TYPES) {
       expect(screen.getByTestId(`catalog-item-${type}`)).toBeInTheDocument()
-      expect(screen.queryByTestId(`variant-strip-${type}`)).not.toBeInTheDocument()
+      const row = screen.getByTestId(`catalog-tiles-${type}`)
+      expect(row.querySelector('[data-testid^="variant-item-"]')).toBeNull()
     }
     expect(showError).not.toHaveBeenCalled()
 
-    // ...and the default drag contract is untouched (exact two-arg call).
+    // ...and the default drag contract is untouched (exact two-arg call;
+    // the pointermove crosses the click-vs-drag threshold).
     fireEvent.pointerDown(screen.getByTestId('catalog-item-tables'), { clientX: 10, clientY: 10 })
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 305, clientY: 195 }))
     fireEvent(window, new PointerEvent('pointerup', { clientX: 305, clientY: 195 }))
     expect(onDrop).toHaveBeenCalledExactlyOnceWith('tables', { x: 300, y: 200 })
+  })
+})
+
+describe('click-to-arm placement (object-visuals follow-up)', () => {
+  /** Same shape as the U5 describe's helper (scoped there). */
+  function mockVariants(variants: ObjectVariant[]) {
+    return vi.spyOn(apiClient, 'get').mockResolvedValue({ data: variants } as never)
+  }
+
+  it('clicking the default tile ARMS the placement (place tool, null variant); clicking again disarms to pan', async () => {
+    mockVariants([])
+    const user = userEvent.setup()
+    renderSidebar()
+
+    const tile = screen.getByTestId('catalog-item-chairs')
+    await user.click(tile)
+
+    expect(useCanvasStore.getState().activeTool).toBe('place')
+    expect(useCanvasStore.getState().placement).toEqual({ type: 'chairs', variant: null })
+    expect(tile).toHaveAttribute('aria-pressed', 'true')
+
+    await user.click(tile)
+    expect(useCanvasStore.getState().activeTool).toBe('pan')
+    expect(useCanvasStore.getState().placement).toBeNull()
+    expect(tile).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('clicking a VARIANT tile arms with the reference payload; another tile re-arms without passing through pan', async () => {
+    mockVariants([makeVariant({ id: 9, width: 300, height: 150 })])
+    const user = userEvent.setup()
+    renderSidebar()
+
+    await user.click(await screen.findByTestId('variant-item-9'))
+    expect(useCanvasStore.getState().placement).toEqual({
+      type: 'chairs',
+      variant: { id: 9, width: 300, height: 150 },
+    })
+
+    // Re-arm straight onto the default tile: the payload swaps.
+    await user.click(screen.getByTestId('catalog-item-tables'))
+    expect(useCanvasStore.getState().placement).toEqual({ type: 'tables', variant: null })
+    expect(useCanvasStore.getState().activeTool).toBe('place')
+  })
+
+  it('a sub-threshold press-release is a CLICK (arms, no drop); a completed drag suppresses the arming click', async () => {
+    mockVariants([])
+    const onDrop = vi.fn()
+    renderSidebar(onDrop)
+    const tile = screen.getByTestId('catalog-item-chairs')
+
+    // Jiggle under the threshold, then release: arms, never drops.
+    fireEvent.pointerDown(tile, { clientX: 10, clientY: 10 })
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 12, clientY: 11 }))
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 12, clientY: 11 }))
+    fireEvent.click(tile)
+    expect(onDrop).not.toHaveBeenCalled()
+    expect(useCanvasStore.getState().activeTool).toBe('place')
+
+    // Reset, then a REAL drag: drops once, and the click that the browser
+    // fires after pointerup must NOT toggle the placement.
+    useCanvasStore.getState().setPlacement(null)
+    fireEvent.pointerDown(tile, { clientX: 10, clientY: 10 })
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 105, clientY: 95 }))
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 105, clientY: 95 }))
+    fireEvent.click(tile)
+    expect(onDrop).toHaveBeenCalledTimes(1)
+    expect(useCanvasStore.getState().activeTool).toBe('pan')
+    expect(useCanvasStore.getState().placement).toBeNull()
   })
 })

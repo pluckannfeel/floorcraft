@@ -13,10 +13,10 @@ import {
   ChevronRight,
   Circle,
   Crop,
-  Hand,
   LoaderCircle,
   MousePointer2,
   Minus,
+  Move,
   Plus,
   Spline,
   Square,
@@ -73,7 +73,7 @@ const CATALOG_SECTIONS: { title: string; types: CatalogType[] }[] = [
  * `short` is the tiny caption under the icon, abbreviated where the full
  * label wouldn't fit a grid cell. */
 const TOOL_BUTTONS: { type: ActiveTool; label: string; short: string; Icon: LucideIcon }[] = [
-  { type: 'pan', label: 'Pan', short: 'Pan', Icon: Hand },
+  { type: 'pan', label: 'Pan', short: 'Pan', Icon: Move },
   { type: 'select', label: 'Select', short: 'Select', Icon: MousePointer2 },
   { type: 'shape_rectangle', label: 'Rectangle', short: 'Rect', Icon: RectangleHorizontal },
   { type: 'shape_square', label: 'Square', short: 'Square', Icon: Square },
@@ -148,9 +148,21 @@ interface DragState {
   /** The variant's thumbnail URL for the floating preview; the tinted
    * square stays painted beneath it as the loading/failed fallback. */
   previewUrl?: string
+  /** Where the pointer went down — the click-vs-drag threshold anchor
+   * (object-visuals follow-up: tiles are click-to-ARM buttons first,
+   * draggable second; only movement past the threshold starts a drag). */
+  startX: number
+  startY: number
+  /** False until the pointer travels past `DRAG_START_THRESHOLD_PX` — the
+   * floating preview renders (and a drop can commit) only while true. A
+   * press-release under the threshold is a CLICK (arms the placement). */
+  dragging: boolean
   clientX: number
   clientY: number
 }
+
+/** Movement (px) before a tile press becomes a drag instead of a click. */
+const DRAG_START_THRESHOLD_PX = 4
 
 /**
  * R9/R24/R25: sidebar hosting the tool strip (U9 — Select, shapes, lines,
@@ -190,6 +202,10 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
   )
   const activeTool = useCanvasStore((state) => state.activeTool)
   const setActiveTool = useCanvasStore((state) => state.setActiveTool)
+  // Object-visuals follow-up: the armed catalog placement (click-to-arm
+  // tiles below) — untracked store state, like the tool itself.
+  const placement = useCanvasStore((state) => state.placement)
+  const setPlacement = useCanvasStore((state) => state.setPlacement)
 
   // U5 (object-visuals): the personal variant catalog — a PLAIN query
   // resource (never store-mirrored; institutional learning) grouped by type
@@ -246,13 +262,31 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
     if (!drag) return undefined
 
     function handlePointerMove(event: PointerEvent) {
-      setDrag((current) =>
-        current ? { ...current, clientX: event.clientX, clientY: event.clientY } : current,
-      )
+      setDrag((current) => {
+        if (!current) return current
+        // Threshold gate (object-visuals follow-up): the press stays a
+        // potential CLICK until the pointer travels far enough — then it
+        // commits to being a drag and the preview appears.
+        if (!current.dragging) {
+          const travelled = Math.hypot(
+            event.clientX - current.startX,
+            event.clientY - current.startY,
+          )
+          if (travelled < DRAG_START_THRESHOLD_PX) return current
+          return { ...current, dragging: true, clientX: event.clientX, clientY: event.clientY }
+        }
+        return { ...current, clientX: event.clientX, clientY: event.clientY }
+      })
     }
 
     function handlePointerUp(event: PointerEvent) {
-      if (drag) endDrag(drag, event.clientX, event.clientY)
+      if (drag?.dragging) {
+        endDrag(drag, event.clientX, event.clientY)
+        // The browser fires a `click` on the tile right after this
+        // pointerup — swallow it (the gesture was a DRAG, arming now
+        // would surprise). One-shot flag, consumed by handleTileClick.
+        suppressClickRef.current = true
+      }
       setDrag(null)
     }
 
@@ -265,16 +299,25 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
   }, [drag, endDrag])
 
   // Pointer ownership (U5, doc-review: design — CRITICAL): the card level
-  // owns NO pointerdown. Each draggable tile (the default symbol tile and
-  // every variant tile) starts its OWN drag and stops propagation; the [+]
-  // and delete buttons stop propagation on pointerdown and act on click —
-  // so pressing + or delete can never start a ghost drag.
+  // owns NO pointerdown. Each tile (the default symbol tile and every
+  // variant tile) starts its OWN potential-drag and stops propagation; the
+  // [+] and delete buttons stop propagation on pointerdown and act on
+  // click — so pressing + or delete can never start a ghost drag.
+  // Object-visuals follow-up: a press is a CLICK (arms the placement)
+  // until it travels past the drag threshold — see the drag effect.
   function handlePointerDown(type: CatalogType, event: ReactPointerEvent<HTMLDivElement>) {
     event.stopPropagation()
-    setDrag({ type, clientX: event.clientX, clientY: event.clientY })
+    setDrag({
+      type,
+      startX: event.clientX,
+      startY: event.clientY,
+      dragging: false,
+      clientX: event.clientX,
+      clientY: event.clientY,
+    })
   }
 
-  /** U5: a variant tile's drag — same flow as the default tile, plus the
+  /** U5: a variant tile's press — same flow as the default tile, plus the
    * reference payload (id + natural dims for U6's aspect-fit) and the
    * thumbnail URL for the floating preview. */
   function handleVariantPointerDown(
@@ -287,9 +330,40 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
       type,
       variant: { id: variant.id, width: variant.width, height: variant.height },
       previewUrl: variant.file_url,
+      startX: event.clientX,
+      startY: event.clientY,
+      dragging: false,
       clientX: event.clientX,
       clientY: event.clientY,
     })
+  }
+
+  /** Object-visuals follow-up: click-to-ARM. A sub-threshold press-release
+   * toggles the tile's placement: armed -> disarm (back to pan); anything
+   * else -> arm this tile ('place' tool; the next canvas click creates the
+   * item — CanvasStage routes it to `onPlaceAt`). A completed DRAG
+   * suppresses the click that follows its pointerup. */
+  const suppressClickRef = useRef(false)
+  function handleTileClick(type: CatalogType, variant: ObjectVariant | null) {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
+    const variantId = variant?.id ?? null
+    const isArmed =
+      activeTool === 'place' &&
+      placement?.type === type &&
+      (placement?.variant?.id ?? null) === variantId
+    if (isArmed) {
+      setPlacement(null)
+    } else {
+      setPlacement({
+        type,
+        variant: variant
+          ? { id: variant.id, width: variant.width, height: variant.height }
+          : null,
+      })
+    }
   }
 
   /** U5 (F1): the [+] routes through one hidden file input shared by all
@@ -387,6 +461,11 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
       <div className="mb-5 grid grid-cols-5 gap-1.5">
         {TOOL_BUTTONS.map(({ type, label, short, Icon }) => {
           const isActive = activeTool === type
+          // Pan is the DEFAULT idle mode, so it is "active" most of the
+          // time — a permanently-filled primary button reads as shouting
+          // (user feedback). Pan-active gets a calm muted treatment; the
+          // deliberately-engaged tools keep the filled primary pop.
+          const isPan = type === 'pan'
           return (
             <button
               key={type}
@@ -400,7 +479,9 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
               className={cn(
                 'flex flex-col items-center justify-center gap-1 rounded-md border py-2 outline-none transition-all select-none focus-visible:ring-2 focus-visible:ring-ring/50',
                 isActive
-                  ? 'border-primary bg-primary text-primary-foreground shadow-inner'
+                  ? isPan
+                    ? 'border-ring/60 bg-muted text-foreground shadow-inner'
+                    : 'border-primary bg-primary text-primary-foreground shadow-inner'
                   : 'border-border bg-card text-muted-foreground shadow-xs hover:border-ring/40 hover:bg-muted hover:text-foreground hover:shadow-sm active:translate-y-px',
               )}
             >
@@ -445,92 +526,119 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                     uploadVariant.isPending && uploadVariant.variables?.objectType === type
                   return (
                     <li key={type}>
-                      {/* Two-row card: header row (symbol tile + label +
-                          [+] upload button) over an optional variant strip.
-                          The CARD carries no pointerdown — pointer
-                          ownership lives on the tiles/buttons inside (see
-                          handlePointerDown's doc). */}
+                      {/* Object-visuals follow-up (user feedback): each
+                          type is a HEADER over a horizontal, scrollable
+                          tile row — [default symbol tile][variant tiles…]
+                          [+ tile]. Tiles are square click-to-ARM buttons
+                          (press-release under the drag threshold toggles
+                          the placement; the next canvas click places it),
+                          and still drag-to-drop once the pointer travels
+                          past the threshold. The card carries no
+                          pointerdown — ownership stays on the tiles. */}
                       <div className="rounded-md border bg-card shadow-xs transition-all hover:border-ring/40 hover:shadow-sm">
-                        <div className="flex items-center gap-1 p-1">
-                          {/* The DEFAULT draggable tile keeps its testid —
-                              the pre-U5 drag contract (and its tests) are
-                              unchanged; only the surface shrank from the
-                              whole card to this tile. */}
-                          <div
-                            role="button"
-                            tabIndex={0}
-                            data-testid={`catalog-item-${type}`}
-                            onPointerDown={(event) => handlePointerDown(type, event)}
-                            className="flex flex-1 cursor-grab items-center gap-2 rounded px-1 py-1 select-none touch-none active:translate-y-px"
+                        <div className="flex items-center gap-2 border-b px-2 py-1.5">
+                          {/* U4 (R5): the header thumbnail is the type's
+                              top-down symbol as an inline SVG — the SAME
+                              path data + viewBox the canvas Konva.Path
+                              branch renders (symbols.ts, one source of
+                              truth), tinted with the same palette (R3). */}
+                          <svg
+                            aria-hidden="true"
+                            className="size-4 shrink-0"
+                            viewBox={`0 0 ${SYMBOLS[type].viewBox.width} ${SYMBOLS[type].viewBox.height}`}
+                            fill={colorForType(type)}
                           >
-                            {/* U4 (object-visuals, R5): the tile's thumbnail
-                                is the type's top-down symbol as an inline
-                                SVG — the SAME path data + viewBox the canvas
-                                Konva.Path branch renders (symbols.ts, one
-                                source of truth), tinted with the same
-                                `colorForType()` palette the old color chip
-                                used (R3). `fill` on the <svg> inherits to
-                                every child <path> (filled-geometry contract:
-                                the data carries no styling of its own). */}
-                            <svg
-                              aria-hidden="true"
-                              className="size-5 shrink-0"
-                              viewBox={`0 0 ${SYMBOLS[type].viewBox.width} ${SYMBOLS[type].viewBox.height}`}
-                              fill={colorForType(type)}
-                            >
-                              {SYMBOLS[type].paths.map((data, index) => (
-                                <path key={index} d={data} />
-                              ))}
-                            </svg>
-                            <span className="truncate text-xs font-medium">{CATALOG_LABELS[type]}</span>
-                          </div>
-                          {/* R6 (F1): per-type upload. Disabled with a
-                              spinner while an upload is in flight (doc-
-                              review: no double-submits burning R19 quota);
-                              the spinner shows on the type that opened the
-                              picker (`mutation.variables` is live while
-                              pending). stopPropagation on pointerdown: a
-                              press here must NEVER start a ghost drag. */}
-                          <button
-                            type="button"
-                            aria-label={`Upload ${CATALOG_LABELS[type]} image`}
-                            disabled={uploadVariant.isPending}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={() => handleUploadClick(type)}
-                            className="flex size-6 shrink-0 items-center justify-center rounded-md border border-transparent text-muted-foreground outline-none transition-colors select-none hover:border-border hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50"
-                          >
-                            {isUploadingThisType ? (
-                              <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
-                            ) : (
-                              <Plus className="size-4" aria-hidden="true" />
-                            )}
-                          </button>
+                            {SYMBOLS[type].paths.map((data, index) => (
+                              <path key={index} d={data} />
+                            ))}
+                          </svg>
+                          <span className="truncate text-xs font-medium">{CATALOG_LABELS[type]}</span>
                         </div>
-                        {/* R7/R12: the variant strip — a fixed-height,
-                            horizontally-scrollable row of the user's
-                            uploads for this type; rendered ONLY when
-                            variants exist (no empty tray). Tiles are
-                            ~40px contain-fit thumbnails named by their
-                            file-derived `original_name` (tooltip + aria);
-                            aspect-fit math stays reserved for canvas
-                            placement (U6). */}
-                        {typeVariants.length > 0 && (
-                          <div
-                            data-testid={`variant-strip-${type}`}
-                            className="flex gap-1.5 overflow-x-auto border-t px-1.5 py-1.5"
-                          >
-                            {typeVariants.map((variant) => (
+                        <div
+                          data-testid={`catalog-tiles-${type}`}
+                          className="flex gap-1.5 overflow-x-auto p-1.5"
+                        >
+                          {/* The DEFAULT tile: first in every row, keeps
+                              its historical testid (the drag contract and
+                              its tests carry over — drags still work via
+                              the threshold). aria-pressed reflects the
+                              armed placement. */}
+                          {(() => {
+                            const defaultArmed =
+                              activeTool === 'place' &&
+                              placement?.type === type &&
+                              placement?.variant === null
+                            return (
+                              <div
+                                role="button"
+                                tabIndex={0}
+                                data-testid={`catalog-item-${type}`}
+                                aria-label={`Place ${CATALOG_LABELS[type]}`}
+                                aria-pressed={defaultArmed}
+                                title={`Place ${CATALOG_LABELS[type]} — click to arm, then click the canvas (or drag straight in)`}
+                                onPointerDown={(event) => handlePointerDown(type, event)}
+                                onClick={() => handleTileClick(type, null)}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault()
+                                    handleTileClick(type, null)
+                                  }
+                                }}
+                                className={cn(
+                                  'flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-md border bg-background outline-none transition-all select-none touch-none focus-visible:ring-2 focus-visible:ring-ring/50',
+                                  defaultArmed
+                                    ? 'border-primary shadow-inner ring-2 ring-primary/40'
+                                    : 'hover:border-ring/40 active:translate-y-px',
+                                )}
+                              >
+                                <svg
+                                  aria-hidden="true"
+                                  className="size-6"
+                                  viewBox={`0 0 ${SYMBOLS[type].viewBox.width} ${SYMBOLS[type].viewBox.height}`}
+                                  fill={colorForType(type)}
+                                >
+                                  {SYMBOLS[type].paths.map((data, index) => (
+                                    <path key={index} d={data} />
+                                  ))}
+                                </svg>
+                              </div>
+                            )
+                          })()}
+                          {/* R7/R12: the user's uploaded variants for this
+                              type — same click-to-arm/drag tiles, thumbnail
+                              contain-fit, named by `original_name`
+                              (tooltip + aria), each with its always-
+                              visible, keyboard-focusable delete (R18). */}
+                          {typeVariants.map((variant) => {
+                            const variantArmed =
+                              activeTool === 'place' &&
+                              placement?.type === type &&
+                              placement?.variant?.id === variant.id
+                            return (
                               <div key={variant.id} className="relative shrink-0">
                                 <div
                                   role="button"
                                   tabIndex={0}
                                   data-testid={`variant-item-${variant.id}`}
-                                  aria-label={`Drag ${variant.original_name}`}
+                                  aria-label={`Place ${variant.original_name}`}
+                                  aria-pressed={variantArmed}
                                   title={variant.original_name}
                                   onPointerDown={(event) =>
                                     handleVariantPointerDown(type, variant, event)
                                   }
-                                  className="flex size-10 cursor-grab items-center justify-center overflow-hidden rounded-md border bg-background select-none touch-none hover:border-ring/40"
+                                  onClick={() => handleTileClick(type, variant)}
+                                  onKeyDown={(event) => {
+                                    if (event.key === 'Enter' || event.key === ' ') {
+                                      event.preventDefault()
+                                      handleTileClick(type, variant)
+                                    }
+                                  }}
+                                  className={cn(
+                                    'flex size-10 cursor-pointer items-center justify-center overflow-hidden rounded-md border bg-background outline-none transition-all select-none touch-none focus-visible:ring-2 focus-visible:ring-ring/50',
+                                    variantArmed
+                                      ? 'border-primary shadow-inner ring-2 ring-primary/40'
+                                      : 'hover:border-ring/40 active:translate-y-px',
+                                  )}
                                 >
                                   {/* alt="" — decorative; the accessible
                                       name lives on the tile button above. */}
@@ -557,9 +665,28 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                                   <X className="size-3" aria-hidden="true" />
                                 </button>
                               </div>
-                            ))}
-                          </div>
-                        )}
+                            )
+                          })}
+                          {/* R6 (F1): the [+] upload tile closes every row.
+                              Disabled with a spinner while an upload is in
+                              flight (doc-review: no double-submits burning
+                              R19 quota); stopPropagation on pointerdown so
+                              a press can never start a ghost drag. */}
+                          <button
+                            type="button"
+                            aria-label={`Upload ${CATALOG_LABELS[type]} image`}
+                            disabled={uploadVariant.isPending}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={() => handleUploadClick(type)}
+                            className="flex size-10 shrink-0 items-center justify-center rounded-md border border-dashed text-muted-foreground outline-none transition-colors select-none hover:border-ring/40 hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50"
+                          >
+                            {isUploadingThisType ? (
+                              <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+                            ) : (
+                              <Plus className="size-4" aria-hidden="true" />
+                            )}
+                          </button>
+                        </div>
                       </div>
                     </li>
                   )
@@ -602,7 +729,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
         )}
       />
 
-      {drag && (
+      {drag?.dragging && (
         <div
           aria-hidden="true"
           data-testid="catalog-drag-preview"

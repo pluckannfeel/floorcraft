@@ -1783,3 +1783,41 @@ describe('pan as the idle tool mode (canvas-tools follow-up)', () => {
     expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
   })
 })
+
+describe('catalog placement arming (object-visuals follow-up)', () => {
+  it('setPlacement arms the place tool with the payload — no history entry', () => {
+    const pastBefore = useCanvasStore.temporal.getState().pastStates.length
+    const dirtyBefore = useCanvasStore.getState().dirty
+
+    useCanvasStore.getState().setPlacement({ type: 'chairs', variant: null })
+    expect(useCanvasStore.getState().activeTool).toBe('place')
+    expect(useCanvasStore.getState().placement).toEqual({ type: 'chairs', variant: null })
+
+    useCanvasStore
+      .getState()
+      .setPlacement({ type: 'tables', variant: { id: 4, width: 300, height: 150 } })
+    expect(useCanvasStore.getState().placement?.variant?.id).toBe(4)
+
+    // Arming/re-arming is untracked: undo history untouched, and the
+    // dirty flag is exactly what it was (arming is not a content edit).
+    expect(useCanvasStore.temporal.getState().pastStates.length).toBe(pastBefore)
+    expect(useCanvasStore.getState().dirty).toBe(dirtyBefore)
+  })
+
+  it('disarming (null) lands on pan and clears the selection (the pan invariant)', () => {
+    useCanvasStore.setState({ selectedItemIds: [1] })
+    useCanvasStore.getState().setPlacement({ type: 'chairs', variant: null })
+
+    useCanvasStore.getState().setPlacement(null)
+    expect(useCanvasStore.getState().activeTool).toBe('pan')
+    expect(useCanvasStore.getState().placement).toBeNull()
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([])
+  })
+
+  it('any explicit setActiveTool disarms a pending placement', () => {
+    useCanvasStore.getState().setPlacement({ type: 'chairs', variant: null })
+    useCanvasStore.getState().setActiveTool('select')
+    expect(useCanvasStore.getState().placement).toBeNull()
+    expect(useCanvasStore.getState().activeTool).toBe('select')
+  })
+})

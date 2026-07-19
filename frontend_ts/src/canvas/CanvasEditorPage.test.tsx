@@ -907,3 +907,57 @@ describe('persistence regression sweep (U8, object-visuals)', () => {
     expect(useCanvasStore.getState().dirty).toBe(false)
   })
 })
+
+describe('armed placement: click-to-place (object-visuals follow-up)', () => {
+  it('an armed variant placement places at the clicked point — snapped, aspect-fit, selected in select mode, disarmed', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Place Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Place Plan')).toBeInTheDocument()
+
+    // Arm a wide 2:1 variant (as the Sidebar tile click would).
+    act(() => {
+      useCanvasStore
+        .getState()
+        .setPlacement({ type: 'chairs', variant: { id: 12, width: 200, height: 100 } })
+    })
+
+    const onPlaceAt = canvasStageProps.current?.onPlaceAt as
+      | ((point: { x: number; y: number }) => void)
+      | undefined
+    expect(onPlaceAt).toBeTypeOf('function')
+    // A raw (unsnapped) stage point: the page snaps to the 20px grid.
+    act(() => onPlaceAt!({ x: 105, y: 95 }))
+
+    const state = useCanvasStore.getState()
+    expect(state.items).toHaveLength(1)
+    expect(state.items[0]).toMatchObject({
+      type: 'chairs',
+      x: 100,
+      y: 100,
+      width: 40,
+      height: 20,
+    })
+    expect(state.items[0].properties).toEqual({ [VISUAL_VARIANT_ID_KEY]: 12 })
+    // One-shot convention: selected, in select mode, placement disarmed.
+    expect(state.selectedItemIds).toEqual([state.items[0].id])
+    expect(state.activeTool).toBe('select')
+    expect(state.placement).toBeNull()
+  })
+
+  it('a place click with NOTHING armed is a no-op', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Noop Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Noop Plan')).toBeInTheDocument()
+
+    const onPlaceAt = canvasStageProps.current?.onPlaceAt as (point: {
+      x: number
+      y: number
+    }) => void
+    act(() => onPlaceAt({ x: 100, y: 100 }))
+    expect(useCanvasStore.getState().items).toHaveLength(0)
+  })
+})

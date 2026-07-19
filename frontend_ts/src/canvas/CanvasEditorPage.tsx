@@ -537,18 +537,34 @@ export function CanvasEditorPage() {
   // object selected in the SELECT tool — matching the shape/line/text
   // creation paths, and avoiding the stranded pan-mode-selection state
   // handleCreateTextAt's comment describes.
-  const handleDrop = useCallback(
-    (type: CatalogType, point: Point, variant?: VariantDragRef) => {
+  // Shared catalog-item creator: the drag-drop path (Sidebar hands over a
+  // pre-snapped/clamped point) and the click-to-place path (raw stage
+  // point from CanvasStage) both land here. Snap + clamp run against the
+  // item's ACTUAL dimensions (aspect-fit for variants) — snapping an
+  // already-snapped point is a no-op, and clamping with the real box is
+  // strictly more correct than the drop pipeline's 40x40 pre-clamp. Ends
+  // selected in select mode (the one-shot convention).
+  const createCatalogItemAt = useCallback(
+    (type: CatalogType, point: Point, variant: VariantDragRef | null) => {
       const floorPlan = floorPlanQuery.data;
       if (!floorPlan) return;
 
       const dimensions = variant
         ? aspectFitDimensions(variant, DEFAULT_ITEM_SIZE)
         : { width: DEFAULT_ITEM_SIZE, height: DEFAULT_ITEM_SIZE };
+      const liveCanvasSize = useCanvasStore.getState().canvasSize;
+      const snapped = snapToGrid(point, floorPlan.grid_size);
+      const clamped = clampToBounds(
+        snapped,
+        dimensions.width,
+        dimensions.height,
+        liveCanvasSize?.width ?? floorPlan.canvas_width,
+        liveCanvasSize?.height ?? floorPlan.canvas_height,
+      );
       const item = buildLocalObject(
         floorPlan.id,
         type,
-        { x: point.x, y: point.y, ...dimensions },
+        { x: clamped.x, y: clamped.y, ...dimensions },
         variant ? { [VISUAL_VARIANT_ID_KEY]: variant.id } : {},
       );
       createItemLocal(item);
@@ -562,6 +578,25 @@ export function CanvasEditorPage() {
       replaceSelection,
       setActiveTool,
     ],
+  );
+
+  const handleDrop = useCallback(
+    (type: CatalogType, point: Point, variant?: VariantDragRef) =>
+      createCatalogItemAt(type, point, variant ?? null),
+    [createCatalogItemAt],
+  );
+
+  // Object-visuals follow-up: the armed-placement click. Reads the armed
+  // payload from the store at CLICK time (arming is untracked store state,
+  // set by the Sidebar tiles); creating ends in select mode via the shared
+  // creator, which also clears the armed placement (setActiveTool disarms).
+  const handlePlaceAt = useCallback(
+    (point: Point) => {
+      const placement = useCanvasStore.getState().placement;
+      if (!placement) return;
+      createCatalogItemAt(placement.type, point, placement.variant);
+    },
+    [createCatalogItemAt],
   );
 
   // U15: commits a click-drag-sized Shape. Resets `activeTool` back to
@@ -925,6 +960,7 @@ export function CanvasEditorPage() {
             onOpenContextMenu={openContextMenu}
             onDuplicateSelection={commitPayloadAt}
             onCreateTextAt={handleCreateTextAt}
+            onPlaceAt={handlePlaceAt}
             // Escape with nothing in flight drops the active tool back to
             // the idle pan mode (canvas-tools follow-up).
             onExitTool={handleExitTool}
