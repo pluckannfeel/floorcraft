@@ -249,6 +249,14 @@ function TextStylingFields({ item, onCommitStyling }: TextStylingFieldsProps) {
         value={fontSizeDraft}
         onChange={(event) => setFontSizeDraft(event.target.value)}
         onBlur={commitFontSizeDraft}
+        onKeyDown={(event) => {
+          // Enter commits the size draft immediately, like the panel's
+          // other fields (user feedback).
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            commitFontSizeDraft()
+          }
+        }}
         className="mb-2"
       />
 
@@ -384,6 +392,17 @@ function PropertyPanelForm({ item, onCommit, onCommitTextStyling }: PropertyPane
     commit(draftRef.current.name, draftRef.current.rows)
   }
 
+  /** Enter commits the pending field edit immediately (user feedback) —
+   * the same commit blur runs, without stealing focus. The window-level
+   * Enter-to-save shortcut skips editable targets, so a field-level Enter
+   * commits HERE and only here. */
+  function handleFieldKeyDown(event: React.KeyboardEvent) {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      handleBlur()
+    }
+  }
+
   function handleAddRow() {
     handleRowsChange([...rows, { rowId: crypto.randomUUID(), key: '', value: '', isExisting: false }])
   }
@@ -407,6 +426,7 @@ function PropertyPanelForm({ item, onCommit, onCommitTextStyling }: PropertyPane
           value={name}
           onChange={(event) => handleNameChange(event.target.value)}
           onBlur={handleBlur}
+          onKeyDown={handleFieldKeyDown}
         />
       </div>
 
@@ -430,6 +450,7 @@ function PropertyPanelForm({ item, onCommit, onCommitTextStyling }: PropertyPane
                 handleRowsChange(rows.map((r) => (r.rowId === row.rowId ? { ...r, key: event.target.value } : r)))
               }
               onBlur={handleBlur}
+              onKeyDown={handleFieldKeyDown}
               className="flex-1"
             />
             <Input
@@ -440,6 +461,7 @@ function PropertyPanelForm({ item, onCommit, onCommitTextStyling }: PropertyPane
                 handleRowsChange(rows.map((r) => (r.rowId === row.rowId ? { ...r, value: event.target.value } : r)))
               }
               onBlur={handleBlur}
+              onKeyDown={handleFieldKeyDown}
               className="flex-1"
             />
             <Button

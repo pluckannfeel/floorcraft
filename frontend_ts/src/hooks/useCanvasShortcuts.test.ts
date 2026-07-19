@@ -182,3 +182,24 @@ describe("resolveCanvasShortcut", () => {
     expect(resolveCanvasShortcut("v", true, false, "DIV", true)).toBe(null);
   });
 });
+
+describe("plain Enter saves (object-visuals follow-up)", () => {
+  it("Enter with no modifiers, outside typing contexts, resolves to save", () => {
+    expect(resolveCanvasShortcut("Enter", false, false, "BODY", false)).toBe("save");
+    expect(resolveCanvasShortcut("Enter", false, false, undefined, false)).toBe("save");
+    expect(resolveCanvasShortcut("Enter", false, false, "DIV", false)).toBe("save");
+  });
+
+  it("Enter in typing contexts keeps its native meaning (fields commit their own edits)", () => {
+    expect(resolveCanvasShortcut("Enter", false, false, "INPUT", false)).toBeNull();
+    expect(resolveCanvasShortcut("Enter", false, false, "TEXTAREA", false)).toBeNull();
+    expect(resolveCanvasShortcut("Enter", false, false, "SELECT", false)).toBeNull();
+    expect(resolveCanvasShortcut("Enter", false, false, "DIV", true)).toBeNull();
+  });
+
+  it("Enter on a focused BUTTON keeps native activation, and modified Enter stays unclaimed", () => {
+    expect(resolveCanvasShortcut("Enter", false, false, "BUTTON", false)).toBeNull();
+    expect(resolveCanvasShortcut("Enter", true, false, "BODY", false)).toBeNull();
+    expect(resolveCanvasShortcut("Enter", false, true, "BODY", false)).toBeNull();
+  });
+});

@@ -494,3 +494,42 @@ describe('PropertyPanel text styling (U7)', () => {
     ).toBeGreaterThanOrEqual(4)
   })
 })
+
+describe('Enter commits field edits (object-visuals follow-up)', () => {
+  it('pressing Enter in the name field commits immediately — no blur needed', async () => {
+    resetStore([makeItem({ name: 'Old Name' })], ['item-1'])
+    render(<PropertyPanel />)
+    const user = userEvent.setup()
+
+    const nameInput = screen.getByLabelText('Name')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Enter Name')
+    expect(useCanvasStore.getState().items[0].name).toBe('Old Name')
+
+    await user.keyboard('{Enter}')
+    await waitFor(() => {
+      expect(useCanvasStore.getState().items[0].name).toBe('Enter Name')
+    })
+    // Focus stays in the field (commit without blur), and the edit is
+    // untracked like every panel commit (R15).
+    expect(document.activeElement).toBe(nameInput)
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(0)
+  })
+
+  it('pressing Enter in a property value field commits it', async () => {
+    resetStore(
+      [makeItem({ properties: { material: 'wood' } })],
+      ['item-1'],
+    )
+    render(<PropertyPanel />)
+    const user = userEvent.setup()
+
+    const valueInput = screen.getByLabelText('Property value for material')
+    await user.clear(valueInput)
+    await user.type(valueInput, 'steel{Enter}')
+
+    await waitFor(() => {
+      expect(useCanvasStore.getState().items[0].properties).toEqual({ material: 'steel' })
+    })
+  })
+})

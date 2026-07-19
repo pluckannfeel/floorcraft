@@ -45,6 +45,19 @@ export function resolveCanvasShortcut(
   activeElementTag: string | undefined,
   isContentEditable: boolean,
 ): CanvasShortcutAction {
+  // Plain Enter saves too (user feedback: after resizing/moving objects,
+  // Enter is the natural "keep that" key). Guarded like the canvas-side
+  // shortcuts — typing contexts keep their native Enter (form fields
+  // commit their own edits; the text overlay owns Enter outright), and a
+  // focused BUTTON keeps native activation (Enter must click it, not also
+  // fire a save). The listener adds a DOM-level guard for role="button"
+  // tiles and dialogs, which tag-level information can't see.
+  if (!modKey && !shiftKey && key === "Enter") {
+    if (isEditableTarget(activeElementTag, isContentEditable)) return null;
+    if (activeElementTag === "BUTTON") return null;
+    return "save";
+  }
+
   if (!modKey) return null;
 
   const normalizedKey = key.toLowerCase();
@@ -103,6 +116,18 @@ export function useCanvasShortcuts(
       );
 
       if (action === null) return;
+
+      // Enter-to-save only: interactive DOM contexts the TAG-level guard
+      // in `resolveCanvasShortcut` can't see — role="button" tiles (the
+      // sidebar's catalog tiles activate on Enter themselves), open
+      // dialogs/menus (Enter belongs to them), and links. A save firing on
+      // top of those activations would double-act.
+      if (
+        event.key === "Enter" &&
+        target?.closest('[role="button"], [role="dialog"], [role="menu"], a[href], select') != null
+      ) {
+        return;
+      }
 
       // Prevent the browser's native behavior — text-field undo/redo for
       // Ctrl+Z/Y, the "save page" dialog for Ctrl+S, find-next/-previous
