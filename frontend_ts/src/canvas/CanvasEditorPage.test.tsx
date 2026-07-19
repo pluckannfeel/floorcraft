@@ -1019,3 +1019,31 @@ describe('preset placement stamping (object-visuals follow-up)', () => {
     expect(placed.properties).toEqual({ visual_preset: 'ac' })
   })
 })
+
+describe('per-preset default drop sizes (object-visuals follow-up)', () => {
+  it('placing the split AC drops at its slim natural proportions, not the square default', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'AC Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('AC Plan')).toBeInTheDocument()
+
+    act(() => {
+      useCanvasStore
+        .getState()
+        .setPlacement({ type: 'appliances', variant: null, preset: 'split' })
+    })
+    const onPlaceAt = canvasStageProps.current?.onPlaceAt as (point: {
+      x: number
+      y: number
+    }) => void
+    act(() => onPlaceAt({ x: 200, y: 200 }))
+
+    expect(useCanvasStore.getState().items[0]).toMatchObject({
+      type: 'appliances',
+      width: 80,
+      height: 24,
+    })
+    expect(useCanvasStore.getState().items[0].properties).toEqual({ visual_preset: 'split' })
+  })
+})

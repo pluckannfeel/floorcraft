@@ -243,6 +243,10 @@ export interface SymbolPreset {
   label: string
   viewBox: SymbolViewBox
   paths: string[]
+  /** Optional creation size in MODEL units — presets whose real-world
+   * shape isn't square (a slim split-AC wall unit) drop at their natural
+   * proportions instead of the type's square default. */
+  defaultSize?: { width: number; height: number }
 }
 
 export const EXTRA_SYMBOL_PRESETS: Partial<Record<CatalogType, SymbolPreset[]>> = {
@@ -263,7 +267,7 @@ export const EXTRA_SYMBOL_PRESETS: Partial<Record<CatalogType, SymbolPreset[]>> 
   appliances: [
     {
       id: 'ac',
-      label: 'AC unit',
+      label: 'Cassette AC',
       viewBox: VIEW_BOX_100,
       paths: [
         // Ceiling-cassette AC in PLAN VIEW (user feedback: redrawn — the
@@ -279,6 +283,39 @@ export const EXTRA_SYMBOL_PRESETS: Partial<Record<CatalogType, SymbolPreset[]>> 
         'M50 36 A14 14 0 0 1 50 64 A14 14 0 0 1 50 36 Z M50 44 A6 6 0 0 0 50 56 A6 6 0 0 0 50 44 Z',
       ],
     },
+    {
+      id: 'split',
+      label: 'Split AC',
+      // Wall-mounted split indoor unit in PLAN VIEW: a slim wide body
+      // against the wall with a long louver slot along the room-facing
+      // edge. Authored on a wide viewBox and dropped at matching slim
+      // proportions (defaultSize below).
+      viewBox: { width: 100, height: 34 },
+      paths: [
+        // Body band.
+        'M2 2 H98 V32 H2 Z M8 8 V26 H92 V8 Z',
+        // Louver slot along the front (room-facing) edge.
+        'M14 17 H86 V23 H14 Z',
+      ],
+      defaultSize: { width: 80, height: 24 },
+    },
+    {
+      id: 'window',
+      label: 'Window AC',
+      // Window unit in PLAN VIEW: boxy body with the center fan intake
+      // and a vertical vent bar down each side.
+      viewBox: { width: 100, height: 80 },
+      paths: [
+        // Body band.
+        'M4 4 H96 V76 H4 Z M12 12 V68 H88 V12 Z',
+        // Side vent bars.
+        'M18 16 H24 V64 H18 Z',
+        'M76 16 H82 V64 H76 Z',
+        // Center fan intake (donut).
+        'M50 24 A16 16 0 0 1 50 56 A16 16 0 0 1 50 24 Z M50 32 A8 8 0 0 0 50 48 A8 8 0 0 0 50 32 Z',
+      ],
+      defaultSize: { width: 48, height: 40 },
+    },
   ],
 }
 
@@ -288,13 +325,21 @@ export const EXTRA_SYMBOL_PRESETS: Partial<Record<CatalogType, SymbolPreset[]>> 
  * ids fall back to the type's default symbol (fail-closed, like every
  * other visual reference).
  */
+/** The full preset row (or null) — the lookup `symbolDefinitionFor` and
+ * the page's per-preset default drop size both resolve through. */
+export function symbolPresetFor(
+  type: CatalogType,
+  presetId: string | null | undefined,
+): SymbolPreset | null {
+  if (!presetId) return null
+  return (EXTRA_SYMBOL_PRESETS[type] ?? []).find((entry) => entry.id === presetId) ?? null
+}
+
 export function symbolDefinitionFor(
   type: CatalogType,
   presetId: string | null | undefined,
 ): SymbolDefinition {
-  if (presetId) {
-    const preset = (EXTRA_SYMBOL_PRESETS[type] ?? []).find((entry) => entry.id === presetId)
-    if (preset) return { viewBox: preset.viewBox, paths: preset.paths }
-  }
+  const preset = symbolPresetFor(type, presetId)
+  if (preset) return { viewBox: preset.viewBox, paths: preset.paths }
   return SYMBOLS[type]
 }

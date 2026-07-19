@@ -356,7 +356,7 @@ describe('defaultDimensionsForType (object-visuals follow-up)', () => {
 describe('symbol presets (object-visuals follow-up)', () => {
   it('extra presets exist for tables (round) and appliances (ac), honoring the filled-geometry contract', () => {
     expect(EXTRA_SYMBOL_PRESETS.tables?.map((p) => p.id)).toEqual(['round'])
-    expect(EXTRA_SYMBOL_PRESETS.appliances?.map((p) => p.id)).toEqual(['ac'])
+    expect(EXTRA_SYMBOL_PRESETS.appliances?.map((p) => p.id)).toEqual(['ac', 'split', 'window'])
     for (const presets of Object.values(EXTRA_SYMBOL_PRESETS)) {
       for (const preset of presets) {
         expect(preset.viewBox.width).toBeGreaterThan(0)

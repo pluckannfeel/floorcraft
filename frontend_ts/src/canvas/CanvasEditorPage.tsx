@@ -33,6 +33,7 @@ import type { BoundingBox } from "./coordinates";
 import { FloorPlanNameEditor } from "./FloorPlanNameEditor";
 import { resetImageRegistry } from "./imageRegistry";
 import { computeLineBoundingBox, curveStyleForType } from "./LineTool";
+import { symbolPresetFor } from "./symbols";
 import { PropertyPanel } from "./PropertyPanel";
 import type { ShapeGeometry } from "./ShapeTool";
 import { DEFAULT_ITEM_SIZE, Sidebar } from "./Sidebar";
@@ -561,7 +562,10 @@ export function CanvasEditorPage() {
 
       const dimensions = variant
         ? aspectFitDimensions(variant, DEFAULT_ITEM_SIZE)
-        : defaultDimensionsForType(type, DEFAULT_ITEM_SIZE);
+        : // A preset may carry its own natural drop size (a slim split-AC
+          // wall unit shouldn't drop square); otherwise the type default.
+          (symbolPresetFor(type, preset)?.defaultSize ??
+            defaultDimensionsForType(type, DEFAULT_ITEM_SIZE));
       const liveCanvasSize = useCanvasStore.getState().canvasSize;
       const snapped = snapToGrid(point, floorPlan.grid_size);
       const clamped = clampToBounds(
