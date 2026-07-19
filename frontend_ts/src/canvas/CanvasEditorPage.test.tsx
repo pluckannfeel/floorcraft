@@ -984,3 +984,38 @@ describe('outline defaults (object-visuals follow-up)', () => {
     })
   })
 })
+
+describe('preset placement stamping (object-visuals follow-up)', () => {
+  it('a dropped/placed preset stamps visual_preset into properties', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Preset Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Preset Plan')).toBeInTheDocument()
+
+    // Drag-drop path: the 4th onDrop argument.
+    const onDrop = sidebarProps.current?.onDrop as (
+      type: CatalogType,
+      point: Point,
+      variant?: VariantDragRef,
+      preset?: string,
+    ) => void
+    act(() => onDrop('tables', { x: 100, y: 100 }, undefined, 'round'))
+    expect(useCanvasStore.getState().items[0].properties).toEqual({ visual_preset: 'round' })
+
+    // Click-to-place path: the armed placement's preset.
+    act(() => {
+      useCanvasStore
+        .getState()
+        .setPlacement({ type: 'appliances', variant: null, preset: 'ac' })
+    })
+    const onPlaceAt = canvasStageProps.current?.onPlaceAt as (point: {
+      x: number
+      y: number
+    }) => void
+    act(() => onPlaceAt({ x: 300, y: 300 }))
+    const placed = useCanvasStore.getState().items[1]
+    expect(placed).toMatchObject({ type: 'appliances', width: 40, height: 40 })
+    expect(placed.properties).toEqual({ visual_preset: 'ac' })
+  })
+})

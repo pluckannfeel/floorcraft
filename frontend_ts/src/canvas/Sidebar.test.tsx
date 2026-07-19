@@ -621,7 +621,7 @@ describe('click-to-arm placement (object-visuals follow-up)', () => {
     await user.click(tile)
 
     expect(useCanvasStore.getState().activeTool).toBe('place')
-    expect(useCanvasStore.getState().placement).toEqual({ type: 'chairs', variant: null })
+    expect(useCanvasStore.getState().placement).toEqual({ type: 'chairs', variant: null, preset: null })
     expect(tile).toHaveAttribute('aria-pressed', 'true')
 
     await user.click(tile)
@@ -639,11 +639,12 @@ describe('click-to-arm placement (object-visuals follow-up)', () => {
     expect(useCanvasStore.getState().placement).toEqual({
       type: 'chairs',
       variant: { id: 9, width: 300, height: 150 },
+      preset: null,
     })
 
     // Re-arm straight onto the default tile: the payload swaps.
     await user.click(screen.getByTestId('catalog-item-tables'))
-    expect(useCanvasStore.getState().placement).toEqual({ type: 'tables', variant: null })
+    expect(useCanvasStore.getState().placement).toEqual({ type: 'tables', variant: null, preset: null })
     expect(useCanvasStore.getState().activeTool).toBe('place')
   })
 
@@ -671,5 +672,48 @@ describe('click-to-arm placement (object-visuals follow-up)', () => {
     expect(onDrop).toHaveBeenCalledTimes(1)
     expect(useCanvasStore.getState().activeTool).toBe('pan')
     expect(useCanvasStore.getState().placement).toBeNull()
+  })
+})
+
+describe('built-in preset tiles (object-visuals follow-up)', () => {
+  function mockVariants(variants: ObjectVariant[]) {
+    return vi.spyOn(apiClient, 'get').mockResolvedValue({ data: variants } as never)
+  }
+
+  it('tables/appliances rows show their preset tiles; clicking arms the placement with the preset id', async () => {
+    mockVariants([])
+    const user = userEvent.setup()
+    renderSidebar()
+
+    const roundTile = screen.getByTestId('preset-item-tables-round')
+    expect(screen.getByTestId('preset-item-appliances-ac')).toBeInTheDocument()
+
+    await user.click(roundTile)
+    expect(useCanvasStore.getState().placement).toEqual({
+      type: 'tables',
+      variant: null,
+      preset: 'round',
+    })
+    expect(roundTile).toHaveAttribute('aria-pressed', 'true')
+    // The DEFAULT tables tile is NOT armed while the preset is.
+    expect(screen.getByTestId('catalog-item-tables')).toHaveAttribute('aria-pressed', 'false')
+
+    await user.click(roundTile)
+    expect(useCanvasStore.getState().placement).toBeNull()
+  })
+
+  it('dragging a preset tile passes the preset id into onDrop (4th argument)', () => {
+    mockVariants([])
+    const onDrop = vi.fn()
+    renderSidebar(onDrop)
+
+    fireEvent.pointerDown(screen.getByTestId('preset-item-appliances-ac'), {
+      clientX: 10,
+      clientY: 10,
+    })
+    fireEvent(window, new PointerEvent('pointermove', { clientX: 105, clientY: 95 }))
+    fireEvent(window, new PointerEvent('pointerup', { clientX: 105, clientY: 95 }))
+
+    expect(onDrop).toHaveBeenCalledExactlyOnceWith('appliances', { x: 100, y: 100 }, undefined, 'ac')
   })
 })

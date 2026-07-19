@@ -32,6 +32,9 @@ export type ActiveTool = 'pan' | 'select' | ShapeType | LineType | TextType | 'c
 export interface PlacementSelection {
   type: CatalogType
   variant: { id: number; width: number; height: number } | null
+  /** Built-in preset id (round table, AC unit…); absent/null = the type's
+   * default symbol. Mutually exclusive with `variant` in practice. */
+  preset?: string | null
 }
 
 /**

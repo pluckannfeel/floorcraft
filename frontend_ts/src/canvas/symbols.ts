@@ -72,7 +72,7 @@ export const SYMBOLS: Record<CatalogType, SymbolDefinition> = {
   outlines: {
     // Rectangular viewBox (user feedback: an outline reads as a ROOM, not
     // a square) — this entry now only feeds the sidebar thumbnails; the
-    // CANVAS renders outlines via `outlineFrameBands` below so the wall
+    // CANVAS renders outlines via `outlineStrokeRect` below so the wall
     // thickness stays constant under resize.
     viewBox: { width: 150, height: 100 },
     paths: [
@@ -222,4 +222,73 @@ export function outlineStrokeRect(
     height: Math.max(0, height - edge),
     strokeWidth: edge * zoom,
   }
+}
+
+
+/**
+ * Built-in symbol PRESETS (user feedback): some types ship more than one
+ * stock look — a round table, an AC unit. A preset is an alternate
+ * filled-geometry drawing for an existing catalog type; placed objects
+ * reference it via `properties.visual_preset` (visuals.ts) exactly like
+ * uploaded variants ride `visual_variant_id` — an opaque, session-stable
+ * string the renderer resolves fail-closed (unknown ids fall back to the
+ * type's default symbol, so old plans and typo'd data always render).
+ */
+export interface SymbolPreset {
+  id: string
+  label: string
+  viewBox: SymbolViewBox
+  paths: string[]
+}
+
+export const EXTRA_SYMBOL_PRESETS: Partial<Record<CatalogType, SymbolPreset[]>> = {
+  tables: [
+    {
+      id: 'round',
+      label: 'Round table',
+      viewBox: VIEW_BOX_100,
+      paths: [
+        // Round table top: outer circle clockwise, inner counter-clockwise
+        // (the same winding-hole convention as every other symbol).
+        'M50 4 A46 46 0 0 1 50 96 A46 46 0 0 1 50 4 Z M50 14 A36 36 0 0 0 50 86 A36 36 0 0 0 50 14 Z',
+        // Center pedestal disc.
+        'M50 42 A8 8 0 0 1 50 58 A8 8 0 0 1 50 42 Z',
+      ],
+    },
+  ],
+  appliances: [
+    {
+      id: 'ac',
+      label: 'AC unit',
+      viewBox: VIEW_BOX_100,
+      paths: [
+        // Ceiling-cassette body: outer band.
+        'M6 6 H94 V94 H6 Z M14 14 V86 H86 V14 Z',
+        // Center fan: donut.
+        'M50 30 A20 20 0 0 1 50 70 A20 20 0 0 1 50 30 Z M50 40 A10 10 0 0 0 50 60 A10 10 0 0 0 50 40 Z',
+        // Corner vent slats.
+        'M20 20 H40 V26 H20 Z',
+        'M60 20 H80 V26 H60 Z',
+        'M20 74 H40 V80 H20 Z',
+        'M60 74 H80 V80 H60 Z',
+      ],
+    },
+  ],
+}
+
+/**
+ * Resolves the drawing for a type + optional preset id — the ONE lookup
+ * both the canvas glyph and the sidebar tiles use. Unknown/absent preset
+ * ids fall back to the type's default symbol (fail-closed, like every
+ * other visual reference).
+ */
+export function symbolDefinitionFor(
+  type: CatalogType,
+  presetId: string | null | undefined,
+): SymbolDefinition {
+  if (presetId) {
+    const preset = (EXTRA_SYMBOL_PRESETS[type] ?? []).find((entry) => entry.id === presetId)
+    if (preset) return { viewBox: preset.viewBox, paths: preset.paths }
+  }
+  return SYMBOLS[type]
 }

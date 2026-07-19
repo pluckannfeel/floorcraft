@@ -37,6 +37,24 @@ import type { CanvasObject, CatalogType } from './types'
  */
 export const VISUAL_VARIANT_ID_KEY = 'visual_variant_id'
 
+/** Built-in preset reference (user feedback: multiple stock looks per
+ * type — round table, AC unit). Same opaque-reference discipline as the
+ * variant key: snake_case, structural (PropertyPanel hides + guards it),
+ * rides `properties` verbatim through save/undo/clipboard, and unknown
+ * values fall back to the default symbol at render. */
+export const VISUAL_PRESET_KEY = 'visual_preset'
+
+/** Defensive parse of the preset reference: a non-empty string or null.
+ * Existence against EXTRA_SYMBOL_PRESETS is deliberately NOT checked here
+ * — `symbolDefinitionFor` falls back at render, so a stale/foreign preset
+ * id degrades to the default symbol instead of breaking the parse. */
+export function parsePresetReference(
+  properties: CanvasObject['properties'],
+): string | null {
+  const raw = (properties as Record<string, unknown>)[VISUAL_PRESET_KEY]
+  return typeof raw === 'string' && raw.trim() !== '' ? raw : null
+}
+
 /**
  * Presence predicate ONLY: true exactly when the reference key exists on
  * `properties` — deliberately says nothing about the value being a valid
@@ -114,7 +132,7 @@ export function isCatalogType(type: string): type is CatalogType {
  * plans, on screen and in exports).
  */
 export type BoxVisual =
-  | { kind: 'symbol'; type: CatalogType }
+  | { kind: 'symbol'; type: CatalogType; preset: string | null }
   | { kind: 'image'; url: string; type: CatalogType }
   | { kind: 'plain' }
 
@@ -146,9 +164,11 @@ export function resolveBoxVisual(object: Pick<CanvasObject, 'type' | 'properties
   if (!isCatalogType(object.type)) return { kind: 'plain' }
   const variantId = parseVariantReference(object.properties)
   if (variantId != null) {
+    // An uploaded variant beats a preset if both keys somehow coexist —
+    // the more specific (user-owned) visual wins.
     return { kind: 'image', url: variantFileUrl(variantId), type: object.type }
   }
-  return { kind: 'symbol', type: object.type }
+  return { kind: 'symbol', type: object.type, preset: parsePresetReference(object.properties) }
 }
 
 /**

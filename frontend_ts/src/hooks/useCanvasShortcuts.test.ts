@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { resolveCanvasShortcut } from "./useCanvasShortcuts";
+import { describe, expect, it, vi } from "vitest";
+import { renderHook } from "@testing-library/react";
+import { useCanvasStore } from "../state/canvasStore";
+import { resolveCanvasShortcut, useCanvasShortcuts } from "./useCanvasShortcuts";
 
 describe("resolveCanvasShortcut", () => {
   it("returns undo for Ctrl+Z", () => {
@@ -201,5 +203,37 @@ describe("plain Enter saves (object-visuals follow-up)", () => {
     expect(resolveCanvasShortcut("Enter", false, false, "BUTTON", false)).toBeNull();
     expect(resolveCanvasShortcut("Enter", true, false, "BODY", false)).toBeNull();
     expect(resolveCanvasShortcut("Enter", false, true, "BODY", false)).toBeNull();
+  });
+});
+
+describe("Enter finalizes: deselect + pan + save (listener behavior)", () => {
+  it("Enter clears the selection, drops select to pan, and fires the save", () => {
+    useCanvasStore.setState({ selectedItemIds: [1], activeTool: "select" });
+    const onSave = vi.fn();
+    const { unmount } = renderHook(() => useCanvasShortcuts(onSave));
+
+    // Dispatch from body (bubbling to the window listener) — real keydowns
+    // with nothing focused target document.body, never the window object.
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([]);
+    expect(useCanvasStore.getState().activeTool).toBe("pan");
+    expect(onSave).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+
+  it("Ctrl+S saves WITHOUT touching the selection (pure save, works mid-edit)", () => {
+    useCanvasStore.setState({ selectedItemIds: [1], activeTool: "select" });
+    const onSave = vi.fn();
+    const { unmount } = renderHook(() => useCanvasShortcuts(onSave));
+
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true }),
+    );
+
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([1]);
+    expect(useCanvasStore.getState().activeTool).toBe("select");
+    expect(onSave).toHaveBeenCalledTimes(1);
+    unmount();
   });
 });

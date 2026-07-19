@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { Circle, Rect } from 'react-konva'
+import { Ellipse, Rect } from 'react-konva'
 import { clampToBounds, MIN_ITEM_SIZE, snapToGrid } from './coordinates'
 import type { Point, ShapeType } from './types'
 
@@ -166,7 +166,10 @@ export function ShapePreview({ type, geometry }: ShapePreviewProps) {
 
   if (type === 'shape_circle') {
     return (
-      <Circle
+      // Ellipse, not Circle (review of user feedback): Konva's Circle only
+      // understands `radius` — the radiusX/radiusY props it was given were
+      // silently ignored, so the draw preview rendered nothing visible.
+      <Ellipse
         x={geometry.x + geometry.width / 2}
         y={geometry.y + geometry.height / 2}
         radiusX={geometry.width / 2}

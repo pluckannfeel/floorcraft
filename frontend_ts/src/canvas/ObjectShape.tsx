@@ -1,11 +1,11 @@
 import type Konva from 'konva'
-import { Group, Image as KonvaImage, Line, Path, Rect, Text } from 'react-konva'
+import { Ellipse, Group, Image as KonvaImage, Line, Path, Rect, Text } from 'react-konva'
 import { NO_GUIDES, snapDragPosition } from './AlignmentGuides'
 import type { GuideLines } from './AlignmentGuides'
 import { clampToBounds } from './coordinates'
 import { useRegistryImage } from './imageRegistry'
 import { flattenPoints, getEffectiveTension, isLineTool, parseLinePoints } from './LineTool'
-import { outlineStrokeRect, SYMBOLS, symbolScale } from './symbols'
+import { outlineStrokeRect, symbolDefinitionFor, symbolScale } from './symbols'
 import { fontStyleFor, isTextType, parseTextProperties } from './TextTool'
 import type { CanvasObject, CatalogType, ObjectType, Point } from './types'
 import { BACKING_RECT_FILL, resolveBoxVisual, symbolLabelText } from './visuals'
@@ -106,12 +106,16 @@ export interface GroupDragHandlers {
  */
 function SymbolGlyph({
   type,
+  preset = null,
   fill,
   width,
   height,
   zoom,
 }: {
   type: CatalogType
+  /** Built-in preset id (round table, AC unit…) — resolved fail-closed by
+   * `symbolDefinitionFor`; null/unknown renders the type default. */
+  preset?: string | null
   fill: string
   width: number
   height: number
@@ -148,7 +152,7 @@ function SymbolGlyph({
     )
   }
 
-  const definition = SYMBOLS[type]
+  const definition = symbolDefinitionFor(type, preset)
   // Pure viewBox→box mapping (tested standalone): non-uniform stretch is
   // expected — the Transformer folds resize into width/height, and the
   // filled-geometry symbol contract makes anisotropic scale safe.
@@ -520,6 +524,7 @@ export function ObjectShape({
           ) : (
             <SymbolGlyph
               type={boxVisual.type}
+              preset={boxVisual.preset}
               fill={fill}
               width={object.width}
               height={object.height}
@@ -546,17 +551,32 @@ export function ObjectShape({
       ) : (
         <>
           {/* Pre-U4 plain box branch, now Shapes-only (catalog types render
-              the symbol branch above): solid colored Rect + centered label
+              the symbol branch above): solid colored shape + centered label
               with the historical `name || type` fallback (R17 is scoped to
-              symbol/image visuals). */}
-          <Rect
-            width={object.width}
-            height={object.height}
-            fill={fill}
-            stroke={isSelected ? '#111827' : undefined}
-            strokeWidth={isSelected ? 2 : 0}
-            cornerRadius={2}
-          />
+              symbol/image visuals). `shape_circle` renders the ellipse
+              inscribed in its box (user feedback: it drew as a square —
+              the box IS the geometry model, the ellipse is the visual;
+              non-uniform resize legitimately yields an oval). */}
+          {object.type === 'shape_circle' ? (
+            <Ellipse
+              x={object.width / 2}
+              y={object.height / 2}
+              radiusX={object.width / 2}
+              radiusY={object.height / 2}
+              fill={fill}
+              stroke={isSelected ? '#111827' : undefined}
+              strokeWidth={isSelected ? 2 : 0}
+            />
+          ) : (
+            <Rect
+              width={object.width}
+              height={object.height}
+              fill={fill}
+              stroke={isSelected ? '#111827' : undefined}
+              strokeWidth={isSelected ? 2 : 0}
+              cornerRadius={2}
+            />
+          )}
           <Text
             text={object.name || object.type}
             width={object.width}

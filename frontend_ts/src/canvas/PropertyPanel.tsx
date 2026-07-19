@@ -13,7 +13,7 @@ import {
 import type { TextStyling } from './TextTool'
 import { useCanvasStore } from '../state/canvasStore'
 import type { CanvasObject, ObjectType } from './types'
-import { isCatalogType, VISUAL_VARIANT_ID_KEY } from './visuals'
+import { isCatalogType, VISUAL_PRESET_KEY, VISUAL_VARIANT_ID_KEY } from './visuals'
 
 /**
  * R19/U10: a persistent side panel, visible whenever the selection is
@@ -91,7 +91,7 @@ const TEXT_STRUCTURAL_KEYS = new Set([
  * demote the image to its placeholder symbol forever). All 7 catalog types
  * get this exclusion whether or not a reference is currently present, so
  * a user can't pre-plant the key either. */
-const VISUAL_STRUCTURAL_KEYS = new Set([VISUAL_VARIANT_ID_KEY])
+const VISUAL_STRUCTURAL_KEYS = new Set([VISUAL_VARIANT_ID_KEY, VISUAL_PRESET_KEY])
 
 function excludedKeysForType(type: ObjectType): Set<string> {
   if (isLineTool(type)) return LINE_STRUCTURAL_KEYS

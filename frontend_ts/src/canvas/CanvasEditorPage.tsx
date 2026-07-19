@@ -40,6 +40,7 @@ import type { VariantDragRef } from "./Sidebar";
 import {
   aspectFitDimensions,
   defaultDimensionsForType,
+  VISUAL_PRESET_KEY,
   VISUAL_VARIANT_ID_KEY,
 } from "./visuals";
 import { TextEditOverlay } from "./TextEditOverlay";
@@ -549,7 +550,12 @@ export function CanvasEditorPage() {
   // strictly more correct than the drop pipeline's 40x40 pre-clamp. Ends
   // selected in select mode (the one-shot convention).
   const createCatalogItemAt = useCallback(
-    (type: CatalogType, point: Point, variant: VariantDragRef | null) => {
+    (
+      type: CatalogType,
+      point: Point,
+      variant: VariantDragRef | null,
+      preset: string | null = null,
+    ) => {
       const floorPlan = floorPlanQuery.data;
       if (!floorPlan) return;
 
@@ -569,7 +575,13 @@ export function CanvasEditorPage() {
         floorPlan.id,
         type,
         { x: clamped.x, y: clamped.y, ...dimensions },
-        variant ? { [VISUAL_VARIANT_ID_KEY]: variant.id } : {},
+        // The visual reference: an uploaded variant beats a preset; a
+        // preset beats the bare default (nothing stamped).
+        variant
+          ? { [VISUAL_VARIANT_ID_KEY]: variant.id }
+          : preset
+            ? { [VISUAL_PRESET_KEY]: preset }
+            : {},
       );
       createItemLocal(item);
       replaceSelection([item.id]);
@@ -585,8 +597,8 @@ export function CanvasEditorPage() {
   );
 
   const handleDrop = useCallback(
-    (type: CatalogType, point: Point, variant?: VariantDragRef) =>
-      createCatalogItemAt(type, point, variant ?? null),
+    (type: CatalogType, point: Point, variant?: VariantDragRef, preset?: string) =>
+      createCatalogItemAt(type, point, variant ?? null, preset ?? null),
     [createCatalogItemAt],
   );
 
@@ -598,7 +610,7 @@ export function CanvasEditorPage() {
     (point: Point) => {
       const placement = useCanvasStore.getState().placement;
       if (!placement) return;
-      createCatalogItemAt(placement.type, point, placement.variant);
+      createCatalogItemAt(placement.type, point, placement.variant, placement.preset ?? null);
     },
     [createCatalogItemAt],
   );

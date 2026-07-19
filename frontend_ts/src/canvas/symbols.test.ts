@@ -1,16 +1,25 @@
 import { describe, expect, it } from 'vitest'
-import { OUTLINE_EDGE_THICKNESS, outlineStrokeRect, SYMBOLS, symbolScale } from './symbols'
+import {
+  EXTRA_SYMBOL_PRESETS,
+  OUTLINE_EDGE_THICKNESS,
+  outlineStrokeRect,
+  SYMBOLS,
+  symbolDefinitionFor,
+  symbolScale,
+} from './symbols'
 import {
   BACKING_RECT_FILL,
   VISUAL_VARIANT_ID_KEY,
   aspectFitDimensions,
   defaultDimensionsForType,
   hasVariantReference,
+  parsePresetReference,
   isCatalogType,
   parseVariantReference,
   resolveBoxVisual,
   symbolLabelText,
   variantFileUrl,
+  VISUAL_PRESET_KEY,
 } from './visuals'
 import { CATALOG_TYPES, SHAPE_TYPES } from './types'
 import type { CatalogType } from './types'
@@ -125,13 +134,13 @@ describe('visuals key module (U4: variant reference + branch decision)', () => {
 
   describe('resolveBoxVisual (ObjectShape branch selection, pure)', () => {
     it.each([...CATALOG_TYPES])('%s renders the symbol visual, narrowed to its type', (type) => {
-      expect(resolveBoxVisual({ type, properties: {} })).toEqual({ kind: 'symbol', type })
+      expect(resolveBoxVisual({ type, properties: {} })).toEqual({ kind: 'symbol', type, preset: null })
     })
 
     it('AE3: a legacy object with arbitrary properties keys still routes to the symbol branch', () => {
       expect(
         resolveBoxVisual({ type: 'tables', properties: { material: 'oak', seats: 6 } }),
-      ).toEqual({ kind: 'symbol', type: 'tables' })
+      ).toEqual({ kind: 'symbol', type: 'tables', preset: null })
     })
 
     it('U6: a VALID variant reference resolves to the image arm — URL derived, type kept for the R16 placeholder', () => {
@@ -146,7 +155,7 @@ describe('visuals key module (U4: variant reference + branch decision)', () => {
         expect(
           resolveBoxVisual({ type: 'chairs', properties: { [VISUAL_VARIANT_ID_KEY]: garbage } }),
           `value ${JSON.stringify(garbage)} falls back to the symbol`,
-        ).toEqual({ kind: 'symbol', type: 'chairs' })
+        ).toEqual({ kind: 'symbol', type: 'chairs', preset: null })
       }
     })
 
@@ -341,5 +350,57 @@ describe('defaultDimensionsForType (object-visuals follow-up)', () => {
     for (const type of ['tables', 'doors', 'chairs', 'furnitures', 'appliances', 'lighting'] as const) {
       expect(defaultDimensionsForType(type, 40)).toEqual({ width: 40, height: 40 })
     }
+  })
+})
+
+describe('symbol presets (object-visuals follow-up)', () => {
+  it('extra presets exist for tables (round) and appliances (ac), honoring the filled-geometry contract', () => {
+    expect(EXTRA_SYMBOL_PRESETS.tables?.map((p) => p.id)).toEqual(['round'])
+    expect(EXTRA_SYMBOL_PRESETS.appliances?.map((p) => p.id)).toEqual(['ac'])
+    for (const presets of Object.values(EXTRA_SYMBOL_PRESETS)) {
+      for (const preset of presets) {
+        expect(preset.viewBox.width).toBeGreaterThan(0)
+        expect(preset.viewBox.height).toBeGreaterThan(0)
+        for (const data of preset.paths) {
+          expect(data).not.toMatch(/stroke/i)
+        }
+      }
+    }
+  })
+
+  it('symbolDefinitionFor resolves presets and falls back fail-closed', () => {
+    const round = symbolDefinitionFor('tables', 'round')
+    expect(round.paths).toEqual(EXTRA_SYMBOL_PRESETS.tables![0].paths)
+    // Unknown/absent preset ids -> the type default (old plans and typo'd
+    // data always render).
+    expect(symbolDefinitionFor('tables', 'nonexistent')).toEqual(SYMBOLS.tables)
+    expect(symbolDefinitionFor('tables', null)).toEqual(SYMBOLS.tables)
+    // A preset id from ANOTHER type does not leak across types.
+    expect(symbolDefinitionFor('chairs', 'ac')).toEqual(SYMBOLS.chairs)
+  })
+})
+
+describe('preset reference parsing and routing (object-visuals follow-up)', () => {
+  it('parsePresetReference: non-empty string or null', () => {
+    expect(parsePresetReference({ [VISUAL_PRESET_KEY]: 'round' })).toBe('round')
+    expect(parsePresetReference({})).toBeNull()
+    expect(parsePresetReference({ [VISUAL_PRESET_KEY]: '' })).toBeNull()
+    expect(parsePresetReference({ [VISUAL_PRESET_KEY]: 42 })).toBeNull()
+  })
+
+  it('resolveBoxVisual carries the preset on the symbol arm; a variant reference beats it', () => {
+    expect(
+      resolveBoxVisual({ type: 'tables', properties: { [VISUAL_PRESET_KEY]: 'round' } }),
+    ).toEqual({ kind: 'symbol', type: 'tables', preset: 'round' })
+    expect(resolveBoxVisual({ type: 'tables', properties: {} })).toEqual({
+      kind: 'symbol',
+      type: 'tables',
+      preset: null,
+    })
+    const both = resolveBoxVisual({
+      type: 'tables',
+      properties: { [VISUAL_PRESET_KEY]: 'round', [VISUAL_VARIANT_ID_KEY]: 7 },
+    })
+    expect(both.kind).toBe('image')
   })
 })

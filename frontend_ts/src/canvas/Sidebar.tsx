@@ -39,7 +39,7 @@ import { useToast } from '../notifications/ToastContext'
 import { useCanvasStore, type ActiveTool } from '../state/canvasStore'
 import { colorForType } from './ObjectShape'
 import { clampToBounds, screenToStagePoint, snapToGrid } from './coordinates'
-import { SYMBOLS } from './symbols'
+import { EXTRA_SYMBOL_PRESETS, SYMBOLS } from './symbols'
 import type { CatalogType, Point } from './types'
 
 const CATALOG_LABELS: Record<CatalogType, string> = {
@@ -138,13 +138,15 @@ interface SidebarProps {
    * contravariant-compatible with the existing two-parameter
    * CanvasEditorPage handler — U6 wires the consumer, nothing changes for
    * default drops today. */
-  onDrop: (type: CatalogType, point: Point, variant?: VariantDragRef) => void
+  onDrop: (type: CatalogType, point: Point, variant?: VariantDragRef, preset?: string) => void
 }
 
 interface DragState {
   type: CatalogType
   /** Present exactly when a VARIANT tile started the drag (U5). */
   variant?: VariantDragRef
+  /** Present exactly when a built-in PRESET tile started the drag. */
+  preset?: string
   /** The variant's thumbnail URL for the floating preview; the tinted
    * square stays painted beneath it as the loading/failed fallback. */
   previewUrl?: string
@@ -251,6 +253,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
       // the drop (U6's aspect-fit consumer); default drops keep the exact
       // two-argument call so the existing contract is bit-identical.
       if (active.variant) onDrop(active.type, clamped, active.variant)
+      else if (active.preset) onDrop(active.type, clamped, undefined, active.preset)
       else onDrop(active.type, clamped)
     },
     [getStage, gridSize, canvasWidth, canvasHeight, onDrop],
@@ -338,13 +341,36 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
     })
   }
 
+  /** A built-in preset tile's press — the default-tile flow plus the
+   * preset id payload. */
+  function handlePresetPointerDown(
+    type: CatalogType,
+    presetId: string,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    event.stopPropagation()
+    setDrag({
+      type,
+      preset: presetId,
+      startX: event.clientX,
+      startY: event.clientY,
+      dragging: false,
+      clientX: event.clientX,
+      clientY: event.clientY,
+    })
+  }
+
   /** Object-visuals follow-up: click-to-ARM. A sub-threshold press-release
    * toggles the tile's placement: armed -> disarm (back to pan); anything
    * else -> arm this tile ('place' tool; the next canvas click creates the
    * item — CanvasStage routes it to `onPlaceAt`). A completed DRAG
    * suppresses the click that follows its pointerup. */
   const suppressClickRef = useRef(false)
-  function handleTileClick(type: CatalogType, variant: ObjectVariant | null) {
+  function handleTileClick(
+    type: CatalogType,
+    variant: ObjectVariant | null,
+    presetId: string | null = null,
+  ) {
     if (suppressClickRef.current) {
       suppressClickRef.current = false
       return
@@ -353,7 +379,8 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
     const isArmed =
       activeTool === 'place' &&
       placement?.type === type &&
-      (placement?.variant?.id ?? null) === variantId
+      (placement?.variant?.id ?? null) === variantId &&
+      (placement?.preset ?? null) === presetId
     if (isArmed) {
       setPlacement(null)
     } else {
@@ -362,6 +389,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
         variant: variant
           ? { id: variant.id, width: variant.width, height: variant.height }
           : null,
+        preset: presetId,
       })
     }
   }
@@ -567,7 +595,8 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                             const defaultArmed =
                               activeTool === 'place' &&
                               placement?.type === type &&
-                              placement?.variant === null
+                              placement?.variant === null &&
+                              (placement?.preset ?? null) === null
                             return (
                               <div
                                 role="button"
@@ -604,6 +633,55 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                               </div>
                             )
                           })()}
+                          {/* Built-in PRESET tiles (user feedback: extra
+                              stock looks — round table, AC unit) — same
+                              click-to-arm/drag behavior as the default,
+                              carrying the preset id instead of a variant. */}
+                          {(EXTRA_SYMBOL_PRESETS[type] ?? []).map((preset) => {
+                            const presetArmed =
+                              activeTool === 'place' &&
+                              placement?.type === type &&
+                              placement?.variant === null &&
+                              placement?.preset === preset.id
+                            return (
+                              <div
+                                key={preset.id}
+                                role="button"
+                                tabIndex={0}
+                                data-testid={`preset-item-${type}-${preset.id}`}
+                                aria-label={`Place ${preset.label}`}
+                                aria-pressed={presetArmed}
+                                title={preset.label}
+                                onPointerDown={(event) =>
+                                  handlePresetPointerDown(type, preset.id, event)
+                                }
+                                onClick={() => handleTileClick(type, null, preset.id)}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault()
+                                    handleTileClick(type, null, preset.id)
+                                  }
+                                }}
+                                className={cn(
+                                  'flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-md border bg-background outline-none transition-all select-none touch-none focus-visible:ring-2 focus-visible:ring-ring/50',
+                                  presetArmed
+                                    ? 'border-primary shadow-inner ring-2 ring-primary/40'
+                                    : 'hover:border-ring/40 active:translate-y-px',
+                                )}
+                              >
+                                <svg
+                                  aria-hidden="true"
+                                  className="size-6"
+                                  viewBox={`0 0 ${preset.viewBox.width} ${preset.viewBox.height}`}
+                                  fill={colorForType(type)}
+                                >
+                                  {preset.paths.map((data, index) => (
+                                    <path key={index} d={data} />
+                                  ))}
+                                </svg>
+                              </div>
+                            )
+                          })}
                           {/* R7/R12: the user's uploaded variants for this
                               type — same click-to-arm/drag tiles, thumbnail
                               contain-fit, named by `original_name`

@@ -124,7 +124,8 @@ export function useCanvasShortcuts(
       // top of those activations would double-act.
       if (
         event.key === "Enter" &&
-        target?.closest('[role="button"], [role="dialog"], [role="menu"], a[href], select') != null
+        typeof target?.closest === "function" &&
+        target.closest('[role="button"], [role="dialog"], [role="menu"], a[href], select') != null
       ) {
         return;
       }
@@ -151,6 +152,19 @@ export function useCanvasShortcuts(
       } else if (action === "paste") {
         onPaste?.();
       } else {
+        // Enter FINALIZES (user feedback): deselect first — detaching the
+        // transformer/anchor chrome — and drop the select tool back to the
+        // idle pan mode (the same empty-click convention
+        // `handleBackgroundDeselect` follows), THEN save as-is. Ctrl+S
+        // stays a pure save: it deliberately works mid-edit without
+        // disturbing the selection.
+        if (event.key === "Enter") {
+          const store = useCanvasStore.getState();
+          store.clearSelection();
+          if (store.activeTool === "select") {
+            store.setActiveTool("pan");
+          }
+        }
         onSave?.();
       }
     };
