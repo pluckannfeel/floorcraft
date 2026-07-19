@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { temporal } from 'zundo'
 import { clampZoom } from '../canvas/coordinates'
 import type { BoundingBox } from '../canvas/coordinates'
-import type { CanvasObject, LineType, Point, ShapeType, TextType } from '../canvas/types'
+import type { CanvasObject, CatalogType, LineType, Point, ShapeType, TextType } from '../canvas/types'
 
 /** U11's default zoom step for the Toolbar's zoom in/out buttons (a gentler
  * per-click step than a single wheel "tick" would feel like, since a click
@@ -19,7 +19,23 @@ const TOOLBAR_ZOOM_STEP = 1.2
  * crop tool. Untracked by undo (see `partialize` below) — switching tools
  * isn't a content change.
  */
-export type ActiveTool = 'pan' | 'select' | ShapeType | LineType | TextType | 'crop'
+export type ActiveTool = 'pan' | 'select' | ShapeType | LineType | TextType | 'crop' | 'place'
+
+/**
+ * Catalog placement (object-visuals follow-up): clicking a catalog tile
+ * ARMS it — `activeTool` becomes `'place'` and this records WHAT the next
+ * canvas click will create: a type's default symbol (`variant: null`) or a
+ * specific uploaded variant (id + natural dims for the aspect-fit drop
+ * math). Untracked state like the tool itself — arming/disarming must
+ * never create an undo entry.
+ */
+export interface PlacementSelection {
+  type: CatalogType
+  variant: { id: number; width: number; height: number } | null
+  /** Built-in preset id (round table, AC unit…); absent/null = the type's
+   * default symbol. Mutually exclusive with `variant` in practice. */
+  preset?: string | null
+}
 
 /**
  * U8 (canvas-tools): the floor plan's live canvas dimensions while editing.
@@ -156,6 +172,9 @@ export interface CanvasState {
   selectedItemIds: CanvasObject['id'][]
   /** Drawing-tool mode for U15/U16's shape/line creation flows. */
   activeTool: ActiveTool
+  /** The armed catalog placement — non-null exactly while `activeTool`
+   * is `'place'` (see `PlacementSelection`). */
+  placement: PlacementSelection | null
   /**
    * U8: the canvas dimensions, part of the TRACKED snapshot (unlike
    * zoom/pan/selection): `partialize` below carries `{ items, canvasSize }`
@@ -493,6 +512,9 @@ export interface CanvasState {
    * handled here so every entry path (Sidebar tool button, future
    * shortcuts) gets it for free. */
   setActiveTool: (tool: ActiveTool) => void
+  /** Arms a catalog placement (tool -> 'place') or disarms it (null ->
+   * back to the idle pan mode). Clicking the armed tile again disarms. */
+  setPlacement: (placement: PlacementSelection | null) => void
 
   /** U11: sets the Stage's zoom AND position together in one call — the
    * shape `coordinates.ts`'s `computeWheelZoom`/`computePinchZoom` return,
@@ -596,6 +618,7 @@ export const useCanvasStore = create<CanvasState>()(
       items: [],
       selectedItemIds: [],
       activeTool: 'pan',
+      placement: null,
       canvasSize: null,
       zoom: 1,
       stagePosition: { x: 0, y: 0 },
@@ -918,12 +941,32 @@ export const useCanvasStore = create<CanvasState>()(
         // interface doc). `'pan'` clears it too: pan is the "no tool
         // engaged" idle mode — the canvas doesn't respond to clicks there,
         // so leaving a live selection behind would strand a transformer
-        // the user can't interact with. Neither key touches
-        // `items`/`canvasSize`, so no history entry either way.
+        // the user can't interact with. Any EXPLICIT tool choice also
+        // disarms a pending catalog placement (placement: null) — the
+        // 'place' tool is only ever entered via setPlacement. None of
+        // these keys touch `items`/`canvasSize`, so no history entry.
         set(
           tool === 'crop' || tool === 'pan'
-            ? { activeTool: tool, selectedItemIds: [] }
-            : { activeTool: tool },
+            ? { activeTool: tool, selectedItemIds: [], placement: null }
+            : { activeTool: tool, placement: null },
+        ),
+
+      setPlacement: (placement) =>
+        // Object-visuals follow-up: arming sets the 'place' tool with the
+        // payload; disarming (null) drops back to the idle pan mode — the
+        // same "cancelled tool lands on pan" convention the sidebar's tool
+        // toggles follow. Untracked keys only: no history entry.
+        set(
+          placement
+            ? // Arming ALSO clears the selection (final review pass): a
+              // retained selection kept its Transformer chrome live and
+              // listening while 'place' owned the canvas — pressing an
+              // anchor then BOTH resized the old selection AND placed the
+              // armed item. Same convention as entering crop/pan.
+              { activeTool: 'place', placement, selectedItemIds: [] }
+            : // Disarm lands on pan, and pan's no-live-selection invariant
+              // applies here exactly as in setActiveTool.
+              { activeTool: 'pan', placement: null, selectedItemIds: [] },
         ),
 
       setZoomAndPosition: (zoom, position) => set({ zoom: clampZoom(zoom), stagePosition: position }),

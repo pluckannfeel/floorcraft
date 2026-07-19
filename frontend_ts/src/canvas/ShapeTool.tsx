@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { Circle, Rect } from 'react-konva'
+import { Ellipse, Rect } from 'react-konva'
 import { clampToBounds, MIN_ITEM_SIZE, snapToGrid } from './coordinates'
 import type { Point, ShapeType } from './types'
 
@@ -149,12 +149,13 @@ interface ShapePreviewProps {
 }
 
 /** Live-sizing preview rendered while a Shape is being dragged out — a
- * dashed, semi-transparent outline (not yet a real Object) so it reads as
- * "in progress" and distinct from committed Objects. Circles render as a
- * true ellipse inscribed in the drag box; rectangle/square render as the
- * box itself, matching how `ObjectShape` will render the committed item
- * (generic rect) per U7's plan note that type-specific rendering beyond
- * color is a later concern. */
+ * dashed, semi-transparent treatment (not yet a real Object) so it reads
+ * as "in progress" and distinct from committed Objects. Circles render as
+ * a true ellipse inscribed in the drag box; rectangle/square render as the
+ * box itself. Committed shapes render OUTLINE-ONLY in `ObjectShape` (no
+ * fill, no label — fill/border styling is planned as its own feature), so
+ * the dashed fill here is deliberately the in-progress affordance, not a
+ * promise about the committed look. */
 export function ShapePreview({ type, geometry }: ShapePreviewProps) {
   const commonProps = {
     stroke: '#2563eb',
@@ -166,7 +167,10 @@ export function ShapePreview({ type, geometry }: ShapePreviewProps) {
 
   if (type === 'shape_circle') {
     return (
-      <Circle
+      // Ellipse, not Circle (review of user feedback): Konva's Circle only
+      // understands `radius` — the radiusX/radiusY props it was given were
+      // silently ignored, so the draw preview rendered nothing visible.
+      <Ellipse
         x={geometry.x + geometry.width / 2}
         y={geometry.y + geometry.height / 2}
         radiusX={geometry.width / 2}

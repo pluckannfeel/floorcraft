@@ -8,8 +8,10 @@ import { apiClient } from '../api/client'
 import * as AuthContextModule from '../auth/AuthContext'
 import * as ToastContextModule from '../notifications/ToastContext'
 import { undo, useCanvasStore } from '../state/canvasStore'
+import type { VariantDragRef } from './Sidebar'
 import { setTextMeasurer } from './TextTool'
-import type { CanvasObject, FloorPlan } from './types'
+import type { CanvasObject, CatalogType, FloorPlan, Point } from './types'
+import { VISUAL_VARIANT_ID_KEY } from './visuals'
 import { CanvasEditorPage } from './CanvasEditorPage'
 
 /**
@@ -44,6 +46,45 @@ vi.mock('./CanvasStage', () => ({
     return <div data-testid="canvas-stage" />
   },
 }))
+
+/**
+ * U6 (object-visuals): the Sidebar is stubbed the same way, recording its
+ * props so `onDrop` (the page's `handleDrop`) can be driven directly — the
+ * real Sidebar's drop pipeline needs a live Konva stage rect
+ * (`getStage().container().getBoundingClientRect()`), which the CanvasStage
+ * stub above can never provide. The Sidebar's OWN drag/upload/delete
+ * behavior is covered in Sidebar.test.tsx; here only the page-side contract
+ * matters. `importOriginal` keeps the module's non-component exports
+ * (DEFAULT_ITEM_SIZE, VariantDragRef) intact for the page's imports.
+ */
+const sidebarProps = vi.hoisted(() => ({
+  current: null as Record<string, unknown> | null,
+}))
+vi.mock('./Sidebar', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./Sidebar')>()
+  return {
+    ...actual,
+    Sidebar: (props: Record<string, unknown>) => {
+      sidebarProps.current = props
+      return <div data-testid="sidebar" />
+    },
+  }
+})
+
+/** U6: spy wrapper around the REAL resetImageRegistry so the plan-switch
+ * reset wiring is assertable while the actual eviction still happens
+ * (imageRegistry.test.ts owns the eviction semantics themselves). */
+const resetImageRegistrySpy = vi.hoisted(() => ({ calls: 0 }))
+vi.mock('./imageRegistry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./imageRegistry')>()
+  return {
+    ...actual,
+    resetImageRegistry: () => {
+      resetImageRegistrySpy.calls += 1
+      actual.resetImageRegistry()
+    },
+  }
+})
 
 function makePlan(overrides: Partial<FloorPlan> = {}): FloorPlan {
   return {
@@ -156,6 +197,8 @@ beforeEach(() => {
   useCanvasStore.temporal.getState().clear()
   navigateRef.current = null
   canvasStageProps.current = null
+  sidebarProps.current = null
+  resetImageRegistrySpy.calls = 0
   logout.mockClear()
   vi.spyOn(AuthContextModule, 'useAuth').mockReturnValue({
     user: { id: 1, email: 'ada@example.com' },
@@ -651,5 +694,356 @@ describe('header restructure: File ribbon tab and account menu (final polish)', 
     await user.click(screen.getByRole('button', { name: 'Menu' }))
     await user.click(screen.getByRole('menuitem', { name: /log out/i }))
     expect(logout).toHaveBeenCalledTimes(1)
+  })
+})
+
+// U6 (object-visuals): the drop side of F2 — variant drops carry the
+// reference into `properties` with aspect-fit dimensions; default drops are
+// bit-identical to pre-U6; both end as a one-shot creation (selected, select
+// tool, ONE history entry). Driven through the recorded Sidebar `onDrop`
+// prop (the page's real handleDrop — see the Sidebar stub's doc comment).
+describe('variant drop and image-registry reset (U6, object-visuals)', () => {
+  type OnDrop = (type: CatalogType, point: Point, variant?: VariantDragRef) => void
+
+  async function renderPlanSeven(objects: CanvasObject[] = []) {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Visual Plan' }), objects },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Visual Plan')).toBeInTheDocument()
+    const onDrop = sidebarProps.current?.onDrop as OnDrop
+    expect(onDrop).toBeTypeOf('function')
+    return onDrop
+  }
+
+  it('dropping a VARIANT creates an aspect-fit object carrying the reference, selected in select mode (one history entry)', async () => {
+    const onDrop = await renderPlanSeven()
+    // Start from the idle pan mode so the one-shot ending is observable.
+    act(() => {
+      useCanvasStore.setState({ activeTool: 'pan' })
+    })
+
+    // A wide 2:1 chair photo (natural 200×100) → a 2:1 box, longest side on
+    // the 40px catalog default.
+    act(() => onDrop('chairs', { x: 100, y: 120 }, { id: 12, width: 200, height: 100 }))
+
+    const state = useCanvasStore.getState()
+    expect(state.items).toHaveLength(1)
+    const item = state.items[0]
+    expect(item).toMatchObject({
+      type: 'chairs',
+      x: 100,
+      y: 120,
+      width: 40,
+      height: 20,
+    })
+    // The reference rides `properties` as a NUMBER (the defensive parser
+    // rejects strings) under the shared key constant — session-stable by
+    // construction (the server row pre-exists the drop).
+    expect(item.properties).toEqual({ [VISUAL_VARIANT_ID_KEY]: 12 })
+    // One-shot creation flow: selected, in the select tool (pan-tool
+    // learning — never a stranded pan-mode selection).
+    expect(state.selectedItemIds).toEqual([item.id])
+    expect(state.activeTool).toBe('select')
+    // ONE tracked entry for the whole gesture (selection/tool untracked).
+    expect(useCanvasStore.temporal.getState().pastStates).toHaveLength(1)
+  })
+
+  it('a DEFAULT drop (no variant ref) is unchanged: 40×40 with empty properties', async () => {
+    const onDrop = await renderPlanSeven()
+
+    act(() => onDrop('tables', { x: 60, y: 80 }))
+
+    const state = useCanvasStore.getState()
+    expect(state.items).toHaveLength(1)
+    expect(state.items[0]).toMatchObject({ type: 'tables', x: 60, y: 80, width: 40, height: 40 })
+    expect(state.items[0].properties).toEqual({})
+    expect(state.selectedItemIds).toEqual([state.items[0].id])
+    expect(state.activeTool).toBe('select')
+  })
+
+  it('degenerate natural dimensions clamp to 40×40 — no NaN geometry can enter the store', async () => {
+    const onDrop = await renderPlanSeven()
+
+    act(() => onDrop('lighting', { x: 20, y: 20 }, { id: 5, width: 0, height: Number.NaN }))
+
+    const item = useCanvasStore.getState().items[0]
+    expect(item).toMatchObject({ width: 40, height: 40 })
+    // The reference still lands — only the geometry was degenerate.
+    expect(item.properties).toEqual({ [VISUAL_VARIANT_ID_KEY]: 5 })
+  })
+
+  it('the plan-switch reset path also resets the image registry (the ONLY eviction point)', async () => {
+    mockGetForPlans({
+      1: { plan: makePlan({ id: 1, name: 'Plan A' }), objects: [] },
+      2: { plan: makePlan({ id: 2, name: 'Plan B' }), objects: [] },
+    })
+    renderEditor('/floor-plans/1')
+    expect(await screen.findByText('Plan A')).toBeInTheDocument()
+    // The [floorPlanId]-keyed reset effect runs on mount too — a plan
+    // session always starts with an empty registry.
+    expect(resetImageRegistrySpy.calls).toBeGreaterThan(0)
+    const callsAfterMount = resetImageRegistrySpy.calls
+
+    act(() => {
+      navigateRef.current?.('/floor-plans/2')
+    })
+    expect(await screen.findByText('Plan B')).toBeInTheDocument()
+
+    // The switch evicted plan A's decoded elements alongside the store/
+    // history reset (export plan-switch isolation, U7's precondition).
+    expect(resetImageRegistrySpy.calls).toBeGreaterThan(callsAfterMount)
+  })
+})
+
+describe('persistence regression sweep (U8, object-visuals)', () => {
+  /** R13: place a variant → save → "reload" (navigate away and back, which
+   * re-fetches and re-seeds the store) → the seeded items still carry the
+   * variant reference. The PUT echo is what a real backend returns (the
+   * sync contract passes properties through verbatim — see test_sync.py's
+   * U8 cases for the server half). */
+  it('place variant → save → reload seeds objects that still carry the reference (R13)', async () => {
+    const variantProperties = { [VISUAL_VARIANT_ID_KEY]: 12 }
+    const savedObject = makeObject({
+      id: 501,
+      floor_plan: 7,
+      type: 'chairs',
+      x: 100,
+      y: 120,
+      width: 40,
+      height: 20,
+      properties: variantProperties,
+    })
+
+    // Phase 1: an empty plan; the PUT echoes the created row.
+    const getSpy = mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Persist Plan' }), objects: [] },
+      8: { plan: makePlan({ id: 8, name: 'Other Plan' }), objects: [] },
+    })
+    vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: { objects: [savedObject], id_map: {} },
+    } as never)
+
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Persist Plan')).toBeInTheDocument()
+    const onDrop = sidebarProps.current?.onDrop as (
+      type: CatalogType,
+      point: Point,
+      variant?: VariantDragRef,
+    ) => void
+    act(() => onDrop('chairs', { x: 100, y: 120 }, { id: 12, width: 200, height: 100 }))
+    expect(useCanvasStore.getState().items[0].properties).toEqual(variantProperties)
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /save changes/i }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /save changes/i })).toHaveTextContent('Saved'),
+    )
+
+    // Phase 2: the "reload" — navigate to another plan and back. The
+    // return trip re-fetches objects (now serving the saved row) and the
+    // seed-once effect re-seeds the store for the plan.
+    getSpy.mockRestore()
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Persist Plan' }), objects: [savedObject] },
+      8: { plan: makePlan({ id: 8, name: 'Other Plan' }), objects: [] },
+    })
+    act(() => navigateRef.current!('/floor-plans/8'))
+    expect(await screen.findByText('Other Plan')).toBeInTheDocument()
+    act(() => navigateRef.current!('/floor-plans/7'))
+    expect(await screen.findByText('Persist Plan')).toBeInTheDocument()
+
+    await waitFor(() => {
+      const items = useCanvasStore.getState().items
+      expect(items).toHaveLength(1)
+      expect(items[0]).toEqual(
+        expect.objectContaining({ id: 501, width: 40, height: 20, properties: variantProperties }),
+      )
+    })
+  })
+
+  /** AE3 (R4): a pre-feature plan — objects with empty or legacy-keyed
+   * properties, no visual keys — loads with geometry unchanged and
+   * properties EXACTLY as served (no migration, no mutation; symbols are a
+   * pure render-time decision). */
+  it('a pre-feature plan loads with properties and geometry served verbatim (AE3)', async () => {
+    const legacyObjects = [
+      makeObject({ id: 1, type: 'chairs', x: 10, y: 20, width: 40, height: 40, properties: {} }),
+      makeObject({
+        id: 2,
+        type: 'tables',
+        x: 200,
+        y: 80,
+        width: 120,
+        height: 60,
+        rotation: 45,
+        // Legacy rows may carry arbitrary keys (models.py mentions wall
+        // thickness/BTU) — branch selection keys on the visual key's
+        // PRESENCE, never on properties emptiness.
+        properties: { wall_thickness: 5, custom_note: 'BTU 9000' },
+      }),
+    ]
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Legacy Plan' }), objects: legacyObjects },
+    })
+
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Legacy Plan')).toBeInTheDocument()
+
+    await waitFor(() => {
+      const items = useCanvasStore.getState().items
+      expect(items).toHaveLength(2)
+      expect(items[0]).toEqual(
+        expect.objectContaining({ x: 10, y: 20, width: 40, height: 40, properties: {} }),
+      )
+      expect(items[1]).toEqual(
+        expect.objectContaining({
+          rotation: 45,
+          properties: { wall_thickness: 5, custom_note: 'BTU 9000' },
+        }),
+      )
+    })
+    // No mutation happened: the store is clean (seeding is not an edit).
+    expect(useCanvasStore.getState().dirty).toBe(false)
+  })
+})
+
+describe('armed placement: click-to-place (object-visuals follow-up)', () => {
+  it('an armed variant placement places at the clicked point — snapped, aspect-fit, selected in select mode, disarmed', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Place Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Place Plan')).toBeInTheDocument()
+
+    // Arm a wide 2:1 variant (as the Sidebar tile click would).
+    act(() => {
+      useCanvasStore
+        .getState()
+        .setPlacement({ type: 'chairs', variant: { id: 12, width: 200, height: 100 } })
+    })
+
+    const onPlaceAt = canvasStageProps.current?.onPlaceAt as
+      | ((point: { x: number; y: number }) => void)
+      | undefined
+    expect(onPlaceAt).toBeTypeOf('function')
+    // A raw (unsnapped) stage point: the page snaps to the 20px grid.
+    act(() => onPlaceAt!({ x: 105, y: 95 }))
+
+    const state = useCanvasStore.getState()
+    expect(state.items).toHaveLength(1)
+    expect(state.items[0]).toMatchObject({
+      type: 'chairs',
+      x: 100,
+      y: 100,
+      width: 40,
+      height: 20,
+    })
+    expect(state.items[0].properties).toEqual({ [VISUAL_VARIANT_ID_KEY]: 12 })
+    // One-shot convention: selected, in select mode, placement disarmed.
+    expect(state.selectedItemIds).toEqual([state.items[0].id])
+    expect(state.activeTool).toBe('select')
+    expect(state.placement).toBeNull()
+  })
+
+  it('a place click with NOTHING armed is a no-op', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Noop Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Noop Plan')).toBeInTheDocument()
+
+    const onPlaceAt = canvasStageProps.current?.onPlaceAt as (point: {
+      x: number
+      y: number
+    }) => void
+    act(() => onPlaceAt({ x: 100, y: 100 }))
+    expect(useCanvasStore.getState().items).toHaveLength(0)
+  })
+})
+
+describe('outline defaults (object-visuals follow-up)', () => {
+  it('placing/dropping a default OUTLINE creates a 120x80 rectangle, not a square', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Room Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Room Plan')).toBeInTheDocument()
+
+    const onDrop = sidebarProps.current?.onDrop as (
+      type: CatalogType,
+      point: Point,
+      variant?: VariantDragRef,
+    ) => void
+    act(() => onDrop('outlines', { x: 200, y: 200 }))
+
+    expect(useCanvasStore.getState().items[0]).toMatchObject({
+      type: 'outlines',
+      width: 120,
+      height: 80,
+    })
+  })
+})
+
+describe('preset placement stamping (object-visuals follow-up)', () => {
+  it('a dropped/placed preset stamps visual_preset into properties', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Preset Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Preset Plan')).toBeInTheDocument()
+
+    // Drag-drop path: the 4th onDrop argument.
+    const onDrop = sidebarProps.current?.onDrop as (
+      type: CatalogType,
+      point: Point,
+      variant?: VariantDragRef,
+      preset?: string,
+    ) => void
+    act(() => onDrop('tables', { x: 100, y: 100 }, undefined, 'round'))
+    expect(useCanvasStore.getState().items[0].properties).toEqual({ visual_preset: 'round' })
+
+    // Click-to-place path: the armed placement's preset.
+    act(() => {
+      useCanvasStore
+        .getState()
+        .setPlacement({ type: 'appliances', variant: null, preset: 'ac' })
+    })
+    const onPlaceAt = canvasStageProps.current?.onPlaceAt as (point: {
+      x: number
+      y: number
+    }) => void
+    act(() => onPlaceAt({ x: 300, y: 300 }))
+    const placed = useCanvasStore.getState().items[1]
+    expect(placed).toMatchObject({ type: 'appliances', width: 40, height: 40 })
+    expect(placed.properties).toEqual({ visual_preset: 'ac' })
+  })
+})
+
+describe('per-preset default drop sizes (object-visuals follow-up)', () => {
+  it('placing the split AC drops at its slim natural proportions, not the square default', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'AC Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('AC Plan')).toBeInTheDocument()
+
+    act(() => {
+      useCanvasStore
+        .getState()
+        .setPlacement({ type: 'appliances', variant: null, preset: 'split' })
+    })
+    const onPlaceAt = canvasStageProps.current?.onPlaceAt as (point: {
+      x: number
+      y: number
+    }) => void
+    act(() => onPlaceAt({ x: 200, y: 200 }))
+
+    expect(useCanvasStore.getState().items[0]).toMatchObject({
+      type: 'appliances',
+      width: 80,
+      height: 24,
+    })
+    expect(useCanvasStore.getState().items[0].properties).toEqual({ visual_preset: 'split' })
   })
 })

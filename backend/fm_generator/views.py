@@ -1,11 +1,21 @@
 from django.db import transaction
-from rest_framework import status, viewsets
+from django.db.models import Count, Sum
+from django.http import FileResponse, Http404
+from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import FloorPlan, Objects
-from .serializers import FloorPlanSerializer, ObjectSerializer, SyncObjectSerializer
+from . import variants
+from .models import FloorPlan, Objects, ObjectVariant
+from .serializers import (
+    FloorPlanSerializer,
+    ObjectSerializer,
+    ObjectVariantSerializer,
+    SyncObjectSerializer,
+)
 
 
 def _validate_canvas(canvas):
@@ -151,6 +161,189 @@ class FloorPlanViewSet(viewsets.ModelViewSet):
             'objects': ObjectSerializer(canonical, many=True, context=context).data,
             'id_map': id_map,
         })
+
+
+class ObjectVariantViewSet(
+    mixins.ListModelMixin,
+    mixins.CreateModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
+    """The variant catalog API (U2, object-visuals): list / upload /
+    soft-delete. Deliberately NOT a ModelViewSet — variants are immutable
+    once uploaded (no update/partial_update; replacing a visual means
+    uploading a new variant, R7's "never replace"), and retrieve is owned
+    by U3's file action.
+    """
+
+    queryset = ObjectVariant.objects.all()
+    serializer_class = ObjectVariantSerializer
+    permission_classes = [IsAuthenticated]
+    # Uploads arrive as multipart/form-data (a file plus object_type);
+    # FormParser covers plain form posts. JSON has no business here.
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        """Owner-scoped ALWAYS (foreign/nonexistent ids 404 uniformly —
+        the R14 anti-oracle pattern, same as FloorPlanViewSet). The
+        `is_active` filter applies to LIST ONLY:
+
+          * list is the catalog strip — soft-deleted variants are hidden
+            from it (that IS the R18 delete semantic);
+          * destroy must NOT filter on is_active, so deleting an
+            already-deleted variant finds the row and succeeds again
+            (idempotent 204, R18) instead of 404ing — while a foreign or
+            nonexistent id still 404s via the owner scope;
+          * the `file` action must NOT filter on is_active either — a
+            soft-deleted variant KEEPS SERVING its file (the R11
+            keep-rendering mechanism: placed objects and historical undo
+            snapshots reference it forever).
+
+        Ordering is stable (created_at, then id as the tiebreak for
+        same-instant rows) so the catalog strip never reshuffles between
+        fetches.
+        """
+        queryset = super().get_queryset().filter(owner=self.request.user)
+        if self.action == 'list':
+            queryset = queryset.filter(is_active=True)
+        return queryset.order_by('created_at', 'id')
+
+    def get_throttles(self):
+        # R19: the rate limit guards the expensive action ONLY — uploads
+        # burn CPU (Pillow/svg-hush) and disk; list/destroy are cheap and
+        # throttling them would only hurt the catalog UI.
+        if self.action == 'create':
+            return [variants.VariantUploadThrottle()]
+        return super().get_throttles()
+
+    def perform_create(self, serializer):
+        """Create with the ATOMIC quota check (R19; the plan's TOCTOU fix).
+
+        A naive read-count-then-insert races: two concurrent uploads both
+        read 99/100, both pass, both insert — 101. Instead, inside one
+        transaction:
+
+          1. `select_for_update()` over the owner's variant rows takes row
+             locks. A concurrent creator for the SAME owner blocks HERE
+             until this transaction commits (its FOR UPDATE scan conflicts
+             with ours), so same-owner creates serialize. Ordered by pk so
+             two lockers always acquire in the same order (no deadlock).
+          2. The aggregate runs as a SECOND statement. Under READ COMMITTED
+             each statement gets a fresh snapshot, so a transaction that
+             was blocked in step 1 aggregates AFTER the winner's commit and
+             sees its newly inserted row — the stale-read window is gone.
+
+        The only unserialized case is an owner with ZERO variant rows (no
+        rows, no locks) — harmless, since two concurrent first-uploads can
+        never exceed either cap (2 <= 100 and 2 x 5 MB <= 100 MiB).
+
+        Soft-deleted variants are deliberately INCLUDED (no is_active
+        filter): their files persist on disk (retention stance), so they
+        keep counting against both caps.
+        """
+        owner_variants = ObjectVariant.objects.filter(owner=self.request.user)
+        with transaction.atomic():
+            # Statement 1: acquire the locks (list() forces evaluation —
+            # a lazy queryset would lock nothing). Postgres disallows
+            # FOR UPDATE combined with aggregates, hence two statements.
+            list(owner_variants.select_for_update().order_by('pk').values_list('pk', flat=True))
+
+            # Statement 2: fresh-snapshot aggregate over count AND bytes.
+            totals = owner_variants.aggregate(count=Count('pk'), total_bytes=Sum('size_bytes'))
+            count = totals['count'] or 0
+            total_bytes = totals['total_bytes'] or 0
+            new_bytes = serializer.validated_data['size_bytes']
+            if (
+                count >= variants.MAX_VARIANT_COUNT
+                or total_bytes + new_bytes > variants.MAX_VARIANT_TOTAL_BYTES
+            ):
+                # Friendly quota message (R19). The explicit list matches
+                # the serializer-rejection shape ({"file": ["..."]}) —
+                # DRF's ValidationError only listifies non-dict details, so
+                # a bare string here would serialize as {"file": "..."}.
+                raise ValidationError({'file': [variants.MSG_QUOTA]})
+
+            serializer.save(owner=self.request.user)
+
+    def perform_destroy(self, instance):
+        # SOFT delete is the whole mechanism (R11/R18): the row survives,
+        # the file survives, U3's file endpoint keeps serving it — placed
+        # objects and undo snapshots keep rendering forever. Only the
+        # catalog listing forgets it. Flipping an already-False flag is a
+        # no-op write, which is what makes the second DELETE a clean 204.
+        instance.is_active = False
+        instance.save(update_fields=['is_active'])
+
+    # Content-Type per sniffed kind (U2's pipeline guarantees `kind` is the
+    # verified truth about the stored bytes, so this map can never be
+    # steered by a client-claimed extension or Content-Type).
+    FILE_CONTENT_TYPES = {
+        ObjectVariant.Kind.SVG: 'image/svg+xml',
+        ObjectVariant.Kind.PNG: 'image/png',
+        ObjectVariant.Kind.JPEG: 'image/jpeg',
+    }
+
+    @action(detail=True, methods=['get'], url_path='file')
+    def file(self, request, pk=None):
+        """The authenticated file endpoint (U3, object-visuals; R10/R11/
+        R13/R14): GET /api/object-variants/<id>/file/ streams the stored
+        bytes to their owner — and ONLY their owner.
+
+        Ownership and retention ride get_queryset: owner-scoped (foreign
+        and nonexistent ids 404 uniformly — the R14 anti-oracle pattern),
+        WITHOUT the is_active filter (soft-deleted variants keep serving;
+        see get_queryset's docstring). Throttle-free by get_throttles'
+        create-only scoping — image fetches are cheap streams and the
+        canvas may legitimately request many at once.
+
+        Header contract (the plan's U3 serving decisions):
+
+          * `Cache-Control: private, max-age=31536000, immutable` — UUID
+            filenames (variant_upload_to) make the stored bytes genuinely
+            immutable, so repeat catalog/canvas use and PNG export hit the
+            browser cache instead of re-fetching; `private` keeps shared
+            proxies from caching an authenticated body.
+          * `Content-Disposition: attachment` BARE — deliberately no
+            filename parameter: `original_name` is client-supplied text and
+            a response-header injection surface; if a filename is ever
+            wanted here, it is the UUID basename, never the original name.
+            Attachment disposition only affects direct navigation — <img>/
+            Konva subresource rendering is unaffected, so the canvas still
+            draws these responses while a pasted URL downloads instead of
+            rendering.
+          * `X-Content-Type-Options: nosniff` on every kind — the declared
+            image type is final; browsers must not content-sniff their way
+            to something executable.
+          * SVG only: a restrictive `Content-Security-Policy` as direct-
+            navigation hardening (defense-in-depth behind U2's sanitizer) —
+            if an SVG were ever viewed as a document, nothing can execute
+            or fetch; inline style-attributes (which svg-hush's output may
+            legitimately carry) stay allowed. Subresource <img> rendering
+            ignores the document CSP, so the canvas is unaffected here too.
+        """
+        variant = self.get_object()
+        # A row whose media file is gone (volume mishap, partial restore —
+        # the retention stance means rows are never deleted, so orphans are
+        # the plausible drift) must fall into the SAME uniform 404 as
+        # foreign/nonexistent ids, not a 500 (review-pass find). The
+        # frontend registry degrades a 404 to the placeholder identically.
+        try:
+            file_handle = variant.file.open('rb')
+        except FileNotFoundError:
+            raise Http404
+        response = FileResponse(
+            file_handle,
+            content_type=self.FILE_CONTENT_TYPES[variant.kind],
+        )
+        response['Cache-Control'] = 'private, max-age=31536000, immutable'
+        # Overwrites FileResponse's derived disposition — bare, no filename.
+        response['Content-Disposition'] = 'attachment'
+        response['X-Content-Type-Options'] = 'nosniff'
+        if variant.kind == ObjectVariant.Kind.SVG:
+            response['Content-Security-Policy'] = (
+                "default-src 'none'; style-src 'unsafe-inline'"
+            )
+        return response
 
 
 class ObjectViewSet(viewsets.ModelViewSet):

@@ -20,6 +20,7 @@ import {
 } from './coordinates'
 import type { BoundingBox, ZoomPanState } from './coordinates'
 import { CURSOR_CROSSHAIR, CURSOR_GRAB, CURSOR_GRABBING, CURSOR_TEXT } from './cursors'
+import { beginCanvasGesture, endCanvasGesture } from './gesture'
 import { buildClipboardPayload } from './clipboard'
 import type { ClipboardPayload } from './clipboard'
 import { CropConfirmControls, CropRegionOverlay, useCropTool } from './CropTool'
@@ -146,6 +147,11 @@ interface CanvasStageProps {
    * draft, and opens the edit overlay; same delegation as
    * `onCreateShape`/`onCreateLine`). */
   onCreateTextAt?: (point: Point) => void
+  /** Object-visuals follow-up: a left-press on the canvas while a catalog
+   * placement is ARMED (`activeTool === 'place'`) creates the armed item
+   * at that stage point — the caller snaps/clamps and reads the armed
+   * payload from the store. */
+  onPlaceAt?: (point: Point) => void
   /** Escape with no gesture in flight leaves the active tool, returning to
    * the idle pan mode (canvas-tools follow-up). */
   onExitTool?: () => void
@@ -750,6 +756,11 @@ export function useMarquee({
   const [gesture, setGesture] = useState<{ origin: Point; current: Point } | null>(null)
 
   const begin = useCallback((containerPoint: Point) => {
+    // Final review pass: the marquee is a canvas gesture — Enter-finalize
+    // must not fire mid-drag (it would flip the tool to pan and the
+    // release commit would plant a selection there, violating the pan
+    // no-live-selection invariant).
+    beginCanvasGesture()
     setGesture({ origin: containerPoint, current: containerPoint })
   }, [])
 
@@ -757,7 +768,12 @@ export function useMarquee({
     setGesture((active) => (active ? { ...active, current: containerPoint } : active))
   }, [])
 
-  const cancel = useCallback(() => setGesture(null), [])
+  const cancel = useCallback(() => {
+    setGesture((active) => {
+      if (active) endCanvasGesture()
+      return null
+    })
+  }, [])
 
   const commit = useCallback(
     (additive: boolean) => {
@@ -779,6 +795,7 @@ export function useMarquee({
       } else if (action.kind === 'select') {
         onReplaceSelection(action.ids)
       }
+      endCanvasGesture()
       setGesture(null)
     },
     [
@@ -842,6 +859,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onOpenContextMenu,
     onDuplicateSelection,
     onCreateTextAt,
+    onPlaceAt,
     onExitTool,
     onActivateSelectTool,
     onBackgroundDeselect,
@@ -856,6 +874,12 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   const drawingLine = isLineTool(activeTool)
   const textToolActive = isTextType(activeTool)
   const croppingTool = activeTool === 'crop'
+  // Object-visuals follow-up: an armed catalog placement. Behaves like the
+  // draw tools for routing purposes — objects stop listening (a click
+  // ANYWHERE places, even over an existing object), the cursor is the
+  // crosshair, the context menu is suppressed, and Escape exits to pan via
+  // the generic !panTool branch.
+  const placingTool = activeTool === 'place'
   // The idle "no tool engaged" mode (canvas-tools follow-up): a plain drag
   // navigates, exactly like Space+drag from any other mode (the Stage is
   // draggable via `stageDraggable` below). Unlike Space-held, the objects
@@ -1124,12 +1148,18 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         event.stopPropagation()
         cropRef.current.cancel()
       } else if (event.key === 'Enter' && cropRef.current.isPending) {
+        // Own the key fully (final review pass): the page-level
+        // Enter-to-save listener registered EARLIER and same-phase window
+        // listeners run in registration order — without capture +
+        // stopPropagation it would save the PRE-crop state on the very
+        // keypress that confirms the crop.
         event.preventDefault()
+        event.stopPropagation()
         cropRef.current.confirm()
       }
     }
-    window.addEventListener('keydown', handleWindowKeyDown)
-    return () => window.removeEventListener('keydown', handleWindowKeyDown)
+    window.addEventListener('keydown', handleWindowKeyDown, true)
+    return () => window.removeEventListener('keydown', handleWindowKeyDown, true)
   }, [cropActive])
 
   // U8: leaving the crop tool (Toolbar toggle, confirm's switch back to
@@ -1156,7 +1186,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     // native crosshair/I-beam/hand render plain white.
     container.style.cursor = panDragging
       ? CURSOR_GRABBING
-      : marqueeActive || croppingTool || drawingShape || drawingLine
+      : marqueeActive || croppingTool || drawingShape || drawingLine || placingTool
         ? CURSOR_CROSSHAIR
         : spaceHeld || panTool
           ? CURSOR_GRAB
@@ -1171,6 +1201,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     panDragging,
     spaceHeld,
     panTool,
+    placingTool,
     textToolActive,
   ])
 
@@ -1602,6 +1633,31 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           return
         }
 
+        // Object-visuals follow-up: armed catalog placement — a left-press
+        // creates the armed item at the pressed point (the caller snaps/
+        // clamps and ends in select mode, the one-shot convention). The
+        // objects layer is non-listening while placing (Layer gate below),
+        // so the press reaches the Stage wherever it lands — placement
+        // works over existing objects too, like the crop tool's routing.
+        if (placingTool) {
+          // Touch keeps single-finger panning even while a placement is
+          // armed (final review pass: a touch contact's pointerdown has
+          // button === 0, so without this carve-out the first finger of a
+          // pan/pinch PLACED an item) — the same exemption the crop tool
+          // makes above. Touch users place via the tiles' drag-and-drop.
+          if (event.evt.pointerType === 'touch') {
+            stage.draggable(true)
+            return
+          }
+          // Belt-and-suspenders target check (arming clears the selection,
+          // so no transformer chrome should exist — but a press must
+          // never both manipulate overlay chrome AND place).
+          if (event.evt.button === 0 && event.target === stage) {
+            onPlaceAt?.(screenToStagePoint(stage, event.evt.clientX, event.evt.clientY))
+          }
+          return
+        }
+
         // U2: touch is exempt from the pan rebind (plan) — single-finger
         // pan is preserved (the pinch handler in onTouchMove depends on the
         // stage drag via `isDragging()`/`stopDrag()`), and the marquee is
@@ -1694,7 +1750,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // those states, so the menu must never open over them (Escape
         // would otherwise be consumed by two owners at once, e.g. closing
         // the menu AND committing a half-drawn line).
-        if (croppingTool || drawingLine || drawingShape || marquee.isActive) return
+        if (croppingTool || drawingLine || drawingShape || placingTool || marquee.isActive) return
         const stage = event.target.getStage()
         if (!stage) return
         // Right-click selection rule FIRST (plan Key Technical Decision),
@@ -1732,7 +1788,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           dragging that Object. U8: the crop tool joins the drawing tools —
           a crop drag must start wherever the pointer is, objects
           underneath included. */}
-      <Layer listening={!drawingShape && !drawingLine && !spaceHeld && !croppingTool}>
+      <Layer listening={!drawingShape && !drawingLine && !spaceHeld && !croppingTool && !placingTool}>
         {/* U18: render order comes from `sortObjectsByZIndex` (above) —
             deliberately NOT from imperative Konva `.moveToTop()`/`.zIndex()`
             calls, which react-konva's own docs warn will fight React's own

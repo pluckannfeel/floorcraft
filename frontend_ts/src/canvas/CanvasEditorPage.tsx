@@ -31,10 +31,19 @@ import { ContextMenu, resolveContextMenuAvailability } from "./ContextMenu";
 import { clampToBounds, snapToGrid } from "./coordinates";
 import type { BoundingBox } from "./coordinates";
 import { FloorPlanNameEditor } from "./FloorPlanNameEditor";
+import { resetImageRegistry } from "./imageRegistry";
 import { computeLineBoundingBox, curveStyleForType } from "./LineTool";
+import { symbolPresetFor } from "./symbols";
 import { PropertyPanel } from "./PropertyPanel";
 import type { ShapeGeometry } from "./ShapeTool";
-import { Sidebar } from "./Sidebar";
+import { DEFAULT_ITEM_SIZE, Sidebar } from "./Sidebar";
+import type { VariantDragRef } from "./Sidebar";
+import {
+  aspectFitDimensions,
+  defaultDimensionsForType,
+  VISUAL_PRESET_KEY,
+  VISUAL_VARIANT_ID_KEY,
+} from "./visuals";
 import { TextEditOverlay } from "./TextEditOverlay";
 import {
   DEFAULT_TEXT_STYLING,
@@ -407,6 +416,15 @@ export function CanvasEditorPage() {
     store.clearSelection(); // untracked (partialize covers items/canvasSize only)
     store.resetZoom(); // untracked
     useCanvasStore.temporal.getState().clear();
+    // U6 (object-visuals): the image-load registry's ONLY eviction point —
+    // the plan-switch reseed. Within a plan session the decoded elements
+    // deliberately survive everything (including refcount-zero: an
+    // undo-of-delete remount must repaint from cache, not strobe the R16
+    // placeholder), and U7's export await-set gets plan-switch isolation
+    // for free: no stale entry from plan A can haunt plan B. Lives in this
+    // effect because the registry is module-global exactly like the store
+    // and zundo history reset alongside it — same lifetime, same reset.
+    resetImageRegistry();
     // Forget which plan was seeded, too: without this, a same-mount
     // A -> B -> A param sequence where B's fetch never resolved would find
     // the ref still equal to A and leave plan A permanently empty (and a
@@ -505,21 +523,100 @@ export function CanvasEditorPage() {
     [items],
   );
 
-  const handleDrop = useCallback(
-    (type: CatalogType, point: Point) => {
+  // Sidebar drop (default tile or variant tile, U6). Snap/clamp already
+  // happened in Sidebar's endDrag; this handler owns dimensions, properties,
+  // and the one-shot ending.
+  //
+  // Variant drops (R8, plan KTD "Aspect-fit drops"): dimensions come
+  // SYNCHRONOUSLY from the drag payload's pipeline-recorded natural size —
+  // longest side = the 40px catalog default, degenerate values clamped to
+  // 40×40 inside aspectFitDimensions (NaN geometry must never enter the
+  // store/history/save payload) — so image-load completion never needs to
+  // write the store (undo-redo learning). The variant's server id is
+  // stamped into `properties` via buildLocalObject's properties argument
+  // (session-stable by construction: the server row exists before any drop
+  // can reference it, so no id-mapping is ever needed for it). Default
+  // drops keep the exact pre-U6 shape: 40×40, empty properties.
+  //
+  // One-shot creation flow (pan-tool learning): ONE tracked store entry
+  // (createItemLocal; selection + tool are untracked), ending with the new
+  // object selected in the SELECT tool — matching the shape/line/text
+  // creation paths, and avoiding the stranded pan-mode-selection state
+  // handleCreateTextAt's comment describes.
+  // Shared catalog-item creator: the drag-drop path (Sidebar hands over a
+  // pre-snapped/clamped point) and the click-to-place path (raw stage
+  // point from CanvasStage) both land here. Snap + clamp run against the
+  // item's ACTUAL dimensions (aspect-fit for variants) — snapping an
+  // already-snapped point is a no-op, and clamping with the real box is
+  // strictly more correct than the drop pipeline's 40x40 pre-clamp. Ends
+  // selected in select mode (the one-shot convention).
+  const createCatalogItemAt = useCallback(
+    (
+      type: CatalogType,
+      point: Point,
+      variant: VariantDragRef | null,
+      preset: string | null = null,
+    ) => {
       const floorPlan = floorPlanQuery.data;
       if (!floorPlan) return;
 
-      createItemLocal(
-        buildLocalObject(floorPlan.id, type, {
-          x: point.x,
-          y: point.y,
-          width: 40,
-          height: 40,
-        }),
+      const dimensions = variant
+        ? aspectFitDimensions(variant, DEFAULT_ITEM_SIZE)
+        : // A preset may carry its own natural drop size (a slim split-AC
+          // wall unit shouldn't drop square); otherwise the type default.
+          (symbolPresetFor(type, preset)?.defaultSize ??
+            defaultDimensionsForType(type, DEFAULT_ITEM_SIZE));
+      const liveCanvasSize = useCanvasStore.getState().canvasSize;
+      const snapped = snapToGrid(point, floorPlan.grid_size);
+      const clamped = clampToBounds(
+        snapped,
+        dimensions.width,
+        dimensions.height,
+        liveCanvasSize?.width ?? floorPlan.canvas_width,
+        liveCanvasSize?.height ?? floorPlan.canvas_height,
       );
+      const item = buildLocalObject(
+        floorPlan.id,
+        type,
+        { x: clamped.x, y: clamped.y, ...dimensions },
+        // The visual reference: an uploaded variant beats a preset; a
+        // preset beats the bare default (nothing stamped).
+        variant
+          ? { [VISUAL_VARIANT_ID_KEY]: variant.id }
+          : preset
+            ? { [VISUAL_PRESET_KEY]: preset }
+            : {},
+      );
+      createItemLocal(item);
+      replaceSelection([item.id]);
+      setActiveTool("select");
     },
-    [floorPlanQuery.data, buildLocalObject, createItemLocal],
+    [
+      floorPlanQuery.data,
+      buildLocalObject,
+      createItemLocal,
+      replaceSelection,
+      setActiveTool,
+    ],
+  );
+
+  const handleDrop = useCallback(
+    (type: CatalogType, point: Point, variant?: VariantDragRef, preset?: string) =>
+      createCatalogItemAt(type, point, variant ?? null, preset ?? null),
+    [createCatalogItemAt],
+  );
+
+  // Object-visuals follow-up: the armed-placement click. Reads the armed
+  // payload from the store at CLICK time (arming is untracked store state,
+  // set by the Sidebar tiles); creating ends in select mode via the shared
+  // creator, which also clears the armed placement (setActiveTool disarms).
+  const handlePlaceAt = useCallback(
+    (point: Point) => {
+      const placement = useCanvasStore.getState().placement;
+      if (!placement) return;
+      createCatalogItemAt(placement.type, point, placement.variant, placement.preset ?? null);
+    },
+    [createCatalogItemAt],
   );
 
   // U15: commits a click-drag-sized Shape. Resets `activeTool` back to
@@ -883,6 +980,7 @@ export function CanvasEditorPage() {
             onOpenContextMenu={openContextMenu}
             onDuplicateSelection={commitPayloadAt}
             onCreateTextAt={handleCreateTextAt}
+            onPlaceAt={handlePlaceAt}
             // Escape with nothing in flight drops the active tool back to
             // the idle pan mode (canvas-tools follow-up).
             onExitTool={handleExitTool}

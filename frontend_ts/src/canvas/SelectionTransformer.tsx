@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import type Konva from 'konva'
 import { Transformer } from 'react-konva'
+import { beginCanvasGesture, endCanvasGesture } from './gesture'
 import { NO_GUIDES, snapResizeBox } from './AlignmentGuides'
 import type { GuideLines } from './AlignmentGuides'
 import {
@@ -324,6 +325,12 @@ export function SelectionTransformer({
   return (
     <Transformer
       ref={transformerRef}
+      // Final review pass: a live transform counts as a canvas gesture —
+      // the Enter-finalize shortcut must no-op mid-transform (deselecting
+      // then detaches the Transformer before the scale folds into the
+      // store, leaving the node visually scaled while the store — and the
+      // save — hold pre-transform dims).
+      onTransformStart={() => beginCanvasGesture()}
       // U3: folding a flipped (negative) scale into width/height would
       // store negative dimensions — disable flipping outright (plan's
       // multi-node transformer decision; applies to single selections too,
@@ -356,6 +363,10 @@ export function SelectionTransformer({
         return constrainTransformBox(oldBox, { ...newBox, ...snapped }, canvasWidth, canvasHeight)
       }}
       onTransformEnd={() => {
+        // Final review pass: the gesture is over regardless of how the
+        // commit below resolves — release the in-flight count FIRST so an
+        // early return can't strand it.
+        endCanvasGesture()
         // Konva fires the Transformer's own `transformend` ONCE per gesture
         // (its `event.target` is just the first attached node), so this
         // handler iterates the selection itself rather than trusting the

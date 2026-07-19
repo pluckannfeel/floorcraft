@@ -187,15 +187,29 @@ export function ContextMenu({
       onClose()
     }
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key !== 'Escape') return
-      event.stopPropagation()
-      onClose()
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        onClose()
+        return
+      }
+      // Final review pass: the open menu owns ENTER too — the menu never
+      // takes focus, so the page-level Enter-to-save shortcut's closest()
+      // guard can't see it and would clear the very selection the menu is
+      // about to act on (then save). Enter with a menu open dismisses it,
+      // conservatively.
+      if (event.key === 'Enter') {
+        event.stopPropagation()
+        event.preventDefault()
+        onClose()
+      }
     }
+    // Capture phase so the menu wins against the page-level shortcut
+    // listener regardless of registration order.
     window.addEventListener('pointerdown', handlePointerDown)
-    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keydown', handleKeyDown, true)
     return () => {
       window.removeEventListener('pointerdown', handlePointerDown)
-      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keydown', handleKeyDown, true)
     }
   }, [onClose])
 

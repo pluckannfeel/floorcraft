@@ -1,5 +1,18 @@
 import { describe, expect, it, vi } from 'vitest'
-import { afterNextPaint, downloadDataUrl, EXPORT_FILENAME, exportStageToPng } from './export'
+import {
+  afterNextPaint,
+  awaitVariantImages,
+  collectVariantImageUrls,
+  downloadDataUrl,
+  EXPORT_FILENAME,
+  EXPORT_IMAGES_TIMEOUT_MESSAGE,
+  exportStageToPng,
+} from './export'
+import type { RegistryWaitDeps } from './export'
+import { VISUAL_VARIANT_ID_KEY, variantFileUrl } from './visuals'
+import type { CanvasObject } from './types'
+
+type VisualItem = Pick<CanvasObject, 'type' | 'properties'>
 
 /**
  * `exportStageToPng` wraps a real `Konva.Stage.toDataURL()` call and a real
@@ -78,6 +91,79 @@ describe('downloadDataUrl', () => {
   })
 })
 
+describe('collectVariantImageUrls (U7)', () => {
+  it('maps valid variant references to file URLs, deduped, ignoring everything else', () => {
+    const items: VisualItem[] = [
+      { type: 'chairs', properties: { [VISUAL_VARIANT_ID_KEY]: 7 } },
+      { type: 'tables', properties: { [VISUAL_VARIANT_ID_KEY]: 7 } }, // same variant twice -> one URL
+      { type: 'chairs', properties: { [VISUAL_VARIANT_ID_KEY]: 9 } },
+      { type: 'chairs', properties: {} }, // default symbol
+      { type: 'chairs', properties: { [VISUAL_VARIANT_ID_KEY]: 'garbage' } }, // fails the parser
+      { type: 'shape_rectangle', properties: {} },
+    ]
+    expect(collectVariantImageUrls(items)).toEqual([variantFileUrl(7), variantFileUrl(9)])
+  })
+})
+
+describe('awaitVariantImages (U7)', () => {
+  /** Fake registry seams (the injectable-deps convention): entries are a
+   * plain map the test mutates; `notify` fires the subscribed listeners
+   * like a real registry transition would. */
+  function makeFakeRegistry(initial: Record<string, 'pending' | 'loaded' | 'failed'>) {
+    const statuses = new Map(Object.entries(initial))
+    const listeners = new Map<string, Set<() => void>>()
+    const deps: RegistryWaitDeps = {
+      peek: (url) => {
+        const status = statuses.get(url)
+        return status ? { status, refcount: 0, image: null } : null
+      },
+      subscribe: (url, listener) => {
+        if (!listeners.has(url)) listeners.set(url, new Set())
+        listeners.get(url)!.add(listener)
+        return () => listeners.get(url)?.delete(listener)
+      },
+    }
+    const settle = (url: string, status: 'loaded' | 'failed') => {
+      statuses.set(url, status)
+      for (const listener of listeners.get(url) ?? []) listener()
+    }
+    return { deps, settle }
+  }
+
+  it('resolves ready immediately when nothing is pending (loaded, failed, and ABSENT entries never block)', async () => {
+    const { deps } = makeFakeRegistry({ '/a': 'loaded', '/b': 'failed' })
+    // '/c' is absent from the registry entirely — no load in flight, so
+    // waiting on it could only ever falsely time out (documented choice).
+    await expect(awaitVariantImages(['/a', '/b', '/c'], 50, deps)).resolves.toBe('ready')
+  })
+
+  it('waits for a pending entry and resolves ready once it settles — including settling as FAILED (R16)', async () => {
+    const { deps, settle } = makeFakeRegistry({ '/a': 'pending' })
+    const wait = awaitVariantImages(['/a'], 5000, deps)
+    settle('/a', 'failed') // failed is SETTLED: the placeholder exports; no abort
+    await expect(wait).resolves.toBe('ready')
+  })
+
+  it('times out when an entry stays pending', async () => {
+    vi.useFakeTimers()
+    try {
+      const { deps } = makeFakeRegistry({ '/a': 'pending' })
+      const wait = awaitVariantImages(['/a'], 3000, deps)
+      vi.advanceTimersByTime(3001)
+      await expect(wait).resolves.toBe('timeout')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores pending entries for URLs OUTSIDE the requested set (plan-switch isolation)', async () => {
+    // A leaked pending entry from a previously-open plan must not delay
+    // this plan's export: the await-set is derived from current items.
+    const { deps } = makeFakeRegistry({ '/other-plans-image': 'pending', '/a': 'loaded' })
+    await expect(awaitVariantImages(['/a'], 50, deps)).resolves.toBe('ready')
+  })
+})
+
 describe('exportStageToPng', () => {
   /** Minimal fake standing in for `Konva.Stage` — only `toDataURL` is
    * exercised by `exportStageToPng`. */
@@ -85,7 +171,7 @@ describe('exportStageToPng', () => {
     return { toDataURL: vi.fn(() => dataUrl) } as unknown as import('konva').default.Stage
   }
 
-  it('clears the selection before the deferred snapshot, when something is selected', () => {
+  it('clears the selection before the deferred snapshot, when something is selected', async () => {
     const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
       cb(0)
       return 0
@@ -101,7 +187,7 @@ describe('exportStageToPng', () => {
       return 'data:image/png;base64,fake'
     })
 
-    exportStageToPng(stage, ['obj-1'], clearSelection)
+    await exportStageToPng(() => stage, ['obj-1'], clearSelection, [])
 
     expect(clearSelection).toHaveBeenCalledTimes(1)
     expect(stage.toDataURL).toHaveBeenCalledTimes(1)
@@ -112,7 +198,7 @@ describe('exportStageToPng', () => {
     clickSpy.mockRestore()
   })
 
-  it('does not call clearSelection when the selection is already empty', () => {
+  it('does not call clearSelection when the selection is already empty', async () => {
     const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
       cb(0)
       return 0
@@ -122,7 +208,7 @@ describe('exportStageToPng', () => {
     const stage = makeFakeStage()
     const clearSelection = vi.fn()
 
-    exportStageToPng(stage, [], clearSelection)
+    await exportStageToPng(() => stage, [], clearSelection, [])
 
     expect(clearSelection).not.toHaveBeenCalled()
     expect(stage.toDataURL).toHaveBeenCalledTimes(1)
@@ -131,7 +217,7 @@ describe('exportStageToPng', () => {
     clickSpy.mockRestore()
   })
 
-  it('does not snapshot before the two-frame wait completes', () => {
+  it('does not snapshot before the two-frame wait completes', async () => {
     const frames: FrameRequestCallback[] = []
     const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
       frames.push(cb)
@@ -141,21 +227,35 @@ describe('exportStageToPng', () => {
     const stage = makeFakeStage()
     const clearSelection = vi.fn()
 
-    exportStageToPng(stage, ['obj-1', 'obj-2'], clearSelection)
-
+    // The promise now settles only after the CAPTURE runs (in-flight-guard
+    // contract), so hold it un-awaited and drive the frame queue manually.
+    const run = exportStageToPng(() => stage, ['obj-1', 'obj-2'], clearSelection, [])
+    // One macrotask flush lets the pre-capture await chain (registry wait +
+    // liveness checks) run to the afterNextPaint call — without polluting
+    // the stubbed rAF queue the way an rAF-polling waitFor would.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
     expect(clearSelection).toHaveBeenCalledTimes(1)
     expect(stage.toDataURL).not.toHaveBeenCalled()
 
-    frames[0](0)
+    // Flush in ROUNDS (splice the queue so newly-scheduled callbacks land
+    // in the NEXT round) — this models real rAF frame semantics and stays
+    // correct even when the jsdom environment slips an unrelated stray
+    // callback into the stubbed queue: the contract under test is "not
+    // before the SECOND frame", not absolute queue indices.
+    const flushFrameRound = () => {
+      for (const frame of frames.splice(0)) frame(0)
+    }
+    flushFrameRound() // frame 1: afterNextPaint's outer callback
     expect(stage.toDataURL).not.toHaveBeenCalled()
 
-    frames[1](0)
+    flushFrameRound() // frame 2: the inner callback -> capture
     expect(stage.toDataURL).toHaveBeenCalledTimes(1)
+    await run
 
     rafSpy.mockRestore()
   })
 
-  it('triggers a download of a non-empty data URL produced by toDataURL', () => {
+  it('triggers a download of a non-empty data URL produced by toDataURL', async () => {
     const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
       cb(0)
       return 0
@@ -166,7 +266,7 @@ describe('exportStageToPng', () => {
     const stage = makeFakeStage('data:image/png;base64,realish-payload')
     const clearSelection = vi.fn()
 
-    exportStageToPng(stage, ['obj-1'], clearSelection, 'custom.png')
+    await exportStageToPng(() => stage, ['obj-1'], clearSelection, [], { filename: 'custom.png' })
 
     const anchor = appendSpy.mock.calls.find((call) => (call[0] as HTMLAnchorElement).tagName === 'A')?.[0] as
       | HTMLAnchorElement
@@ -182,7 +282,7 @@ describe('exportStageToPng', () => {
     appendSpy.mockRestore()
   })
 
-  it('defaults the download filename to EXPORT_FILENAME', () => {
+  it('defaults the download filename to EXPORT_FILENAME', async () => {
     const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
       cb(0)
       return 0
@@ -191,7 +291,7 @@ describe('exportStageToPng', () => {
     const appendSpy = vi.spyOn(document.body, 'appendChild')
 
     const stage = makeFakeStage()
-    exportStageToPng(stage, [], vi.fn())
+    await exportStageToPng(() => stage, [], vi.fn(), [])
 
     const anchor = appendSpy.mock.calls.find((call) => (call[0] as HTMLAnchorElement).tagName === 'A')?.[0] as
       | HTMLAnchorElement
@@ -201,5 +301,129 @@ describe('exportStageToPng', () => {
     rafSpy.mockRestore()
     clickSpy.mockRestore()
     appendSpy.mockRestore()
+  })
+
+  // ——— U7 (object-visuals): await-then-capture behaviors ———
+
+  /** Deps whose single URL stays pending forever. */
+  function pendingForeverDeps(): RegistryWaitDeps {
+    return {
+      peek: () => ({ status: 'pending', refcount: 0, image: null }),
+      subscribe: () => () => {},
+    }
+  }
+
+  const VARIANT_ITEMS: VisualItem[] = [{ type: 'chairs', properties: { [VISUAL_VARIANT_ID_KEY]: 3 } }]
+
+  it('U7: pending-timeout surfaces the toast message and downloads NOTHING', async () => {
+    vi.useFakeTimers()
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      const stage = makeFakeStage()
+      const onImagesTimeout = vi.fn()
+
+      const run = exportStageToPng(() => stage, [], vi.fn(), VARIANT_ITEMS, {
+        onImagesTimeout,
+        timeoutMs: 3000,
+        waitDeps: pendingForeverDeps(),
+      })
+      vi.advanceTimersByTime(3001)
+      await run
+
+      expect(onImagesTimeout).toHaveBeenCalledWith(EXPORT_IMAGES_TIMEOUT_MESSAGE)
+      expect(stage.toDataURL).not.toHaveBeenCalled()
+      expect(clickSpy).not.toHaveBeenCalled()
+    } finally {
+      clickSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('review fix: a pending-timeout with the stage GONE stays silent (no toast over the next plan)', async () => {
+    vi.useFakeTimers()
+    try {
+      const onImagesTimeout = vi.fn()
+      // Stage is gone by the time the await times out (user switched
+      // plans); the timeout branch must bail silently BEFORE toasting.
+      const run = exportStageToPng(() => null, [], vi.fn(), VARIANT_ITEMS, {
+        onImagesTimeout,
+        timeoutMs: 3000,
+        waitDeps: pendingForeverDeps(),
+      })
+      vi.advanceTimersByTime(3001)
+      await run
+      expect(onImagesTimeout).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('U7: a variant image that settles as FAILED does not abort — the capture proceeds (R16)', async () => {
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      cb(0)
+      return 0
+    })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+    const stage = makeFakeStage()
+    const onImagesTimeout = vi.fn()
+    const failedDeps: RegistryWaitDeps = {
+      peek: () => ({ status: 'failed', refcount: 0, image: null }),
+      subscribe: () => () => {},
+    }
+
+    await exportStageToPng(() => stage, [], vi.fn(), VARIANT_ITEMS, {
+      onImagesTimeout,
+      waitDeps: failedDeps,
+    })
+
+    // The canvas renders the R16 placeholder for the failed image, so the
+    // PNG matches the screen; one dead reference never blocks export.
+    expect(onImagesTimeout).not.toHaveBeenCalled()
+    expect(stage.toDataURL).toHaveBeenCalledTimes(1)
+
+    rafSpy.mockRestore()
+    clickSpy.mockRestore()
+  })
+
+  it('U7: bails SILENTLY when the stage is gone by the time the await resolves (navigated away)', async () => {
+    const { promise, resolve } = (() => {
+      let resolveFn!: () => void
+      const p = new Promise<void>((r) => {
+        resolveFn = () => r()
+      })
+      return { promise: p, resolve: resolveFn }
+    })()
+
+    const listenerRef: { current: (() => void) | null } = { current: null }
+    let status: 'pending' | 'loaded' = 'pending'
+    const deps: RegistryWaitDeps = {
+      peek: () => ({ status, refcount: 0, image: null }),
+      subscribe: (_url, l) => {
+        listenerRef.current = l
+        // Signal the test that the await is armed.
+        resolve()
+        return () => {}
+      },
+    }
+
+    const stage = makeFakeStage()
+    let stageAlive = true
+    const onImagesTimeout = vi.fn()
+
+    const run = exportStageToPng(() => (stageAlive ? stage : null), [], vi.fn(), VARIANT_ITEMS, {
+      onImagesTimeout,
+      waitDeps: deps,
+    })
+    await promise
+    // The user navigates away, THEN the image finishes loading.
+    stageAlive = false
+    status = 'loaded'
+    listenerRef.current?.()
+    await run
+
+    // Silent bail: no toast, no snapshot, no download attempt.
+    expect(onImagesTimeout).not.toHaveBeenCalled()
+    expect(stage.toDataURL).not.toHaveBeenCalled()
   })
 })

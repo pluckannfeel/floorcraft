@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { resolveCanvasShortcut } from "./useCanvasShortcuts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderHook } from "@testing-library/react";
+import { beginCanvasGesture, endCanvasGesture, resetCanvasGestures } from "../canvas/gesture";
+import { useCanvasStore } from "../state/canvasStore";
+import { resolveCanvasShortcut, useCanvasShortcuts } from "./useCanvasShortcuts";
 
 describe("resolveCanvasShortcut", () => {
   it("returns undo for Ctrl+Z", () => {
@@ -180,5 +183,82 @@ describe("resolveCanvasShortcut", () => {
 
   it("ignores Ctrl+V while focused in a contentEditable element (native paste preserved)", () => {
     expect(resolveCanvasShortcut("v", true, false, "DIV", true)).toBe(null);
+  });
+});
+
+describe("plain Enter saves (object-visuals follow-up)", () => {
+  it("Enter with no modifiers, outside typing contexts, resolves to save", () => {
+    expect(resolveCanvasShortcut("Enter", false, false, "BODY", false)).toBe("save");
+    expect(resolveCanvasShortcut("Enter", false, false, undefined, false)).toBe("save");
+    expect(resolveCanvasShortcut("Enter", false, false, "DIV", false)).toBe("save");
+  });
+
+  it("Enter in typing contexts keeps its native meaning (fields commit their own edits)", () => {
+    expect(resolveCanvasShortcut("Enter", false, false, "INPUT", false)).toBeNull();
+    expect(resolveCanvasShortcut("Enter", false, false, "TEXTAREA", false)).toBeNull();
+    expect(resolveCanvasShortcut("Enter", false, false, "SELECT", false)).toBeNull();
+    expect(resolveCanvasShortcut("Enter", false, false, "DIV", true)).toBeNull();
+  });
+
+  it("Enter on a focused BUTTON keeps native activation, and modified Enter stays unclaimed", () => {
+    expect(resolveCanvasShortcut("Enter", false, false, "BUTTON", false)).toBeNull();
+    expect(resolveCanvasShortcut("Enter", true, false, "BODY", false)).toBeNull();
+    expect(resolveCanvasShortcut("Enter", false, true, "BODY", false)).toBeNull();
+  });
+});
+
+describe("Enter finalizes: deselect + pan + save (listener behavior)", () => {
+  it("Enter clears the selection, drops select to pan, and fires the save", () => {
+    useCanvasStore.setState({ selectedItemIds: [1], activeTool: "select" });
+    const onSave = vi.fn();
+    const { unmount } = renderHook(() => useCanvasShortcuts(onSave));
+
+    // Dispatch from body (bubbling to the window listener) — real keydowns
+    // with nothing focused target document.body, never the window object.
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([]);
+    expect(useCanvasStore.getState().activeTool).toBe("pan");
+    expect(onSave).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+
+  it("Ctrl+S saves WITHOUT touching the selection (pure save, works mid-edit)", () => {
+    useCanvasStore.setState({ selectedItemIds: [1], activeTool: "select" });
+    const onSave = vi.fn();
+    const { unmount } = renderHook(() => useCanvasShortcuts(onSave));
+
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true }),
+    );
+
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([1]);
+    expect(useCanvasStore.getState().activeTool).toBe("select");
+    expect(onSave).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+});
+
+describe("Enter never finalizes mid-gesture (final review fix)", () => {
+  afterEach(() => resetCanvasGestures());
+
+  it("no-ops while a canvas gesture is in flight; works again once it ends", () => {
+    useCanvasStore.setState({ selectedItemIds: [1], activeTool: "select" });
+    const onSave = vi.fn();
+    const { unmount } = renderHook(() => useCanvasShortcuts(onSave));
+
+    beginCanvasGesture();
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    // Mid-gesture: nothing moved — selection intact, tool intact, no save.
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([1]);
+    expect(useCanvasStore.getState().activeTool).toBe("select");
+    expect(onSave).not.toHaveBeenCalled();
+
+    endCanvasGesture();
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(useCanvasStore.getState().selectedItemIds).toEqual([]);
+    expect(useCanvasStore.getState().activeTool).toBe("pan");
+    expect(onSave).toHaveBeenCalledTimes(1);
+    unmount();
   });
 });
