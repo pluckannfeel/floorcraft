@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { OUTLINE_EDGE_THICKNESS, outlineFrameBands, SYMBOLS, symbolScale } from './symbols'
+import { OUTLINE_EDGE_THICKNESS, outlineStrokeRect, SYMBOLS, symbolScale } from './symbols'
 import {
   BACKING_RECT_FILL,
   VISUAL_VARIANT_ID_KEY,
@@ -300,44 +300,38 @@ describe('visuals key module (U4: variant reference + branch decision)', () => {
 const _exhaustive: Record<CatalogType, unknown> = SYMBOLS
 void _exhaustive
 
-describe('outlineFrameBands (object-visuals follow-up)', () => {
-  it('band thickness is CONSTANT across sizes — resizing expands the room, never the walls', () => {
+describe('outlineStrokeRect (object-visuals follow-up)', () => {
+  it('stroke width is CONSTANT across sizes at a given zoom — resizing expands the room, never the walls', () => {
     for (const [width, height] of [
       [120, 80],
       [400, 300],
       [1000, 60],
     ] as const) {
-      const bands = outlineFrameBands(width, height)
-      expect(bands).toHaveLength(4)
-      const [top, bottom, left, right] = bands
-      expect(top).toEqual({ x: 0, y: 0, width, height: OUTLINE_EDGE_THICKNESS })
-      expect(bottom).toEqual({
-        x: 0,
-        y: height - OUTLINE_EDGE_THICKNESS,
-        width,
-        height: OUTLINE_EDGE_THICKNESS,
-      })
-      // Side bands fill exactly the middle rows: corners covered once.
-      expect(left).toEqual({
-        x: 0,
-        y: OUTLINE_EDGE_THICKNESS,
-        width: OUTLINE_EDGE_THICKNESS,
-        height: height - 2 * OUTLINE_EDGE_THICKNESS,
-      })
-      expect(right.x).toBe(width - OUTLINE_EDGE_THICKNESS)
+      const frame = outlineStrokeRect(width, height, 1)
+      expect(frame.strokeWidth).toBe(OUTLINE_EDGE_THICKNESS)
+      // Inset by half the edge: the stroke (centered on the path) lands
+      // its outer boundary exactly on the object's box.
+      expect(frame.x).toBe(OUTLINE_EDGE_THICKNESS / 2)
+      expect(frame.y).toBe(OUTLINE_EDGE_THICKNESS / 2)
+      expect(frame.width).toBe(width - OUTLINE_EDGE_THICKNESS)
+      expect(frame.height).toBe(height - OUTLINE_EDGE_THICKNESS)
     }
   })
 
-  it('clamps to half the smaller dimension — degenerate boxes become a solid fill, never negative interiors', () => {
-    const bands = outlineFrameBands(8, 4)
-    // Thickness clamps to 2 (half of 4): the two horizontal bands tile the
-    // whole box and the middle rows vanish.
-    expect(bands[0].height).toBe(2)
-    expect(bands[2].height).toBe(0)
-    for (const band of bands) {
-      expect(band.width).toBeGreaterThanOrEqual(0)
-      expect(band.height).toBeGreaterThanOrEqual(0)
-    }
+  it('stroke width scales with ZOOM (strokeScaleEnabled(false) opts out of all scaling, so zoom is re-applied by hand)', () => {
+    expect(outlineStrokeRect(120, 80, 2).strokeWidth).toBe(OUTLINE_EDGE_THICKNESS * 2)
+    expect(outlineStrokeRect(120, 80, 0.5).strokeWidth).toBe(OUTLINE_EDGE_THICKNESS * 0.5)
+    // The rect geometry itself is model-space — zoom-independent.
+    expect(outlineStrokeRect(120, 80, 2).width).toBe(120 - OUTLINE_EDGE_THICKNESS)
+  })
+
+  it('clamps to half the smaller dimension — degenerate boxes collapse toward a solid bar, never negative geometry', () => {
+    const frame = outlineStrokeRect(8, 4, 1)
+    expect(frame.strokeWidth).toBe(2) // clamped to height/2
+    expect(frame.width).toBeGreaterThanOrEqual(0)
+    expect(frame.height).toBeGreaterThanOrEqual(0)
+    const zero = outlineStrokeRect(0, 0, 1)
+    expect(zero.strokeWidth).toBe(0)
   })
 })
 

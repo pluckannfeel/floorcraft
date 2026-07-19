@@ -189,37 +189,37 @@ export function symbolScale(
  * with the stage like every other model-space dimension). */
 export const OUTLINE_EDGE_THICKNESS = 6
 
-/** One frame band: an axis-aligned rect in the object's local space. */
-export interface FrameBand {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
 /**
- * Outlines render as four CONSTANT-THICKNESS bands computed from the
- * object's live width/height (user feedback) — never as a scaled symbol,
- * which would thicken the walls proportionally on every resize. Pure and
- * tested standalone (the no-Konva-in-jsdom convention). The thickness
- * clamps to half the smaller dimension so degenerate boxes collapse to a
- * solid fill instead of self-overlapping negative interiors.
- *
- * Band layout (fill-only, no strokes — the U4 filled-geometry contract):
- * top and bottom span the full width; left and right fill the remaining
- * middle rows, so corners are covered exactly once.
+ * The outline's render recipe: ONE stroked Rect whose stroke is drawn with
+ * Konva's `strokeScaleEnabled(false)` — the stroke width ignores EVERY
+ * scale on the node's ancestor chain, which is exactly what makes the wall
+ * thickness constant DURING a live Transformer gesture (user feedback:
+ * the band-based first cut only corrected thickness at commit, because
+ * bands derive from store dims that update at transformend while the live
+ * gesture scales the whole Group). The costs of opting out of scaling are
+ * repaid declaratively:
+ * - Stage ZOOM would also stop scaling the walls, so `strokeWidth` is
+ *   `edge * zoom` — zoom is React state, ObjectShape re-renders on it, and
+ *   during a transform gesture zoom never changes, so the stroke stays
+ *   put mid-gesture and still zooms like model-space geometry otherwise.
+ * - The stroke centers on the rect path, so the rect is inset by edge/2:
+ *   the stroke's outer boundary lands exactly on the object's box.
+ * The thickness clamps to half the smaller dimension so degenerate boxes
+ * collapse toward a solid bar instead of a negative interior. Pure and
+ * tested standalone (the no-Konva-in-jsdom convention).
  */
-export function outlineFrameBands(
+export function outlineStrokeRect(
   width: number,
   height: number,
+  zoom: number,
   thickness: number = OUTLINE_EDGE_THICKNESS,
-): FrameBand[] {
+): { x: number; y: number; width: number; height: number; strokeWidth: number } {
   const edge = Math.max(0, Math.min(thickness, width / 2, height / 2))
-  const middleHeight = Math.max(0, height - 2 * edge)
-  return [
-    { x: 0, y: 0, width, height: edge },
-    { x: 0, y: height - edge, width, height: edge },
-    { x: 0, y: edge, width: edge, height: middleHeight },
-    { x: width - edge, y: edge, width: edge, height: middleHeight },
-  ]
+  return {
+    x: edge / 2,
+    y: edge / 2,
+    width: Math.max(0, width - edge),
+    height: Math.max(0, height - edge),
+    strokeWidth: edge * zoom,
+  }
 }

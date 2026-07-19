@@ -5,7 +5,7 @@ import type { GuideLines } from './AlignmentGuides'
 import { clampToBounds } from './coordinates'
 import { useRegistryImage } from './imageRegistry'
 import { flattenPoints, getEffectiveTension, isLineTool, parseLinePoints } from './LineTool'
-import { outlineFrameBands, SYMBOLS, symbolScale } from './symbols'
+import { outlineStrokeRect, SYMBOLS, symbolScale } from './symbols'
 import { fontStyleFor, isTextType, parseTextProperties } from './TextTool'
 import type { CanvasObject, CatalogType, ObjectType, Point } from './types'
 import { BACKING_RECT_FILL, resolveBoxVisual, symbolLabelText } from './visuals'
@@ -109,33 +109,42 @@ function SymbolGlyph({
   fill,
   width,
   height,
+  zoom,
 }: {
   type: CatalogType
   fill: string
   width: number
   height: number
+  /** Stage zoom — only the outlines branch consumes it (its stroke opts
+   * out of ALL scaling via strokeScaleEnabled, so zoom must be re-applied
+   * by hand); every other glyph scales with the stage naturally. */
+  zoom: number
 }) {
   // Outlines are the exception to scaled-symbol rendering (user feedback):
-  // resizing must EXPAND the room, never thicken the walls — so the frame
-  // is recomputed from the LIVE width/height with a constant band
-  // thickness (`outlineFrameBands`, pure + tested). Still fill-only
-  // declarative Rects; the SYMBOLS.outlines entry now only feeds the
-  // sidebar thumbnails.
+  // resizing must EXPAND the room, never thicken the walls — INCLUDING
+  // mid-gesture, which is why this is a stroked Rect with
+  // `strokeScaleEnabled={false}` rather than filled bands: bands derive
+  // from store dims that only commit at transformend, so the live gesture
+  // scaled them; a scale-exempt stroke holds its width through the whole
+  // drag. `outlineStrokeRect` (pure + tested) computes the inset rect and
+  // the zoom-compensated stroke width. Deliberate, documented exception
+  // to the U4 no-strokes contract — that rule guards against ANISOTROPIC
+  // stroke distortion under scale, and a scale-exempt stroke cannot
+  // distort. The SYMBOLS.outlines entry now only feeds the sidebar
+  // thumbnails.
   if (type === 'outlines') {
+    const frame = outlineStrokeRect(width, height, zoom)
     return (
-      <>
-        {outlineFrameBands(width, height).map((band, index) => (
-          <Rect
-            key={index}
-            x={band.x}
-            y={band.y}
-            width={band.width}
-            height={band.height}
-            fill={fill}
-            listening={false}
-          />
-        ))}
-      </>
+      <Rect
+        x={frame.x}
+        y={frame.y}
+        width={frame.width}
+        height={frame.height}
+        stroke={fill}
+        strokeWidth={frame.strokeWidth}
+        strokeScaleEnabled={false}
+        listening={false}
+      />
     )
   }
 
@@ -196,16 +205,18 @@ function VariantImage({
   fill,
   width,
   height,
+  zoom,
 }: {
   url: string
   type: CatalogType
   fill: string
   width: number
   height: number
+  zoom: number
 }) {
   const { image } = useRegistryImage(url)
   if (image == null) {
-    return <SymbolGlyph type={type} fill={fill} width={width} height={height} />
+    return <SymbolGlyph type={type} fill={fill} width={width} height={height} zoom={zoom} />
   }
   return <KonvaImage image={image} width={width} height={height} listening={false} />
 }
@@ -504,6 +515,7 @@ export function ObjectShape({
               fill={fill}
               width={object.width}
               height={object.height}
+              zoom={zoom}
             />
           ) : (
             <SymbolGlyph
@@ -511,6 +523,7 @@ export function ObjectShape({
               fill={fill}
               width={object.width}
               height={object.height}
+              zoom={zoom}
             />
           )}
           {/* Label rule R17 (symbol AND image visuals): only a non-empty
