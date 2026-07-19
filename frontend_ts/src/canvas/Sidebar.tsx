@@ -28,6 +28,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { Tooltip } from '@/components/Tooltip'
 import {
   clientUploadRejection,
   useDeleteVariant,
@@ -495,11 +496,10 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
           // deliberately-engaged tools keep the filled primary pop.
           const isPan = type === 'pan'
           return (
+            <Tooltip key={type} label={label}>
             <button
-              key={type}
               type="button"
               aria-label={label}
-              title={label}
               aria-pressed={isActive}
               // Clicking the ACTIVE tool deselects it, landing on the idle
               // pan mode where a plain drag navigates the canvas.
@@ -516,6 +516,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
               <Icon className="size-4.5" aria-hidden="true" />
               <span className="text-[10px] leading-none font-medium">{short}</span>
             </button>
+            </Tooltip>
           )
         })}
       </div>
@@ -598,13 +599,13 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                               placement?.variant === null &&
                               (placement?.preset ?? null) === null
                             return (
+                              <Tooltip label={`Place ${CATALOG_LABELS[type]}`}>
                               <div
                                 role="button"
                                 tabIndex={0}
                                 data-testid={`catalog-item-${type}`}
                                 aria-label={`Place ${CATALOG_LABELS[type]}`}
                                 aria-pressed={defaultArmed}
-                                title={`Place ${CATALOG_LABELS[type]} — click to arm, then click the canvas (or drag straight in)`}
                                 onPointerDown={(event) => handlePointerDown(type, event)}
                                 onClick={() => handleTileClick(type, null)}
                                 onKeyDown={(event) => {
@@ -631,6 +632,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                                   ))}
                                 </svg>
                               </div>
+                              </Tooltip>
                             )
                           })()}
                           {/* Built-in PRESET tiles (user feedback: extra
@@ -644,14 +646,13 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                               placement?.variant === null &&
                               placement?.preset === preset.id
                             return (
+                              <Tooltip key={preset.id} label={`Place ${preset.label}`}>
                               <div
-                                key={preset.id}
                                 role="button"
                                 tabIndex={0}
                                 data-testid={`preset-item-${type}-${preset.id}`}
                                 aria-label={`Place ${preset.label}`}
                                 aria-pressed={presetArmed}
-                                title={preset.label}
                                 onPointerDown={(event) =>
                                   handlePresetPointerDown(type, preset.id, event)
                                 }
@@ -680,6 +681,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                                   ))}
                                 </svg>
                               </div>
+                              </Tooltip>
                             )
                           })}
                           {/* R7/R12: the user's uploaded variants for this
@@ -694,13 +696,13 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                               placement?.variant?.id === variant.id
                             return (
                               <div key={variant.id} className="relative shrink-0">
+                                <Tooltip label={variant.original_name}>
                                 <div
                                   role="button"
                                   tabIndex={0}
                                   data-testid={`variant-item-${variant.id}`}
                                   aria-label={`Place ${variant.original_name}`}
                                   aria-pressed={variantArmed}
-                                  title={variant.original_name}
                                   onPointerDown={(event) =>
                                     handleVariantPointerDown(type, variant, event)
                                   }
@@ -727,6 +729,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                                     className="max-h-full max-w-full object-contain"
                                   />
                                 </div>
+                                </Tooltip>
                                 {/* F3/R18: ALWAYS-VISIBLE, keyboard-
                                     focusable delete — hover-reveal would be
                                     unreachable on touch and invisible to
@@ -750,6 +753,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                               flight (doc-review: no double-submits burning
                               R19 quota); stopPropagation on pointerdown so
                               a press can never start a ghost drag. */}
+                          <Tooltip label={`Upload ${CATALOG_LABELS[type]} image`}>
                           <button
                             type="button"
                             aria-label={`Upload ${CATALOG_LABELS[type]} image`}
@@ -764,6 +768,7 @@ export function Sidebar({ getStage, gridSize, canvasWidth, canvasHeight, onDrop 
                               <Plus className="size-4" aria-hidden="true" />
                             )}
                           </button>
+                          </Tooltip>
                         </div>
                       </div>
                     </li>

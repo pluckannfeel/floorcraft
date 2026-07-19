@@ -119,26 +119,30 @@ export const SYMBOLS: Record<CatalogType, SymbolDefinition> = {
   furnitures: {
     viewBox: VIEW_BOX_100,
     paths: [
-      // Dresser/cabinet carcass: filled band with an open interior.
-      'M4 8 H96 V92 H4 Z M12 16 V84 H88 V16 Z',
-      // Center divider splitting the interior into two compartments.
-      'M47 16 H53 V84 H47 Z',
-      // A knob per compartment.
-      'M30 46 A4 4 0 1 1 30 54 A4 4 0 1 1 30 46 Z',
-      'M70 46 A4 4 0 1 1 70 54 A4 4 0 1 1 70 46 Z',
+      // Sofa in PLAN VIEW (user feedback: the old dresser drawing read as
+      // a front elevation): back band along the bottom edge…
+      'M4 70 H96 V96 H4 Z',
+      // …armrests down each side…
+      'M4 18 H18 V70 H4 Z',
+      'M82 18 H96 V70 H82 Z',
+      // …and two seat cushions with a visible split.
+      'M22 22 H48 V66 H22 Z',
+      'M52 22 H78 V66 H52 Z',
     ],
   },
   appliances: {
     viewBox: VIEW_BOX_100,
     paths: [
-      // Counter-unit body band.
-      'M4 4 H96 V96 H4 Z M12 12 V88 H88 V12 Z',
-      // Four ring burners (outer disc clockwise + inner hole counter-
-      // clockwise each) — the cooktop plan symbol.
-      'M34 21 A13 13 0 1 1 34 47 A13 13 0 1 1 34 21 Z M34 27 A7 7 0 1 0 34 41 A7 7 0 1 0 34 27 Z',
-      'M66 21 A13 13 0 1 1 66 47 A13 13 0 1 1 66 21 Z M66 27 A7 7 0 1 0 66 41 A7 7 0 1 0 66 27 Z',
-      'M34 53 A13 13 0 1 1 34 79 A13 13 0 1 1 34 53 Z M34 59 A7 7 0 1 0 34 73 A7 7 0 1 0 34 59 Z',
-      'M66 53 A13 13 0 1 1 66 79 A13 13 0 1 1 66 53 Z M66 59 A7 7 0 1 0 66 73 A7 7 0 1 0 66 59 Z',
+      // Cooktop in PLAN VIEW (user feedback: redrawn to read clearly
+      // top-down): thin body outline…
+      'M4 4 H96 V96 H4 Z M10 10 V90 H90 V10 Z',
+      // …four LARGE ring burners filling the surface…
+      'M32 14 A16 16 0 0 1 32 46 A16 16 0 0 1 32 14 Z M32 22 A8 8 0 0 0 32 38 A8 8 0 0 0 32 22 Z',
+      'M68 14 A16 16 0 0 1 68 46 A16 16 0 0 1 68 14 Z M68 22 A8 8 0 0 0 68 38 A8 8 0 0 0 68 22 Z',
+      'M32 50 A16 16 0 0 1 32 82 A16 16 0 0 1 32 50 Z M32 58 A8 8 0 0 0 32 74 A8 8 0 0 0 32 58 Z',
+      'M68 50 A16 16 0 0 1 68 82 A16 16 0 0 1 68 50 Z M68 58 A8 8 0 0 0 68 74 A8 8 0 0 0 68 58 Z',
+      // …and the control strip along the front edge.
+      'M14 86 H86 V92 H14 Z',
     ],
   },
   lighting: {
@@ -262,15 +266,17 @@ export const EXTRA_SYMBOL_PRESETS: Partial<Record<CatalogType, SymbolPreset[]>> 
       label: 'AC unit',
       viewBox: VIEW_BOX_100,
       paths: [
-        // Ceiling-cassette body: outer band.
-        'M6 6 H94 V94 H6 Z M14 14 V86 H86 V14 Z',
-        // Center fan: donut.
-        'M50 30 A20 20 0 0 1 50 70 A20 20 0 0 1 50 30 Z M50 40 A10 10 0 0 0 50 60 A10 10 0 0 0 50 40 Z',
-        // Corner vent slats.
-        'M20 20 H40 V26 H20 Z',
-        'M60 20 H80 V26 H60 Z',
-        'M20 74 H40 V80 H20 Z',
-        'M60 74 H80 V80 H60 Z',
+        // Ceiling-cassette AC in PLAN VIEW (user feedback: redrawn — the
+        // corner-slat first cut didn't read as AC): body band…
+        'M4 4 H96 V96 H4 Z M12 12 V88 H88 V12 Z',
+        // …one LONG vent slot inset along each of the four edges (the
+        // signature cassette look)…
+        'M24 16 H76 V22 H24 Z',
+        'M24 78 H76 V84 H24 Z',
+        'M16 24 H22 V76 H16 Z',
+        'M78 24 H84 V76 H78 Z',
+        // …and the center fan intake (donut).
+        'M50 36 A14 14 0 0 1 50 64 A14 14 0 0 1 50 36 Z M50 44 A6 6 0 0 0 50 56 A6 6 0 0 0 50 44 Z',
       ],
     },
   ],

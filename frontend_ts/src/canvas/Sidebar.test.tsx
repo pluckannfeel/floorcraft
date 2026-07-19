@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type Konva from 'konva'
@@ -382,7 +382,6 @@ describe('Sidebar variant catalog (U5 object-visuals)', () => {
     // R12: the file-derived name is the tooltip AND part of the accessible
     // name; the thumbnail streams from the authenticated file endpoint.
     const tile = screen.getByTestId('variant-item-1')
-    expect(tile).toHaveAttribute('title', 'my-chair.png')
     expect(tile).toHaveAttribute('aria-label', 'Place my-chair.png')
     expect(tile.querySelector('img')).toHaveAttribute('src', '/api/object-variants/1/file/')
 
@@ -715,5 +714,49 @@ describe('built-in preset tiles (object-visuals follow-up)', () => {
     fireEvent(window, new PointerEvent('pointerup', { clientX: 105, clientY: 95 }))
 
     expect(onDrop).toHaveBeenCalledExactlyOnceWith('appliances', { x: 100, y: 100 }, undefined, 'ac')
+  })
+})
+
+describe('fast hover tooltips (object-visuals follow-up)', () => {
+  function mockVariants(variants: ObjectVariant[]) {
+    return vi.spyOn(apiClient, 'get').mockResolvedValue({ data: variants } as never)
+  }
+
+  it('hovering a catalog tile shows the styled tooltip after the short intent delay; leaving hides it', async () => {
+    vi.useFakeTimers()
+    try {
+      mockVariants([])
+      renderSidebar()
+      const tile = screen.getByTestId('catalog-item-chairs')
+
+      fireEvent.pointerEnter(tile)
+      // Before the 120ms intent delay: nothing.
+      expect(screen.queryByRole('tooltip', { hidden: true })).not.toBeInTheDocument()
+      act(() => vi.advanceTimersByTime(150))
+      expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent('Place Chair')
+
+      fireEvent.pointerLeave(tile)
+      expect(screen.queryByRole('tooltip', { hidden: true })).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a press hides the tooltip immediately (no bubble over a drag)', async () => {
+    vi.useFakeTimers()
+    try {
+      mockVariants([])
+      renderSidebar()
+      const tile = screen.getByTestId('catalog-item-tables')
+
+      fireEvent.pointerEnter(tile)
+      act(() => vi.advanceTimersByTime(150))
+      expect(screen.getByRole('tooltip', { hidden: true })).toBeInTheDocument()
+
+      fireEvent.pointerDown(tile, { clientX: 10, clientY: 10 })
+      expect(screen.queryByRole('tooltip', { hidden: true })).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

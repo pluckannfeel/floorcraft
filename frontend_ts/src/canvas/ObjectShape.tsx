@@ -550,43 +550,39 @@ export function ObjectShape({
         </>
       ) : (
         <>
-          {/* Pre-U4 plain box branch, now Shapes-only (catalog types render
-              the symbol branch above): solid colored shape + centered label
-              with the historical `name || type` fallback (R17 is scoped to
-              symbol/image visuals). `shape_circle` renders the ellipse
-              inscribed in its box (user feedback: it drew as a square —
-              the box IS the geometry model, the ellipse is the visual;
-              non-uniform resize legitimately yields an oval). */}
+          {/* Shapes branch (user feedback round: shapes are OUTLINE-ONLY
+              for now — no fill, no label; fill/border styling is planned
+              as its own feature). The fill is the hit-transparent
+              BACKING_RECT_FILL so the interior stays clickable (Konva hit
+              = painted pixels; a truly unfilled shape would only be
+              selectable on its stroke). The stroke is scale-exempt with
+              zoom re-applied by hand — the outlines treatment — so a live
+              resize stretches the shape without thickening its border.
+              `shape_circle` renders the ellipse inscribed in its box (the
+              box IS the geometry model; non-uniform resize legitimately
+              yields an oval). */}
           {object.type === 'shape_circle' ? (
             <Ellipse
               x={object.width / 2}
               y={object.height / 2}
               radiusX={object.width / 2}
               radiusY={object.height / 2}
-              fill={fill}
-              stroke={isSelected ? '#111827' : undefined}
-              strokeWidth={isSelected ? 2 : 0}
+              fill={BACKING_RECT_FILL}
+              stroke={isSelected ? '#111827' : fill}
+              strokeWidth={2 * zoom}
+              strokeScaleEnabled={false}
             />
           ) : (
             <Rect
               width={object.width}
               height={object.height}
-              fill={fill}
-              stroke={isSelected ? '#111827' : undefined}
-              strokeWidth={isSelected ? 2 : 0}
+              fill={BACKING_RECT_FILL}
+              stroke={isSelected ? '#111827' : fill}
+              strokeWidth={2 * zoom}
+              strokeScaleEnabled={false}
               cornerRadius={2}
             />
           )}
-          <Text
-            text={object.name || object.type}
-            width={object.width}
-            height={object.height}
-            align="center"
-            verticalAlign="middle"
-            fontSize={11}
-            fill="#ffffff"
-            listening={false}
-          />
         </>
       )}
     </Group>
