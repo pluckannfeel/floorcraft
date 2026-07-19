@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { SYMBOLS, symbolScale } from './symbols'
+import { OUTLINE_EDGE_THICKNESS, outlineFrameBands, SYMBOLS, symbolScale } from './symbols'
 import {
   BACKING_RECT_FILL,
   VISUAL_VARIANT_ID_KEY,
   aspectFitDimensions,
+  defaultDimensionsForType,
   hasVariantReference,
   isCatalogType,
   parseVariantReference,
@@ -298,3 +299,53 @@ describe('visuals key module (U4: variant reference + branch decision)', () => {
  * the reverse (no extra keys). */
 const _exhaustive: Record<CatalogType, unknown> = SYMBOLS
 void _exhaustive
+
+describe('outlineFrameBands (object-visuals follow-up)', () => {
+  it('band thickness is CONSTANT across sizes — resizing expands the room, never the walls', () => {
+    for (const [width, height] of [
+      [120, 80],
+      [400, 300],
+      [1000, 60],
+    ] as const) {
+      const bands = outlineFrameBands(width, height)
+      expect(bands).toHaveLength(4)
+      const [top, bottom, left, right] = bands
+      expect(top).toEqual({ x: 0, y: 0, width, height: OUTLINE_EDGE_THICKNESS })
+      expect(bottom).toEqual({
+        x: 0,
+        y: height - OUTLINE_EDGE_THICKNESS,
+        width,
+        height: OUTLINE_EDGE_THICKNESS,
+      })
+      // Side bands fill exactly the middle rows: corners covered once.
+      expect(left).toEqual({
+        x: 0,
+        y: OUTLINE_EDGE_THICKNESS,
+        width: OUTLINE_EDGE_THICKNESS,
+        height: height - 2 * OUTLINE_EDGE_THICKNESS,
+      })
+      expect(right.x).toBe(width - OUTLINE_EDGE_THICKNESS)
+    }
+  })
+
+  it('clamps to half the smaller dimension — degenerate boxes become a solid fill, never negative interiors', () => {
+    const bands = outlineFrameBands(8, 4)
+    // Thickness clamps to 2 (half of 4): the two horizontal bands tile the
+    // whole box and the middle rows vanish.
+    expect(bands[0].height).toBe(2)
+    expect(bands[2].height).toBe(0)
+    for (const band of bands) {
+      expect(band.width).toBeGreaterThanOrEqual(0)
+      expect(band.height).toBeGreaterThanOrEqual(0)
+    }
+  })
+})
+
+describe('defaultDimensionsForType (object-visuals follow-up)', () => {
+  it('outlines default to a 3x2 rectangle of the base; every other type stays square', () => {
+    expect(defaultDimensionsForType('outlines', 40)).toEqual({ width: 120, height: 80 })
+    for (const type of ['tables', 'doors', 'chairs', 'furnitures', 'appliances', 'lighting'] as const) {
+      expect(defaultDimensionsForType(type, 40)).toEqual({ width: 40, height: 40 })
+    }
+  })
+})

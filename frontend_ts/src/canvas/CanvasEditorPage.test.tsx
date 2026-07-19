@@ -961,3 +961,26 @@ describe('armed placement: click-to-place (object-visuals follow-up)', () => {
     expect(useCanvasStore.getState().items).toHaveLength(0)
   })
 })
+
+describe('outline defaults (object-visuals follow-up)', () => {
+  it('placing/dropping a default OUTLINE creates a 120x80 rectangle, not a square', async () => {
+    mockGetForPlans({
+      7: { plan: makePlan({ id: 7, name: 'Room Plan' }), objects: [] },
+    })
+    renderEditor('/floor-plans/7')
+    expect(await screen.findByText('Room Plan')).toBeInTheDocument()
+
+    const onDrop = sidebarProps.current?.onDrop as (
+      type: CatalogType,
+      point: Point,
+      variant?: VariantDragRef,
+    ) => void
+    act(() => onDrop('outlines', { x: 200, y: 200 }))
+
+    expect(useCanvasStore.getState().items[0]).toMatchObject({
+      type: 'outlines',
+      width: 120,
+      height: 80,
+    })
+  })
+})

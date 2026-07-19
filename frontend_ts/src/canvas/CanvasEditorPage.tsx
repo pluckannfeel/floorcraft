@@ -37,7 +37,11 @@ import { PropertyPanel } from "./PropertyPanel";
 import type { ShapeGeometry } from "./ShapeTool";
 import { DEFAULT_ITEM_SIZE, Sidebar } from "./Sidebar";
 import type { VariantDragRef } from "./Sidebar";
-import { aspectFitDimensions, VISUAL_VARIANT_ID_KEY } from "./visuals";
+import {
+  aspectFitDimensions,
+  defaultDimensionsForType,
+  VISUAL_VARIANT_ID_KEY,
+} from "./visuals";
 import { TextEditOverlay } from "./TextEditOverlay";
 import {
   DEFAULT_TEXT_STYLING,
@@ -551,7 +555,7 @@ export function CanvasEditorPage() {
 
       const dimensions = variant
         ? aspectFitDimensions(variant, DEFAULT_ITEM_SIZE)
-        : { width: DEFAULT_ITEM_SIZE, height: DEFAULT_ITEM_SIZE };
+        : defaultDimensionsForType(type, DEFAULT_ITEM_SIZE);
       const liveCanvasSize = useCanvasStore.getState().canvasSize;
       const snapped = snapToGrid(point, floorPlan.grid_size);
       const clamped = clampToBounds(

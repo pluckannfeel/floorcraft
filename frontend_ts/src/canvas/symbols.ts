@@ -70,11 +70,15 @@ const VIEW_BOX_100: SymbolViewBox = { width: 100, height: 100 }
  */
 export const SYMBOLS: Record<CatalogType, SymbolDefinition> = {
   outlines: {
-    viewBox: VIEW_BOX_100,
+    // Rectangular viewBox (user feedback: an outline reads as a ROOM, not
+    // a square) — this entry now only feeds the sidebar thumbnails; the
+    // CANVAS renders outlines via `outlineFrameBands` below so the wall
+    // thickness stays constant under resize.
+    viewBox: { width: 150, height: 100 },
     paths: [
       // Full-bleed wall band: outer contour clockwise, inner counter-
       // clockwise → nonzero winding leaves the room interior open.
-      'M0 0 H100 V100 H0 Z M10 10 V90 H90 V10 Z',
+      'M0 0 H150 V100 H0 Z M12 12 V88 H138 V12 Z',
     ],
   },
   tables: {
@@ -177,4 +181,45 @@ export function symbolScale(
   height: number,
 ): { scaleX: number; scaleY: number } {
   return { scaleX: width / viewBox.width, scaleY: height / viewBox.height }
+}
+
+/** The outline type's wall-band thickness in MODEL units (user feedback:
+ * resizing an outline must EXPAND the room, never thicken the walls — so
+ * the thickness is a constant, not something a scale can touch; it zooms
+ * with the stage like every other model-space dimension). */
+export const OUTLINE_EDGE_THICKNESS = 6
+
+/** One frame band: an axis-aligned rect in the object's local space. */
+export interface FrameBand {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/**
+ * Outlines render as four CONSTANT-THICKNESS bands computed from the
+ * object's live width/height (user feedback) — never as a scaled symbol,
+ * which would thicken the walls proportionally on every resize. Pure and
+ * tested standalone (the no-Konva-in-jsdom convention). The thickness
+ * clamps to half the smaller dimension so degenerate boxes collapse to a
+ * solid fill instead of self-overlapping negative interiors.
+ *
+ * Band layout (fill-only, no strokes — the U4 filled-geometry contract):
+ * top and bottom span the full width; left and right fill the remaining
+ * middle rows, so corners are covered exactly once.
+ */
+export function outlineFrameBands(
+  width: number,
+  height: number,
+  thickness: number = OUTLINE_EDGE_THICKNESS,
+): FrameBand[] {
+  const edge = Math.max(0, Math.min(thickness, width / 2, height / 2))
+  const middleHeight = Math.max(0, height - 2 * edge)
+  return [
+    { x: 0, y: 0, width, height: edge },
+    { x: 0, y: height - edge, width, height: edge },
+    { x: 0, y: edge, width: edge, height: middleHeight },
+    { x: width - edge, y: edge, width: edge, height: middleHeight },
+  ]
 }

@@ -192,6 +192,23 @@ export function aspectFitDimensions(
 }
 
 /**
+ * Default creation dimensions per catalog type (user feedback): outlines
+ * are ROOMS, so they default to a rectangle (3x2 of the base size — 120x80
+ * at the standard 40px base) instead of the square every other type gets.
+ * `base` is passed in (the Sidebar's DEFAULT_ITEM_SIZE) rather than
+ * re-derived here — one source of truth for the 40px default.
+ */
+export function defaultDimensionsForType(
+  type: CatalogType,
+  base: number,
+): { width: number; height: number } {
+  if (type === 'outlines') {
+    return { width: base * 3, height: base * 2 }
+  }
+  return { width: base, height: base }
+}
+
+/**
  * Label rule R17 for symbol (and, in U6, image) objects: a user-given
  * `name` still renders; the redundant type label does not. Returns null
  * for empty/whitespace-only names — the pre-U4 `object.name || object.type`

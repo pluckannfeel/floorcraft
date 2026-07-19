@@ -5,7 +5,7 @@ import type { GuideLines } from './AlignmentGuides'
 import { clampToBounds } from './coordinates'
 import { useRegistryImage } from './imageRegistry'
 import { flattenPoints, getEffectiveTension, isLineTool, parseLinePoints } from './LineTool'
-import { SYMBOLS, symbolScale } from './symbols'
+import { outlineFrameBands, SYMBOLS, symbolScale } from './symbols'
 import { fontStyleFor, isTextType, parseTextProperties } from './TextTool'
 import type { CanvasObject, CatalogType, ObjectType, Point } from './types'
 import { BACKING_RECT_FILL, resolveBoxVisual, symbolLabelText } from './visuals'
@@ -115,6 +115,30 @@ function SymbolGlyph({
   width: number
   height: number
 }) {
+  // Outlines are the exception to scaled-symbol rendering (user feedback):
+  // resizing must EXPAND the room, never thicken the walls — so the frame
+  // is recomputed from the LIVE width/height with a constant band
+  // thickness (`outlineFrameBands`, pure + tested). Still fill-only
+  // declarative Rects; the SYMBOLS.outlines entry now only feeds the
+  // sidebar thumbnails.
+  if (type === 'outlines') {
+    return (
+      <>
+        {outlineFrameBands(width, height).map((band, index) => (
+          <Rect
+            key={index}
+            x={band.x}
+            y={band.y}
+            width={band.width}
+            height={band.height}
+            fill={fill}
+            listening={false}
+          />
+        ))}
+      </>
+    )
+  }
+
   const definition = SYMBOLS[type]
   // Pure viewBox→box mapping (tested standalone): non-uniform stretch is
   // expected — the Transformer folds resize into width/height, and the
