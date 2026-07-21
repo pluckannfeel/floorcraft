@@ -243,7 +243,15 @@ class FloorPlanSerializer(serializers.ModelSerializer):
         # so nesting them here only produced an N+1 on the dashboard's list
         # endpoint and shipped every object of every plan for a card grid
         # that renders name and dates.
+        #
+        # `real_size_per_grid_square` and `unit` (canvas-rulers-scale, U1)
+        # are the two per-plan scale settings. Both carry model defaults,
+        # so DRF marks them `required=False` and the create path is
+        # unaffected; the `MinValueValidator(0.0001)` floor on the model
+        # surfaces as a serializer `min_value`, rejecting a zero/negative
+        # scale at this boundary.
         fields = [
             'id', 'name', 'grid_size', 'canvas_width', 'canvas_height',
+            'real_size_per_grid_square', 'unit',
             'created_at', 'updated_at',
         ]

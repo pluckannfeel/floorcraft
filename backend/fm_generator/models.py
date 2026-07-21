@@ -1,15 +1,62 @@
 import uuid
 
 from django.conf import settings
+from django.core.validators import MinValueValidator
 from django.db import models
 
 
 class FloorPlan(models.Model):
+    class Unit(models.TextChoices):
+        # The two display units the canvas-rulers-scale feature supports
+        # (R2/R9): plain metric meters and architectural feet-and-inches
+        # (e.g. `11' 6"`). This is a DISPLAY/formatting choice ONLY. The
+        # stored scale (`real_size_per_grid_square`) is ALWAYS canonical
+        # METERS regardless of this field — so switching the unit never
+        # rescales the plan, it re-formats the SAME physical measurements
+        # into the other notation. This is exactly origin AE2: a square
+        # shown as `0.9 m` in metric shows as `3' 0"` in imperial — one
+        # physical size, two labels. (The scale/unit control converts a
+        # value the user TYPES in the display unit to/from stored meters;
+        # the rulers convert stored meters to the display unit at format
+        # time.)
+        METERS = 'meters', 'Meters'
+        FEET_INCHES = 'feet_inches', 'Feet & inches'
+
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='floor_plans')
     name = models.CharField(max_length=255)
     grid_size = models.PositiveIntegerField(default=20)
     canvas_width = models.PositiveIntegerField(default=1600)
     canvas_height = models.PositiveIntegerField(default=1200)
+
+    # The real-world size, in canonical METERS (always — independent of
+    # the `unit` display field; see Unit's doc), that ONE grid square
+    # represents — the scale foundation the canvas rulers convert against
+    # (canvas-rulers-scale, R1). Model pixels map to real meters via
+    # `real_size_per_grid_square / grid_size`, so this scalar plus the grid
+    # is the whole scale definition (one scale per plan). The
+    # `MinValueValidator(0.0001)`
+    # floor makes DRF derive a `min_value` on the serializer field, so a
+    # zero or negative scale (which would divide-by-zero / invert the
+    # rulers) is rejected at the API boundary rather than persisting.
+    # Carrying a default means the `AddField` migration backfills every
+    # pre-existing row automatically (R3/AE3): a plan created before this
+    # feature opens with a working 1-square = 0.5 ruler, no config needed.
+    real_size_per_grid_square = models.FloatField(
+        default=0.5,
+        validators=[MinValueValidator(0.0001)],
+    )
+
+    # The unit the ruler labels and the scale value are DISPLAYED in
+    # (canvas-rulers-scale, R2). Defaulting to meters (with the default
+    # scale above) means pre-existing rows backfill to a sensible metric
+    # ruler via `AddField` (R3/AE3), matching the origin's resolved
+    # default of 1 grid square = 0.5 m, metric.
+    unit = models.CharField(
+        max_length=12,
+        choices=Unit.choices,
+        default=Unit.METERS,
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
