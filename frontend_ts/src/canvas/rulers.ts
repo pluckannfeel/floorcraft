@@ -17,12 +17,15 @@
  * No Konva import lives here; the overlay owns the DOM.
  *
  * SCREEN<->MODEL boundary: this module deliberately does NO screen<->model
- * conversion. That transform is `coordinates.ts`'s `containerToStagePoint`
- * (screen -> model) and its inverse `stagePosition.x + modelX * zoom`
- * (model -> screen); the U3 overlay reuses those rather than forking a second
- * derivation (the divergence hazard the plan's Risks table calls out). This
- * file only maps an ALREADY-model coordinate to its real-world value and
- * chooses the real-unit steps the overlay lays out.
+ * conversion. That transform is the `stagePosition + model * zoom` mapping
+ * (its inverse, screen -> model, is `coordinates.ts`'s `containerToStagePoint`).
+ * The U3 overlay applies the model -> screen direction INLINE — the same
+ * one-line `containerRect.left + stagePosition.x + modelX * zoom` form
+ * `TextEditOverlay`/`CropTool` already use — because `coordinates.ts` exports
+ * only the screen -> model inverse (a shared `modelToScreen` helper across
+ * those overlays is a reasonable later extraction, not forked here). This
+ * file owns neither direction: it only maps an ALREADY-model coordinate to
+ * its real-world value and chooses the real-unit steps the overlay lays out.
  */
 
 /**
@@ -38,6 +41,12 @@ export const UNITS = ['meters', 'feet_inches'] as const
  * meters (U1); imperial display converts through this. */
 export const FEET_PER_METER = 1 / 0.3048
 export type Unit = (typeof UNITS)[number]
+
+/** Smallest allowed real size per grid square, in canonical meters. Mirrors
+ * the backend `FloorPlan.real_size_per_grid_square` `MinValueValidator(0.0001)`
+ * so the U4 scale control rejects a sub-floor value client-side rather than
+ * round-tripping it to a 400 (a scale at/below this collapses the ruler). */
+export const MIN_REAL_SIZE_PER_GRID_SQUARE = 0.0001
 
 /**
  * Minimum on-screen pixel gap the LABELED (major) ticks target so adjacent

@@ -107,10 +107,12 @@ export function buildAxisTicks(
   if (!(zoom > 0) || perPixel <= 0 || viewEnd <= viewStart) return []
 
   const { major, minor } = chooseTickIntervals(zoom, gridSize, realSizePerGridSquare, unit)
-  // Real-unit step -> model-pixel step (real / perPixel); guard against a
-  // degenerate zero step.
-  const minorModel = minor > 0 ? minor / perPixel : major / perPixel
-  if (!(minorModel > 0)) return []
+  // Real-unit step -> model-pixel step. Both steps are always positive
+  // (chooseTickIntervals' degenerate fallback returns gridReal or 1) and
+  // perPixel > 0 was established by the early return above, so these are
+  // finite positive strides; a pathological tiny step is still bounded by
+  // the `last - first` cap below.
+  const minorModel = minor / perPixel
   const majorModel = major / perPixel
 
   // Screen(modelX) = stageOrigin + stageOffset + modelX * zoom. Invert to

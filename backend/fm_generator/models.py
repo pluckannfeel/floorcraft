@@ -15,10 +15,11 @@ class FloorPlan(models.Model):
         # rescales the plan, it re-formats the SAME physical measurements
         # into the other notation. This is exactly origin AE2: a square
         # shown as `0.9 m` in metric shows as `3' 0"` in imperial — one
-        # physical size, two labels. (The scale/unit control converts a
-        # value the user TYPES in the display unit to/from stored meters;
-        # the rulers convert stored meters to the display unit at format
-        # time.)
+        # physical size, two labels. (v1 UI: the scale/unit control edits
+        # the stored-meters scalar directly and DISPLAYS the equivalent in
+        # this unit; the rulers convert stored meters to the display unit
+        # at format time. Typing a dimension in imperial notation to set
+        # the scale is a deferred, panel-era concern.)
         METERS = 'meters', 'Meters'
         FEET_INCHES = 'feet_inches', 'Feet & inches'
 

@@ -158,6 +158,19 @@ describe('ScaleUnitControl', () => {
     await user.keyboard('{Enter}')
     expect(patchSpy).not.toHaveBeenCalled()
     expect(input).toHaveValue(0.5)
+
+    // A negative value is rejected the same way.
+    await user.clear(input)
+    await user.type(input, '-1.5{Enter}')
+    expect(patchSpy).not.toHaveBeenCalled()
+    expect(input).toHaveValue(0.5)
+
+    // A positive value BELOW the shared 0.0001 floor is caught client-side
+    // (no round-trip to a server 400), matching the input's own `min`.
+    await user.clear(input)
+    await user.type(input, '0.00005{Enter}')
+    expect(patchSpy).not.toHaveBeenCalled()
+    expect(input).toHaveValue(0.5) // reverted to persisted
   })
 
   it('Escape reverts the draft and sends no PATCH', async () => {
@@ -221,6 +234,58 @@ describe('ScaleUnitControl', () => {
     await user.selectOptions(select, 'feet_inches')
 
     expect(await screen.findByRole('status')).toHaveTextContent(/saving/i)
+  })
+
+  it('optimistically shows the picked unit while the (non-optimistic) PATCH is in flight', async () => {
+    // A never-resolving PATCH holds the mutation pending for the whole test.
+    vi.spyOn(apiClient, 'patch').mockReturnValueOnce(new Promise(() => {}) as never)
+
+    const user = userEvent.setup()
+    renderControl()
+    const select = await screen.findByLabelText('Measurement unit')
+
+    await user.selectOptions(select, 'feet_inches')
+
+    // Without the optimistic `displayUnit`, the controlled <select> would snap
+    // back to 'meters' (the still-persisted value) for the whole round-trip.
+    expect(select).toHaveValue('feet_inches')
+    expect(screen.getByText(/^= \d+' \d+"$/)).toBeInTheDocument()
+  })
+
+  it('does NOT clobber an in-progress edit when a prior commit resolves mid-typing', async () => {
+    // First commit (0.75) is controllable; resolve it only after the user has
+    // re-focused and typed a new, uncommitted value.
+    let resolveFirst: (v: unknown) => void = () => {}
+    const patchSpy = vi.spyOn(apiClient, 'patch').mockImplementation(
+      () => new Promise((resolve) => {
+        resolveFirst = resolve
+      }) as never,
+    )
+
+    const user = userEvent.setup()
+    const queryClient = renderControl()
+    const input = await screen.findByLabelText('Meters per grid square')
+
+    // Commit 0.75 (PATCH fires, still pending), then re-focus and type 0.9.
+    await user.clear(input)
+    await user.type(input, '0.75{Enter}')
+    expect(patchSpy).toHaveBeenCalledTimes(1)
+    await user.click(input)
+    await user.clear(input)
+    await user.type(input, '0.9')
+    expect(input).toHaveValue(0.9)
+
+    // The 0.75 PATCH now resolves; its cache-merge moves the persisted prop
+    // from 0.5 to 0.75, forcing a re-render with the new scale prop.
+    resolveFirst({ data: makePlan({ real_size_per_grid_square: 0.75 }) })
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData<FloorPlan>(['floorPlan', 7])?.real_size_per_grid_square,
+      ).toBe(0.75),
+    )
+    // The render-time re-sync must NOT overwrite the FOCUSED draft: the input
+    // still shows the user's uncommitted 0.9, not the newly-persisted 0.75.
+    expect(input).toHaveValue(0.9)
   })
 
   it('the scale input and unit select are native editable targets the global shortcut guard skips', async () => {

@@ -75,12 +75,17 @@ describe('buildAxisTicks (pure, U3)', () => {
   })
 
   it('never emits ticks below the canvas origin (model 0)', () => {
-    // stageOffset -200 pushes model 0 to screen -200; window starts at 0, so
-    // the first visible tick maps to a positive model coord (never < 0).
-    const ticks = buildAxisTicks(1, 20, 0.5, 'meters', 0, -200, 0, 800)
-    // Reconstruct model coord from screen: model = (screen - offset)/zoom.
+    // stageOffset +200 pushes model 0 to screen 200 — INSIDE the window
+    // [0,800]. This is what actually exercises the Math.max(0,…) origin
+    // clamp: without it modelStart would be (0-200)/1 = -200 and the ruler
+    // would emit negative-coordinate ticks in the left gutter. (An offset
+    // pushing the origin off the LEFT instead — e.g. -200 — leaves modelStart
+    // already positive and the clamp inert, so it would pass even if deleted.)
+    const ticks = buildAxisTicks(1, 20, 0.5, 'meters', 0, 200, 0, 800)
+    expect(ticks.length).toBeGreaterThan(0)
+    // Reconstruct model from screen: model = (screen - base)/zoom, base = 200.
     for (const t of ticks) {
-      expect((t.screen - -200) / 1).toBeGreaterThanOrEqual(-1e-6)
+      expect((t.screen - 200) / 1).toBeGreaterThanOrEqual(-1e-6)
     }
   })
 

@@ -1,6 +1,11 @@
 import { useRef, useState, type KeyboardEvent } from "react";
 import { useUpdateFloorPlanSettings } from "../hooks/useFloorPlans";
-import { UNITS, formatMeasurement, type Unit } from "./rulers";
+import {
+  MIN_REAL_SIZE_PER_GRID_SQUARE,
+  UNITS,
+  formatMeasurement,
+  type Unit,
+} from "./rulers";
 
 interface ScaleUnitControlProps {
   floorPlanId: number;
@@ -63,17 +68,24 @@ export function ScaleUnitControl({
   // tab/click-away blur (flag unset) still commits. Same double-commit guard
   // as FloorPlanNameEditor's `finishedRef`.
   const suppressBlurRef = useRef(false);
+  // Whether the scale input currently holds focus (i.e. the user is mid-edit).
+  // Kept in STATE, not a ref, so the re-sync below can read it during render
+  // (reading a ref during render is disallowed) and re-runs when it changes.
+  const [focused, setFocused] = useState(false);
 
   // Re-sync the draft when the persisted scale changes from elsewhere (a
   // successful PATCH merges the cache → new prop). React's "adjust state
   // during render" pattern rather than an effect (avoids a cascading
-  // re-render): track the last-seen persisted value and reset the draft
-  // when it moves. Not optimistic, so the prop never changes mid-edit to
-  // clobber typing — it only moves after a commit.
+  // re-render): track the last-seen persisted value and reset the draft when
+  // it moves — but ONLY while the input is unfocused. A prior commit's PATCH
+  // can resolve (moving the prop) WHILE the user has re-focused and is typing
+  // a new value; re-syncing then would silently discard their uncommitted
+  // text. When they blur, `commitScale` reconciles their draft against the
+  // now-current persisted value.
   const [lastPersisted, setLastPersisted] = useState(realSizePerGridSquare);
   if (lastPersisted !== realSizePerGridSquare) {
     setLastPersisted(realSizePerGridSquare);
-    setDraft(formatScale(realSizePerGridSquare));
+    if (!focused) setDraft(formatScale(realSizePerGridSquare));
   }
 
   const commitScale = () => {
@@ -83,9 +95,15 @@ export function ScaleUnitControl({
       return;
     }
     const parsed = Number(draft);
-    // Reject empty / non-finite / non-positive (backend enforces > 0 too);
-    // revert to the persisted value rather than PATCHing garbage.
-    if (draft.trim() === "" || !Number.isFinite(parsed) || parsed <= 0) {
+    // Reject empty / non-finite / below the shared floor (which also covers
+    // zero and negatives) — the same MIN the backend validator enforces, so
+    // a sub-floor value reverts silently here instead of round-tripping to a
+    // 400. Revert to the persisted value rather than PATCHing garbage.
+    if (
+      draft.trim() === "" ||
+      !Number.isFinite(parsed) ||
+      parsed < MIN_REAL_SIZE_PER_GRID_SQUARE
+    ) {
       setDraft(formatScale(realSizePerGridSquare));
       return;
     }
@@ -115,6 +133,15 @@ export function ScaleUnitControl({
     update.mutate({ unit: nextUnit });
   };
 
+  // Optimistically reflect an in-flight unit change. The PATCH isn't
+  // optimistic, so without this the controlled <select> would snap back to
+  // the persisted unit for the whole round-trip (and revert on failure) —
+  // the same submitted-value-while-pending trick FloorPlanNameEditor uses for
+  // the name. A scale-only patch carries no `unit`, so it falls through to
+  // the persisted value; on error `isPending` clears and it reverts too.
+  const displayUnit: Unit =
+    update.isPending && update.variables?.unit ? update.variables.unit : unit;
+
   return (
     <div className="flex items-center gap-2 text-sm">
       <label className="flex items-center gap-1">
@@ -122,13 +149,17 @@ export function ScaleUnitControl({
         <input
           type="number"
           inputMode="decimal"
-          min={0.0001}
+          min={MIN_REAL_SIZE_PER_GRID_SQUARE}
           step="any"
           aria-label="Meters per grid square"
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={handleKeyDown}
-          onBlur={commitScale}
+          onFocus={() => setFocused(true)}
+          onBlur={() => {
+            setFocused(false);
+            commitScale();
+          }}
           className="h-8 w-16 rounded-md border border-input bg-background px-2 text-sm tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
         <span className="text-muted-foreground">m</span>
@@ -136,7 +167,7 @@ export function ScaleUnitControl({
 
       <select
         aria-label="Measurement unit"
-        value={unit}
+        value={displayUnit}
         onChange={(event) => handleUnitChange(event.target.value as Unit)}
         className="h-8 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
@@ -147,11 +178,11 @@ export function ScaleUnitControl({
         ))}
       </select>
 
-      {unit === "feet_inches" && (
+      {displayUnit === "feet_inches" && (
         // Canonical-meters → display-unit hint, so a feet-and-inches user
         // sees what the metric scalar they're editing means (AE2 conversion).
         <span className="text-xs text-muted-foreground tabular-nums">
-          = {formatMeasurement(realSizePerGridSquare, unit)}
+          = {formatMeasurement(realSizePerGridSquare, displayUnit)}
         </span>
       )}
 
