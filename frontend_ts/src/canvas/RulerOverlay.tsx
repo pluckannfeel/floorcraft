@@ -370,10 +370,14 @@ export function RulerOverlay({
             }}
           >
             {tick.label != null && !panning && (
-              // Rotated so the label reads along the vertical ruler.
+              // Vertical text laid out INSIDE the band via writing-mode — the
+              // old `rotate(90deg)` around top-left pushed the glyphs ~9px past
+              // the band's left edge into the gutter (the stray mark). This
+              // keeps the label within the 22px band, reading top-to-bottom
+              // beside its tick, mirroring how the top ruler's labels sit.
               <span
-                className="absolute top-0.5 left-0 origin-top-left whitespace-nowrap"
-                style={{ transform: 'rotate(90deg)' }}
+                className="absolute left-0.5 top-1 whitespace-nowrap leading-none"
+                style={{ writingMode: 'vertical-rl' }}
               >
                 {tick.label}
               </span>
