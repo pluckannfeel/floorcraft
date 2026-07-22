@@ -19,8 +19,13 @@ interface FakeRects {
 
 /** Builds a fake `getStage` returning a stub whose container resolves both
  * the stage rect and a workspace ancestor rect. The workspace element also
- * dispatches 'scroll', so the overlay's scroll-tracking effect is exercised. */
-function makeFakeStage(rects: FakeRects) {
+ * dispatches 'scroll', so the overlay's scroll-tracking effect is exercised.
+ *
+ * Pass `pan` (a mutable live offset) to also expose the Konva `.x()/.y()`
+ * position accessors and `.on/.off` event API — the overlay's live-pan
+ * follow reads these. `firePan(type)` invokes the registered Stage-target
+ * handler (dragstart/dragmove/dragend) after you mutate `pan.offset`. */
+function makeFakeStage(rects: FakeRects, pan?: { offset: { x: number; y: number } }) {
   const workspace = document.createElement('div')
   workspace.setAttribute('data-canvas-workspace', '')
   workspace.getBoundingClientRect = () =>
@@ -32,8 +37,26 @@ function makeFakeStage(rects: FakeRects) {
   // closest('[data-canvas-workspace]') must find the workspace.
   container.closest = ((sel: string) => (sel === '[data-canvas-workspace]' ? workspace : null)) as typeof container.closest
 
-  const stage = { container: () => container } as unknown as Konva.Stage
-  return { getStage: () => stage, workspace }
+  const handlers: Record<string, (event: { target: unknown }) => void> = {}
+  const stage = {
+    container: () => container,
+    ...(pan
+      ? {
+          x: () => pan.offset.x,
+          y: () => pan.offset.y,
+          // Konva namespaced events: 'dragmove.rulers' -> bucket 'dragmove'.
+          on: (name: string, fn: (event: { target: unknown }) => void) => {
+            handlers[name.split('.')[0]] = fn
+          },
+          off: () => {},
+        }
+      : {}),
+  } as unknown as Konva.Stage
+
+  // Fire a Stage-target pan event (target === stage passes the isPan guard).
+  const firePan = (type: 'dragstart' | 'dragmove' | 'dragend') =>
+    handlers[type]?.({ target: stage })
+  return { getStage: () => stage, workspace, firePan }
 }
 
 const BASE_PROPS = {
@@ -197,6 +220,41 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     const after = labelsOf()
     expect(after).not.toEqual(before) // the visible range re-derived on scroll
     expect(after).not.toContain('2.00 m') // origin-side ticks scrolled off the left edge
+  })
+
+  it('follows a live pan off the Stage node and masks labels until the gesture ends', () => {
+    // The store's stagePosition only commits on dragend, so mid-pan the
+    // overlay must read the live offset off the Stage node and follow it.
+    const pan = { offset: { x: 0, y: 0 } }
+    const { getStage, firePan } = makeFakeStage(RECTS, pan)
+    render(<RulerOverlay getStage={getStage} {...BASE_PROPS} />)
+
+    const topBand = () => screen.getByTestId('ruler-top')
+    // At rest the 2.00 m major sits at model 80 → screen 80 → left 58 (past
+    // the 22px corner).
+    const beforeLeft = parseFloat(
+      (within(topBand()).getByText('2.00 m').parentElement as HTMLElement).style.left,
+    )
+
+    // Gesture start: labels are masked (hidden) for the duration.
+    act(() => firePan('dragstart'))
+    expect(within(topBand()).queryByText('2.00 m')).not.toBeInTheDocument()
+    // …but the tick MARKS still render (the ruler follows, just number-less).
+    expect(topBand().querySelectorAll('[data-tick]').length).toBeGreaterThan(0)
+
+    // Drag 120px right: the live node offset moves, marks follow frame-by-frame.
+    act(() => {
+      pan.offset = { x: 120, y: 0 }
+      firePan('dragmove')
+    })
+    expect(within(topBand()).queryByText('2.00 m')).not.toBeInTheDocument() // still masked
+
+    // Gesture end: labels return at the settled, shifted position.
+    act(() => firePan('dragend'))
+    const afterLeft = parseFloat(
+      (within(topBand()).getByText('2.00 m').parentElement as HTMLElement).style.left,
+    )
+    expect(afterLeft).toBeCloseTo(beforeLeft + 120, 1) // moved with the pan
   })
 
   it('renders nothing when the stage is unavailable (pre-mount / jsdom default)', () => {

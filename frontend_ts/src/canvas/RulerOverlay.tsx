@@ -1,4 +1,4 @@
-import { useEffect, useReducer } from 'react'
+import { useEffect, useReducer, useState } from 'react'
 import type Konva from 'konva'
 import type { Point } from './types'
 import {
@@ -174,15 +174,44 @@ export function RulerOverlay({
   // this the ticks drift between pans (review-pass find). A forced
   // re-render on scroll/resize re-reads the container rect and re-aligns.
   const [, forceTick] = useReducer((n: number) => n + 1, 0)
+  // True during an active drag-to-pan gesture. The store's `stagePosition`
+  // only commits on the pan's `dragend` (CanvasStage `onPanEnd`), so DURING
+  // the pan we read the live offset off the Stage node instead — and mask
+  // the numeric labels, which would otherwise reflow every frame; they
+  // reappear at their settled positions when the gesture ends.
+  const [panning, setPanning] = useState(false)
   useEffect(() => {
-    const container = getStage()?.container()
+    const stage = getStage()
+    const container = stage?.container()
     const workspace = container?.closest('[data-canvas-workspace]') as HTMLElement | null
     const onChange = () => forceTick()
     workspace?.addEventListener('scroll', onChange, { passive: true })
     window.addEventListener('resize', onChange)
+
+    // Track a live Konva-stage PAN so the ticks follow the canvas mid-drag.
+    // Only the Stage's OWN drag is a pan (object drags fire on their node —
+    // the `event.target === stage` guard mirrors CanvasStage). `.on` is
+    // feature-detected so non-Konva test stubs are a no-op. Namespaced
+    // handlers so cleanup removes only ours.
+    let detachStage = () => {}
+    if (stage && typeof stage.on === 'function') {
+      const isPan = (event: Konva.KonvaEventObject<DragEvent>) => event.target === stage
+      stage.on('dragstart.rulers', (event) => {
+        if (isPan(event)) setPanning(true)
+      })
+      stage.on('dragmove.rulers', (event) => {
+        if (isPan(event)) forceTick()
+      })
+      stage.on('dragend.rulers', (event) => {
+        if (isPan(event)) setPanning(false)
+      })
+      detachStage = () => stage.off('.rulers')
+    }
+
     return () => {
       workspace?.removeEventListener('scroll', onChange)
       window.removeEventListener('resize', onChange)
+      detachStage()
     }
   }, [getStage])
 
@@ -190,6 +219,15 @@ export function RulerOverlay({
   if (!rects) return null
 
   const { stage, view } = rects
+
+  // The pan offset: read LIVE off the Stage node (`.x()/.y()`) rather than the
+  // `stagePosition` prop, so ticks track a drag-to-pan frame-by-frame — the
+  // prop only commits on `dragend`. At rest the node equals the prop; the
+  // `stagePosition` prop still triggers the re-render that reads it. Falls
+  // back to the prop for non-Konva test stubs without `.x()`.
+  const stageNode = getStage()
+  const offsetX = typeof stageNode?.x === 'function' ? stageNode.x() : stagePosition.x
+  const offsetY = typeof stageNode?.y === 'function' ? stageNode.y() : stagePosition.y
 
   // The bands hug the CANVAS (stage) edges, NOT the workspace viewport edges.
   // The canvas floats as an inset box inside the padded, scrollable
@@ -218,7 +256,7 @@ export function RulerOverlay({
     realSizePerGridSquare,
     unit,
     stage.left,
-    stagePosition.x,
+    offsetX,
     topStart,
     canvasRight,
   )
@@ -228,7 +266,7 @@ export function RulerOverlay({
     realSizePerGridSquare,
     unit,
     stage.top,
-    stagePosition.y,
+    offsetY,
     leftStart,
     canvasBottom,
   )
@@ -264,7 +302,7 @@ export function RulerOverlay({
               height: tick.label != null ? RULER_THICKNESS : RULER_THICKNESS / 2,
             }}
           >
-            {tick.label != null && (
+            {tick.label != null && !panning && (
               <span className="absolute top-0 left-0.5 whitespace-nowrap">{tick.label}</span>
             )}
           </div>
@@ -297,7 +335,7 @@ export function RulerOverlay({
               width: tick.label != null ? RULER_THICKNESS : RULER_THICKNESS / 2,
             }}
           >
-            {tick.label != null && (
+            {tick.label != null && !panning && (
               // Rotated so the label reads along the vertical ruler.
               <span
                 className="absolute top-0.5 left-0 origin-top-left whitespace-nowrap"
