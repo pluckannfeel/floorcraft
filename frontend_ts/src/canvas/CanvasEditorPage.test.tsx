@@ -93,6 +93,8 @@ function makePlan(overrides: Partial<FloorPlan> = {}): FloorPlan {
     grid_size: 20,
     canvas_width: 1600,
     canvas_height: 1200,
+    real_size_per_grid_square: 0.5,
+    unit: 'meters' as const,
     created_at: '2026-07-01T10:00:00Z',
     updated_at: '2026-07-10T15:30:00Z',
     ...overrides,

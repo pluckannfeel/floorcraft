@@ -455,6 +455,8 @@ describe('useSaveObjects', () => {
       grid_size: 20,
       canvas_width: 1600,
       canvas_height: 1200,
+      real_size_per_grid_square: 0.5,
+      unit: 'meters' as const,
     })
     const putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({
       data: { objects: [], id_map: {} },
@@ -481,6 +483,8 @@ describe('useSaveObjects', () => {
       grid_size: 20,
       canvas_width: 800,
       canvas_height: 600,
+      real_size_per_grid_square: 0.5,
+      unit: 'meters' as const,
     })
   })
 
@@ -551,6 +555,8 @@ describe('useSaveObjects', () => {
       grid_size: 20,
       canvas_width: 1600,
       canvas_height: 1200,
+      real_size_per_grid_square: 0.5,
+      unit: 'meters' as const,
     })
     let releasePut: ((value: unknown) => void) | null = null
     vi.spyOn(apiClient, 'put').mockImplementation(
@@ -583,6 +589,8 @@ describe('useSaveObjects', () => {
     expect(queryClient.getQueryData(['floorPlan', 7])).toMatchObject({
       canvas_width: 1600,
       canvas_height: 1200,
+      real_size_per_grid_square: 0.5,
+      unit: 'meters' as const,
     })
   })
 

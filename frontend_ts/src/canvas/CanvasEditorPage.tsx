@@ -44,6 +44,7 @@ import {
   VISUAL_PRESET_KEY,
   VISUAL_VARIANT_ID_KEY,
 } from "./visuals";
+import { RulerOverlay } from "./RulerOverlay";
 import { TextEditOverlay } from "./TextEditOverlay";
 import {
   DEFAULT_TEXT_STYLING,
@@ -954,7 +955,7 @@ export function CanvasEditorPage() {
             sitting on a surface, the way design tools frame a document —
             `w-fit` keeps the ring/shadow hugging the stage rather than the
             scroll area. */}
-        <div className="flex-1 overflow-auto bg-muted p-6">
+        <div data-canvas-workspace className="flex-1 overflow-auto bg-muted p-6">
           <div className="w-fit rounded-sm shadow-md ring-1 ring-border">
           <CanvasStage
             ref={stageRef}
@@ -996,6 +997,19 @@ export function CanvasEditorPage() {
         </div>
         <PropertyPanel />
       </div>
+
+      {/* U3 (canvas-rulers-scale): top + left edge rulers — a fixed-position
+          DOM overlay (like TextEditOverlay) reading the plan's scale/unit
+          off the query (flowed like grid_size) and the live zoom/pan from
+          the store. Renders nothing until the stage container exists. */}
+      <RulerOverlay
+        getStage={getStage}
+        zoom={zoom}
+        stagePosition={stagePosition}
+        gridSize={floorPlan.grid_size}
+        realSizePerGridSquare={floorPlan.real_size_per_grid_square}
+        unit={floorPlan.unit}
+      />
 
       {/* U7: the DOM text-editing overlay (fixed-positioned over the
           canvas, like the context menu below). Keyed per editing session so

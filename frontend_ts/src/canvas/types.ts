@@ -1,3 +1,5 @@
+import type { Unit } from './rulers'
+
 /**
  * Shared types for the canvas editor, mirroring the backend `Objects` model
  * (backend/fm_generator/models.py) and `FloorPlan` model/serializer.
@@ -70,6 +72,24 @@ export interface FloorPlan {
   grid_size: number
   canvas_width: number
   canvas_height: number
+  /**
+   * U1 (canvas-rulers-scale): the plan's real-world scale — how much real
+   * distance ONE grid square represents. CANONICAL METERS, always (default
+   * 0.5): this scalar is never reinterpreted by `unit`. The rulers convert
+   * it to the display unit at label time (`formatMeasurement`), so a metric
+   * plan and an imperial plan with the same scalar are the same physical
+   * size. First frontend consumer of U1's serialized fields — flowed
+   * query -> props exactly like `grid_size` (no store, no undo/dirty).
+   */
+  real_size_per_grid_square: number
+  /**
+   * U1: the display unit for measurements (`meters` | `feet_inches`). A
+   * presentation choice only — it selects how `real_size_per_grid_square`
+   * (and every derived ruler value) is formatted, never what it means.
+   * Reuses the `Unit` type from the pure `rulers.ts` module (U2), which
+   * mirrors the backend `FloorPlan.unit` choices.
+   */
+  unit: Unit
   created_at?: string
   updated_at?: string
 }
