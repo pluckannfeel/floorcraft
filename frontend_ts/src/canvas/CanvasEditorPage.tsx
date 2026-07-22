@@ -31,6 +31,7 @@ import { ContextMenu, resolveContextMenuAvailability } from "./ContextMenu";
 import { clampToBounds, snapToGrid } from "./coordinates";
 import type { BoundingBox } from "./coordinates";
 import { FloorPlanNameEditor } from "./FloorPlanNameEditor";
+import { ScaleUnitControl } from "./ScaleUnitControl";
 import { resetImageRegistry } from "./imageRegistry";
 import { computeLineBoundingBox, curveStyleForType } from "./LineTool";
 import { symbolPresetFor } from "./symbols";
@@ -890,6 +891,15 @@ export function CanvasEditorPage() {
               File
             </button>
           </nav>
+          <span aria-hidden="true" className="h-4 w-px bg-border" />
+          {/* U4/R1-R4: per-plan real-world scale + display unit. Editing
+              either PATCHes immediately (separate from the canvas save) and
+              the U3 ruler overlay relabels live — see ScaleUnitControl.tsx. */}
+          <ScaleUnitControl
+            floorPlanId={floorPlan.id}
+            realSizePerGridSquare={floorPlan.real_size_per_grid_square}
+            unit={floorPlan.unit}
+          />
         </div>
         <div className="flex items-center gap-2">
           {/* Save button doubling as the save-state indicator (top-right,

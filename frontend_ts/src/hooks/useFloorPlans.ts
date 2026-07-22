@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { AxiosError } from 'axios'
 import { apiClient } from '../api/client'
 import type { FloorPlan } from '../canvas/types'
+import type { Unit } from '../canvas/rulers'
 import { useToast } from '../notifications/ToastContext'
 
 /**
@@ -102,6 +103,49 @@ export function useRenameFloorPlan(floorPlanId: number) {
     onError: (error) => {
       if (!isAuthError(error)) {
         showError("Couldn't rename the floor plan. The previous name was kept.")
+      }
+    },
+  })
+}
+
+/** The scale/unit fields a settings PATCH may carry (both optional so the
+ * unit selector and the scale input can each PATCH just their own field).
+ * `real_size_per_grid_square` is CANONICAL METERS (U1); `unit` is display-
+ * only, so switching it re-labels the same physical size, never rescales. */
+export interface FloorPlanSettingsPatch {
+  real_size_per_grid_square?: number
+  unit?: Unit
+}
+
+/**
+ * U4/R1-R4: `PATCH /api/floor-plans/<id>/` with `{ real_size_per_grid_square?,
+ * unit? }` — backs the editor header's scale/unit control. The exact
+ * not-optimistic, cache-merge shape as `useRenameFloorPlan`: on success the
+ * `['floorPlan', id]` cache is merged in place, so `CanvasEditorPage`
+ * re-renders with the new scale/unit and the ruler overlay (U3) relabels
+ * live (R4/AE2) with no refetch and no canvas save; the `['floorPlans']`
+ * dashboard list is invalidated. On failure the cache was never touched, so
+ * the control reverts to the persisted values, plus the standard error toast
+ * (401/403 owned by the global interceptor, same as the siblings above).
+ */
+export function useUpdateFloorPlanSettings(floorPlanId: number) {
+  const queryClient = useQueryClient()
+  const { showError } = useToast()
+
+  return useMutation({
+    mutationFn: async (patch: FloorPlanSettingsPatch) => {
+      const { data } = await apiClient.patch<FloorPlan>(`/floor-plans/${floorPlanId}/`, patch)
+      return data
+    },
+    onSuccess: (updated) => {
+      queryClient.setQueryData<FloorPlan>(['floorPlan', floorPlanId], (current) =>
+        current ? { ...current, ...updated } : updated,
+      )
+      queryClient.invalidateQueries({ queryKey: ['floorPlans'] })
+    },
+    onError: (error) => {
+      if (!isAuthError(error)) {
+        showError("Couldn't update the scale. The previous setting was kept.")
       }
     },
   })
