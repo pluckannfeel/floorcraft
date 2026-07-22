@@ -121,6 +121,44 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     expect(within(screen.getByTestId('ruler-top')).getByText('2.00 m')).toBeInTheDocument()
   })
 
+  it('the bands HUG the canvas edges, not the workspace viewport edges', () => {
+    // Canvas (stage) inset inside a larger viewport — the real layout: the
+    // white canvas floats in the padded, scrollable workspace. The bands
+    // must sit at the canvas corner (100,80), NOT the viewport corner (0,0).
+    const { getStage } = makeFakeStage({
+      stage: { left: 100, top: 80, width: 400, height: 300 },
+      view: { left: 0, top: 0, width: 800, height: 600 },
+    })
+    render(<RulerOverlay getStage={getStage} {...BASE_PROPS} />)
+
+    const corner = screen.getByTestId('ruler-corner')
+    expect(corner.style.left).toBe('100px') // canvas left edge, not viewport 0
+    expect(corner.style.top).toBe('80px') // canvas top edge, not viewport 0
+
+    const top = screen.getByTestId('ruler-top')
+    expect(top.style.top).toBe('80px') // rides the canvas top edge
+    expect(top.style.left).toBe('122px') // canvasLeft + corner thickness (22)
+
+    const left = screen.getByTestId('ruler-left')
+    expect(left.style.left).toBe('100px') // rides the canvas left edge
+    expect(left.style.top).toBe('102px') // canvasTop + corner thickness (22)
+  })
+
+  it('clamps a band to the viewport when the canvas is scrolled past the top-left', () => {
+    // Canvas origin scrolled ABOVE/LEFT of the viewport (negative rect): the
+    // bands stick to the viewport edge (0,0) so they never disappear, even
+    // though the canvas corner is off-screen.
+    const { getStage } = makeFakeStage({
+      stage: { left: -300, top: -200, width: 4000, height: 3000 },
+      view: { left: 0, top: 0, width: 800, height: 600 },
+    })
+    render(<RulerOverlay getStage={getStage} {...BASE_PROPS} />)
+
+    const corner = screen.getByTestId('ruler-corner')
+    expect(corner.style.left).toBe('0px') // clamped to viewport, not -300
+    expect(corner.style.top).toBe('0px') // clamped to viewport, not -200
+  })
+
   it('AE2: switching the unit prop relabels the ticks to feet-inches', () => {
     const { getStage } = makeFakeStage(RECTS)
     const { rerender } = render(

@@ -14,11 +14,12 @@ import {
  *
  * A fixed-position DOM overlay rendered OUTSIDE the Konva `<Stage>` — the
  * `TextEditOverlay` pattern (fixed-positioned, coordinates derived purely
- * from the store transform, no live Konva node). An in-transform Konva
- * layer would scroll a `model y=0` band off-screen on pan; a DOM overlay
- * pins the ruler bands to the workspace VIEWPORT edges while the tick
- * numbers within them track the canvas, and it stays out of the PNG export
- * tree (rulers are editor chrome).
+ * from the store transform, no live Konva node). Keeping it a DOM overlay
+ * (rather than an in-transform Konva layer) keeps the rulers out of the PNG
+ * export tree — they're editor chrome. The bands hug the CANVAS's own top
+ * and left edges (so `0,0` sits at the canvas corner and the ticks read
+ * against the content), clamped to the viewport so they stay visible when
+ * the canvas is scrolled or panned partly off-screen.
  *
  * Everything here is DECLARATIVE: tick positions and labels are computed
  * from `zoom`/`stagePosition`/scale every render — no imperative DOM/node
@@ -31,15 +32,16 @@ import {
  * Switching the unit re-labels the same physical sizes (origin AE2).
  *
  * Two coordinate frames (why both rects are resolved):
- * - The STAGE container rect (`getStage().container()`) locates a model
+ * - The STAGE container rect (`getStage().container()`) is the canvas: it
+ *   both anchors the ruler bands (their edges) AND locates a model
  *   coordinate on screen: `screenX = stageRect.left + stagePosition.x +
- *   modelX * zoom` (the exact `TextEditOverlay` formula). Its left/top
- *   already shift as the workspace scrolls, so ticks track scroll for free
- *   once we re-render on scroll.
+ *   modelX * zoom` (the exact `TextEditOverlay` formula). Its left/top shift
+ *   as the workspace scrolls, so the bands and ticks track scroll together.
  * - The WORKSPACE viewport rect (the `overflow-auto` ancestor, tagged
- *   `data-canvas-workspace`) is where the ruler BANDS pin and defines the
- *   visible pixel window ticks are culled to (R7 — only render what's on
- *   screen, and the count must adapt with zoom, AE1).
+ *   `data-canvas-workspace`) is the CLAMP: it bounds where the bands may sit
+ *   and the pixel window ticks are culled to, so a band never leaves the
+ *   visible area and off-screen ticks aren't rendered (R7 — only draw what's
+ *   on screen, count adapting with zoom, AE1).
  */
 
 /** Ruler band thickness in px (the labeled strip along each edge). */
@@ -188,6 +190,28 @@ export function RulerOverlay({
   if (!rects) return null
 
   const { stage, view } = rects
+
+  // The bands hug the CANVAS (stage) edges, NOT the workspace viewport edges.
+  // The canvas floats as an inset box inside the padded, scrollable
+  // workspace, so pinning to the viewport left the rulers detached in the
+  // far gutters (the review-photo bug) — a ruler is only useful sitting ON
+  // the canvas it measures. We clamp each band to the intersection of the
+  // canvas and the viewport: the band follows the canvas edge, and only when
+  // the canvas is scrolled/panned partly off-screen does it stick to the
+  // viewport edge so it never disappears. `0,0` therefore lands at the
+  // canvas's own top-left corner.
+  const viewRight = view.left + view.width
+  const viewBottom = view.top + view.height
+  const canvasLeft = Math.max(view.left, stage.left)
+  const canvasTop = Math.max(view.top, stage.top)
+  const canvasRight = Math.min(viewRight, stage.left + stage.width)
+  const canvasBottom = Math.min(viewBottom, stage.top + stage.height)
+
+  // Drawable spans begin one thickness past the corner so the top and left
+  // bands don't overlap where they meet.
+  const topStart = canvasLeft + RULER_THICKNESS
+  const leftStart = canvasTop + RULER_THICKNESS
+
   const horizontal = buildAxisTicks(
     zoom,
     gridSize,
@@ -195,8 +219,8 @@ export function RulerOverlay({
     unit,
     stage.left,
     stagePosition.x,
-    view.left + RULER_THICKNESS, // start of the drawable area (past the corner/left band)
-    view.left + view.width,
+    topStart,
+    canvasRight,
   )
   const vertical = buildAxisTicks(
     zoom,
@@ -205,8 +229,8 @@ export function RulerOverlay({
     unit,
     stage.top,
     stagePosition.y,
-    view.top + RULER_THICKNESS,
-    view.top + view.height,
+    leftStart,
+    canvasBottom,
   )
 
   const bandStyle =
@@ -214,15 +238,15 @@ export function RulerOverlay({
 
   return (
     <>
-      {/* Top (horizontal) ruler band */}
+      {/* Top (horizontal) ruler band — overlays the canvas's top edge */}
       <div
         data-testid="ruler-top"
         aria-hidden="true"
         className={`${bandStyle} border-b`}
         style={{
-          left: view.left + RULER_THICKNESS,
-          top: view.top,
-          width: Math.max(0, view.width - RULER_THICKNESS),
+          left: topStart,
+          top: canvasTop,
+          width: Math.max(0, canvasRight - topStart),
           height: RULER_THICKNESS,
         }}
       >
@@ -236,7 +260,7 @@ export function RulerOverlay({
                 : 'absolute bottom-0 border-l border-border/50'
             }
             style={{
-              left: tick.screen - (view.left + RULER_THICKNESS),
+              left: tick.screen - topStart,
               height: tick.label != null ? RULER_THICKNESS : RULER_THICKNESS / 2,
             }}
           >
@@ -247,16 +271,16 @@ export function RulerOverlay({
         ))}
       </div>
 
-      {/* Left (vertical) ruler band */}
+      {/* Left (vertical) ruler band — overlays the canvas's left edge */}
       <div
         data-testid="ruler-left"
         aria-hidden="true"
         className={`${bandStyle} border-r`}
         style={{
-          left: view.left,
-          top: view.top + RULER_THICKNESS,
+          left: canvasLeft,
+          top: leftStart,
           width: RULER_THICKNESS,
-          height: Math.max(0, view.height - RULER_THICKNESS),
+          height: Math.max(0, canvasBottom - leftStart),
         }}
       >
         {vertical.map((tick, index) => (
@@ -269,7 +293,7 @@ export function RulerOverlay({
                 : 'absolute right-0 border-t border-border/50'
             }
             style={{
-              top: tick.screen - (view.top + RULER_THICKNESS),
+              top: tick.screen - leftStart,
               width: tick.label != null ? RULER_THICKNESS : RULER_THICKNESS / 2,
             }}
           >
@@ -286,12 +310,12 @@ export function RulerOverlay({
         ))}
       </div>
 
-      {/* Corner box where the two rulers meet */}
+      {/* Corner box where the two rulers meet — the canvas's top-left corner */}
       <div
         data-testid="ruler-corner"
         aria-hidden="true"
         className={`${bandStyle} border-r border-b`}
-        style={{ left: view.left, top: view.top, width: RULER_THICKNESS, height: RULER_THICKNESS }}
+        style={{ left: canvasLeft, top: canvasTop, width: RULER_THICKNESS, height: RULER_THICKNESS }}
       />
     </>
   )
