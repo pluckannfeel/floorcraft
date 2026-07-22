@@ -261,4 +261,22 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     const { container } = render(<RulerOverlay getStage={() => null} {...BASE_PROPS} />)
     expect(container).toBeEmptyDOMElement()
   })
+
+  it('appears once the Stage attaches AFTER mount (not blank on first load)', async () => {
+    // The real page: getStage() is null on the first render (the Stage ref
+    // isn't set yet) and attaching the ref fires no re-render. The overlay
+    // must nudge itself once the stage exists, or it stays blank until an
+    // unrelated re-render.
+    const readyStage = makeFakeStage(RECTS).getStage()
+    let current: Konva.Stage | null = null
+    render(<RulerOverlay getStage={() => current} {...BASE_PROPS} />)
+
+    // Nothing on the first render — the stage isn't ready.
+    expect(screen.queryByTestId('ruler-top')).not.toBeInTheDocument()
+
+    // Ref attaches after mount; the readiness poll picks it up and re-renders.
+    current = readyStage
+    expect(await screen.findByTestId('ruler-top')).toBeInTheDocument()
+    expect(within(screen.getByTestId('ruler-top')).getByText('2.00 m')).toBeInTheDocument()
+  })
 })

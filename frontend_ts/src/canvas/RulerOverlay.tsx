@@ -180,6 +180,26 @@ export function RulerOverlay({
   // the numeric labels, which would otherwise reflow every frame; they
   // reappear at their settled positions when the gesture ends.
   const [panning, setPanning] = useState(false)
+
+  // The Stage ref attaches during commit — AFTER this component's first
+  // render, which therefore saw `getStage() === null` and drew nothing. A
+  // ref assignment fires no re-render, so without nudging one the rulers stay
+  // blank on initial page load until an unrelated re-render happens to occur.
+  // Track readiness and flip it once the stage exists: that re-render draws
+  // the rulers AND (via the deps below) attaches the scroll/pan listeners to
+  // the live stage. Polls a few frames in case the ref lands a tick late.
+  const [stageReady, setStageReady] = useState(() => Boolean(getStage()))
+  useEffect(() => {
+    if (stageReady) return
+    let raf = 0
+    const poll = () => {
+      if (getStage()) setStageReady(true)
+      else raf = requestAnimationFrame(poll)
+    }
+    poll()
+    return () => cancelAnimationFrame(raf)
+  }, [stageReady, getStage])
+
   useEffect(() => {
     const stage = getStage()
     const container = stage?.container()
@@ -213,7 +233,7 @@ export function RulerOverlay({
       window.removeEventListener('resize', onChange)
       detachStage()
     }
-  }, [getStage])
+  }, [getStage, stageReady])
 
   const rects = resolveRects(getStage)
   if (!rects) return null
