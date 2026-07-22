@@ -63,6 +63,11 @@ const BASE_PROPS = {
   zoom: 1,
   stagePosition: { x: 0, y: 0 },
   gridSize: 20,
+  // Document as large as the RECTS stage so, at zoom 1 / pan 0, the page rect
+  // == the container rect and the visible-window math matches the pre-doc-rect
+  // fixtures (docRight clamps to the 800px viewport either way).
+  canvasWidth: 4000,
+  canvasHeight: 3000,
   realSizePerGridSquare: 0.5, // canonical meters
   unit: 'meters' as const,
 }
@@ -167,6 +172,34 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     expect(left.style.top).toBe('102px') // canvasTop + corner thickness (22)
   })
 
+  it('hugs the DOCUMENT (page) rect tracking stagePosition, not the Stage container', () => {
+    // Container origin at (0,0), but the PAGE is panned +150,+100 inside it
+    // (zoom 1). The ruler must sit at the page corner, not the container's —
+    // this is the case the container-rect version got wrong (review photo).
+    const { getStage } = makeFakeStage({
+      stage: { left: 0, top: 0, width: 4000, height: 3000 },
+      view: { left: 0, top: 0, width: 800, height: 600 },
+    })
+    render(
+      <RulerOverlay
+        getStage={getStage}
+        {...BASE_PROPS}
+        stagePosition={{ x: 150, y: 100 }}
+        canvasWidth={400}
+        canvasHeight={300}
+      />,
+    )
+
+    const corner = screen.getByTestId('ruler-corner')
+    expect(corner.style.left).toBe('150px') // container(0) + pan(150) = page corner
+    expect(corner.style.top).toBe('100px')
+
+    // The band ends at the page's own right edge (150 + 400*zoom = 550), not
+    // the container's far edge: width = docRight(550) - topStart(150+22).
+    const top = screen.getByTestId('ruler-top')
+    expect(top.style.width).toBe('378px')
+  })
+
   it('clamps a band to the viewport when the canvas is scrolled past the top-left', () => {
     // Canvas origin scrolled ABOVE/LEFT of the viewport (negative rect): the
     // bands stick to the viewport edge (0,0) so they never disappear, even
@@ -229,12 +262,11 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     const { getStage, firePan } = makeFakeStage(RECTS, pan)
     render(<RulerOverlay getStage={getStage} {...BASE_PROPS} />)
 
+    const corner = () => screen.getByTestId('ruler-corner')
     const topBand = () => screen.getByTestId('ruler-top')
-    // At rest the 2.00 m major sits at model 80 → screen 80 → left 58 (past
-    // the 22px corner).
-    const beforeLeft = parseFloat(
-      (within(topBand()).getByText('2.00 m').parentElement as HTMLElement).style.left,
-    )
+    // At rest the page's 0,0 corner sits at the container origin.
+    expect(corner().style.left).toBe('0px')
+    expect(within(topBand()).getByText('2.00 m')).toBeInTheDocument()
 
     // Gesture start: labels are masked (hidden) for the duration.
     act(() => firePan('dragstart'))
@@ -242,19 +274,19 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     // …but the tick MARKS still render (the ruler follows, just number-less).
     expect(topBand().querySelectorAll('[data-tick]').length).toBeGreaterThan(0)
 
-    // Drag 120px right: the live node offset moves, marks follow frame-by-frame.
+    // Drag 120px right: the live node offset moves, so the ruler (hugging the
+    // page) follows — its corner tracks the page frame-by-frame.
     act(() => {
       pan.offset = { x: 120, y: 0 }
       firePan('dragmove')
     })
+    expect(corner().style.left).toBe('120px') // followed the pan
     expect(within(topBand()).queryByText('2.00 m')).not.toBeInTheDocument() // still masked
 
-    // Gesture end: labels return at the settled, shifted position.
+    // Gesture end: the ruler stays at the panned position and labels return.
     act(() => firePan('dragend'))
-    const afterLeft = parseFloat(
-      (within(topBand()).getByText('2.00 m').parentElement as HTMLElement).style.left,
-    )
-    expect(afterLeft).toBeCloseTo(beforeLeft + 120, 1) // moved with the pan
+    expect(corner().style.left).toBe('120px')
+    expect(within(topBand()).getByText('2.00 m')).toBeInTheDocument()
   })
 
   it('renders nothing when the stage is unavailable (pre-mount / jsdom default)', () => {

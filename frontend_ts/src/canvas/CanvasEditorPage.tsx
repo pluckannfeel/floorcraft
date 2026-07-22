@@ -1017,6 +1017,8 @@ export function CanvasEditorPage() {
         zoom={zoom}
         stagePosition={stagePosition}
         gridSize={floorPlan.grid_size}
+        canvasWidth={canvasSize.width}
+        canvasHeight={canvasSize.height}
         realSizePerGridSquare={floorPlan.real_size_per_grid_square}
         unit={floorPlan.unit}
       />

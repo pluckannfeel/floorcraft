@@ -155,6 +155,13 @@ export interface RulerOverlayProps {
   zoom: number
   stagePosition: Point
   gridSize: number
+  /** The canvas DOCUMENT size in MODEL pixels (the page the user sees). Its
+   * on-screen rect — `(0,0)→(canvasWidth,canvasHeight)` through the same
+   * origin+offset+`zoom` transform the ticks use — is what the ruler bands
+   * hug, NOT the Stage container div (which stays this size in CSS px while
+   * the content scales/pans inside it). */
+  canvasWidth: number
+  canvasHeight: number
   /** The plan's scale in CANONICAL METERS per grid square (U1). */
   realSizePerGridSquare: number
   unit: Unit
@@ -165,6 +172,8 @@ export function RulerOverlay({
   zoom,
   stagePosition,
   gridSize,
+  canvasWidth,
+  canvasHeight,
   realSizePerGridSquare,
   unit,
 }: RulerOverlayProps) {
@@ -249,21 +258,26 @@ export function RulerOverlay({
   const offsetX = typeof stageNode?.x === 'function' ? stageNode.x() : stagePosition.x
   const offsetY = typeof stageNode?.y === 'function' ? stageNode.y() : stagePosition.y
 
-  // The bands hug the CANVAS (stage) edges, NOT the workspace viewport edges.
-  // The canvas floats as an inset box inside the padded, scrollable
-  // workspace, so pinning to the viewport left the rulers detached in the
-  // far gutters (the review-photo bug) — a ruler is only useful sitting ON
-  // the canvas it measures. We clamp each band to the intersection of the
-  // canvas and the viewport: the band follows the canvas edge, and only when
-  // the canvas is scrolled/panned partly off-screen does it stick to the
-  // viewport edge so it never disappears. `0,0` therefore lands at the
-  // canvas's own top-left corner.
+  // The bands hug the CANVAS DOCUMENT — the white page the user sees — NOT
+  // the Stage container div. The container stays `canvasWidth×canvasHeight`
+  // CSS px while the content scales by `zoom` and pans by `stagePosition`
+  // INSIDE it, so the document is a sub-rectangle of the container whenever
+  // zoomed or panned; hugging the container drifted the ruler off the page
+  // (the review photo). The document's on-screen rect is model
+  // `(0,0)→(canvasWidth,canvasHeight)` through the SAME origin+offset+zoom
+  // transform the ticks use, so `docLeft` is exactly the model-0 tick — the
+  // ruler's `0,0` lands on the page's own corner. Clamp each edge to the
+  // viewport so a band never leaves the visible area on scroll/pan.
   const viewRight = view.left + view.width
   const viewBottom = view.top + view.height
-  const canvasLeft = Math.max(view.left, stage.left)
-  const canvasTop = Math.max(view.top, stage.top)
-  const canvasRight = Math.min(viewRight, stage.left + stage.width)
-  const canvasBottom = Math.min(viewBottom, stage.top + stage.height)
+  const docLeft = stage.left + offsetX
+  const docTop = stage.top + offsetY
+  const docRight = docLeft + canvasWidth * zoom
+  const docBottom = docTop + canvasHeight * zoom
+  const canvasLeft = Math.max(view.left, docLeft)
+  const canvasTop = Math.max(view.top, docTop)
+  const canvasRight = Math.min(viewRight, docRight)
+  const canvasBottom = Math.min(viewBottom, docBottom)
 
   // Drawable spans begin one thickness past the corner so the top and left
   // bands don't overlap where they meet.
