@@ -255,17 +255,20 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     expect(after).not.toContain('2.00 m') // origin-side ticks scrolled off the left edge
   })
 
-  it('follows a live pan off the Stage node and masks labels until the gesture ends', () => {
-    // The store's stagePosition only commits on dragend, so mid-pan the
-    // overlay must read the live offset off the Stage node and follow it.
+  it('follows a live pan via an imperative wrapper transform, masking labels until it ends', () => {
+    // The store's stagePosition only commits on dragend, so mid-pan the ruler
+    // must follow the canvas itself — done by translating the single wrapper
+    // imperatively (same frame as Konva, no per-frame React re-render/jank).
     const pan = { offset: { x: 0, y: 0 } }
     const { getStage, firePan } = makeFakeStage(RECTS, pan)
     const { rerender } = render(<RulerOverlay getStage={getStage} {...BASE_PROPS} />)
 
+    const root = () => screen.getByTestId('ruler-root')
     const corner = () => screen.getByTestId('ruler-corner')
     const topBand = () => screen.getByTestId('ruler-top')
-    // At rest the page's 0,0 corner sits at the container origin.
+    // At rest the page's 0,0 corner sits at the container origin, no transform.
     expect(corner().style.left).toBe('0px')
+    expect(root().style.transform).toBe('')
     expect(within(topBand()).getByText('2.00 m')).toBeInTheDocument()
 
     // Gesture start: labels are masked (hidden) for the duration.
@@ -274,20 +277,22 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     // …but the tick MARKS still render (the ruler follows, just number-less).
     expect(topBand().querySelectorAll('[data-tick]').length).toBeGreaterThan(0)
 
-    // Drag 120px right: the live node offset moves, so the ruler (hugging the
-    // page) follows — its corner tracks the page frame-by-frame. (Only while
-    // panning does the overlay read the live node; see the zoom test below.)
+    // Drag 120px right: the wrapper translates by the live delta; the bands
+    // keep their base positions (no re-render), so the whole ruler moves.
     act(() => {
       pan.offset = { x: 120, y: 0 }
       firePan('dragmove')
     })
-    expect(corner().style.left).toBe('120px') // followed the pan
+    expect(root().style.transform).toBe('translate(120px, 0px)') // followed the pan
+    expect(corner().style.left).toBe('0px') // band at base; the wrapper carries it
     expect(within(topBand()).queryByText('2.00 m')).not.toBeInTheDocument() // still masked
 
     // Gesture end commits the position to the store → the prop updates; the
-    // overlay switches back to trusting the prop, and labels return.
+    // wrapper transform clears and the bands re-render at the settled offset
+    // (no double-shift), and labels return.
     act(() => firePan('dragend'))
     rerender(<RulerOverlay getStage={getStage} {...BASE_PROPS} stagePosition={{ x: 120, y: 0 }} />)
+    expect(root().style.transform).toBe('')
     expect(corner().style.left).toBe('120px')
     expect(within(topBand()).getByText('2.00 m')).toBeInTheDocument()
   })

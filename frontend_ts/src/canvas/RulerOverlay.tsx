@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useState } from 'react'
+import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type Konva from 'konva'
 import type { Point } from './types'
 import {
@@ -189,6 +189,14 @@ export function RulerOverlay({
   // the numeric labels, which would otherwise reflow every frame; they
   // reappear at their settled positions when the gesture ends.
   const [panning, setPanning] = useState(false)
+  // The single container wrapping all three bands. During an active pan we
+  // translate IT imperatively (below) so the whole ruler moves in the same
+  // frame Konva moves the canvas — a per-frame React re-render lags a frame
+  // behind and reads `getBoundingClientRect`, which is what made the ruler
+  // stutter/jump during a drag. `panStartRef` is the Stage offset captured at
+  // dragstart; the live delta from it drives the translate.
+  const rulerRef = useRef<HTMLDivElement>(null)
+  const panStartRef = useRef<Point>({ x: 0, y: 0 })
 
   // The Stage ref attaches during commit — AFTER this component's first
   // render, which therefore saw `getStage() === null` and drew nothing. A
@@ -225,13 +233,29 @@ export function RulerOverlay({
     let detachStage = () => {}
     if (stage && typeof stage.on === 'function') {
       const isPan = (event: Konva.KonvaEventObject<DragEvent>) => event.target === stage
+      const stageXY = () => ({
+        x: typeof stage.x === 'function' ? stage.x() : 0,
+        y: typeof stage.y === 'function' ? stage.y() : 0,
+      })
       stage.on('dragstart.rulers', (event) => {
-        if (isPan(event)) setPanning(true)
+        if (!isPan(event)) return
+        panStartRef.current = stageXY() // base the translate on this
+        setPanning(true) // masks labels; renders bands at the base offset
       })
       stage.on('dragmove.rulers', (event) => {
-        if (isPan(event)) forceTick()
+        if (!isPan(event)) return
+        // Move the whole ruler imperatively, in THIS frame — no React
+        // re-render, so it tracks the canvas with zero lag.
+        const { x, y } = stageXY()
+        const node = rulerRef.current
+        if (node) {
+          node.style.transform = `translate(${x - panStartRef.current.x}px, ${y - panStartRef.current.y}px)`
+        }
       })
       stage.on('dragend.rulers', (event) => {
+        // dragend commits stagePosition to the store → a re-render draws the
+        // bands at the settled offset; the layout effect clears the transform
+        // in that same commit (before paint), so there's no snap-back flash.
         if (isPan(event)) setPanning(false)
       })
       detachStage = () => stage.off('.rulers')
@@ -244,25 +268,30 @@ export function RulerOverlay({
     }
   }, [getStage, stageReady])
 
+  // Clear the imperative pan transform once the gesture ends — in a LAYOUT
+  // effect so it runs after the dragend re-render has repositioned the bands
+  // at the settled offset but BEFORE the browser paints, so the two changes
+  // land in one frame with no snap-back flash.
+  useLayoutEffect(() => {
+    if (!panning && rulerRef.current) rulerRef.current.style.transform = ''
+  }, [panning])
+
   const rects = resolveRects(getStage)
   if (!rects) return null
 
   const { stage, view } = rects
 
-  // The pan offset. During an ACTIVE drag-to-pan we read it LIVE off the Stage
-  // node (`.x()/.y()`), because the store's `stagePosition` only commits on
-  // `dragend` — so the node is the only current source mid-gesture. Otherwise
-  // we trust the `stagePosition` PROP: on a store-driven change like a
-  // wheel-zoom, `zoom` and `stagePosition` update together, but the Konva
-  // node's x/y lag the props by one commit — reading them there would pair a
-  // NEW zoom with an OLD offset and drift the ticks off the freshly-scaled
-  // grid (the zoom bug). Prop and node agree at rest, so this only matters
-  // mid-gesture. `.x` is feature-detected for non-Konva test stubs.
-  const stageNode = getStage()
-  const offsetX =
-    panning && typeof stageNode?.x === 'function' ? stageNode.x() : stagePosition.x
-  const offsetY =
-    panning && typeof stageNode?.y === 'function' ? stageNode.y() : stagePosition.y
+  // The pan offset is ALWAYS the `stagePosition` PROP:
+  // - At rest / on wheel-zoom it's the committed offset (`zoom` and
+  //   `stagePosition` move together; the Konva node's x/y lag the props by a
+  //   commit, so reading the node would drift the ticks off the scaled grid).
+  // - During a pan the prop is frozen at the dragstart offset until dragend —
+  //   which is exactly the base the bands should render at, since the live
+  //   movement is applied as an imperative transform on the wrapper (see the
+  //   dragmove handler). So the bands sit at the base and the wrapper carries
+  //   the motion, tracking the canvas with no per-frame React re-render.
+  const offsetX = stagePosition.x
+  const offsetY = stagePosition.y
 
   // The bands hug the CANVAS DOCUMENT — the white page the user sees — NOT
   // the Stage container div. The container stays `canvasWidth×canvasHeight`
@@ -311,11 +340,21 @@ export function RulerOverlay({
     canvasBottom,
   )
 
+  // Each band is `absolute` inside the single fixed wrapper below (which owns
+  // the one z-index and is what the pan transform translates) — NOT `fixed`
+  // itself, so one container controls the ruler's stacking and movement.
   const bandStyle =
-    'pointer-events-none fixed z-30 bg-background/95 text-[9px] text-muted-foreground select-none'
+    'pointer-events-none absolute bg-background/95 text-[9px] text-muted-foreground select-none'
 
   return (
-    <>
+    // One fixed, click-through wrapper: it carries the ruler's sole z-index
+    // and is translated imperatively during a pan (see the dragmove handler).
+    <div
+      ref={rulerRef}
+      data-testid="ruler-root"
+      aria-hidden="true"
+      className="pointer-events-none fixed inset-0 z-30"
+    >
       {/* Top (horizontal) ruler band — overlays the canvas's top edge */}
       <div
         data-testid="ruler-top"
@@ -399,6 +438,6 @@ export function RulerOverlay({
         className={`${bandStyle} border-r border-b`}
         style={{ left: canvasLeft, top: canvasTop, width: RULER_THICKNESS, height: RULER_THICKNESS }}
       />
-    </>
+    </div>
   )
 }
