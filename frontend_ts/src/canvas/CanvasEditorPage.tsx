@@ -28,7 +28,7 @@ import {
 } from "./clipboard";
 import type { ClipboardPayload } from "./clipboard";
 import { ContextMenu, resolveContextMenuAvailability } from "./ContextMenu";
-import { clampToBounds, snapToGrid } from "./coordinates";
+import { clampToBounds, snapToGrid, SNAP_STEP } from "./coordinates";
 import type { BoundingBox } from "./coordinates";
 import { FloorPlanNameEditor } from "./FloorPlanNameEditor";
 import { ScaleUnitControl } from "./ScaleUnitControl";
@@ -569,7 +569,7 @@ export function CanvasEditorPage() {
           (symbolPresetFor(type, preset)?.defaultSize ??
             defaultDimensionsForType(type, DEFAULT_ITEM_SIZE));
       const liveCanvasSize = useCanvasStore.getState().canvasSize;
-      const snapped = snapToGrid(point, floorPlan.grid_size);
+      const snapped = snapToGrid(point, SNAP_STEP);
       const clamped = clampToBounds(
         snapped,
         dimensions.width,
@@ -678,7 +678,7 @@ export function CanvasEditorPage() {
       if (!liveCanvasSize) return;
 
       const snapped = clampToBounds(
-        snapToGrid(point, floorPlan.grid_size),
+        snapToGrid(point, SNAP_STEP),
         0,
         0,
         liveCanvasSize.width,
@@ -956,7 +956,7 @@ export function CanvasEditorPage() {
             seed. */}
         <Sidebar
           getStage={getStage}
-          gridSize={floorPlan.grid_size}
+          gridSize={SNAP_STEP}
           canvasWidth={canvasSize.width}
           canvasHeight={canvasSize.height}
           onDrop={handleDrop}

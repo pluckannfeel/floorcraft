@@ -44,6 +44,16 @@ export function containerToStagePoint(containerPoint: Point, zoom: number, stage
   }
 }
 
+/**
+ * The editor SNAP step in model px — deliberately DECOUPLED from the plan's
+ * `grid_size` (which drives the visible grid and the ruler's real-world
+ * scale). Snapping objects to a coarser step than the fine ruler grid makes
+ * dragging feel free: a shape moves smoothly within a cell and only clicks
+ * into place at the coarser boundary, instead of magnetizing to every small
+ * grid line. Tune here to taste (larger = freer / chunkier).
+ */
+export const SNAP_STEP = 40
+
 /** Rounds a point's coordinates to the nearest multiple of `gridSize`. */
 export function snapToGrid(point: Point, gridSize: number): Point {
   if (gridSize <= 0) return point

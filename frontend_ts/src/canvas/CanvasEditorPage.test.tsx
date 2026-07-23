@@ -734,7 +734,8 @@ describe('variant drop and image-registry reset (U6, object-visuals)', () => {
     const item = state.items[0]
     expect(item).toMatchObject({
       type: 'chairs',
-      x: 100,
+      // Snapped to the coarser 40px free-move step (SNAP_STEP): 100→120, 120→120.
+      x: 120,
       y: 120,
       width: 40,
       height: 20,
@@ -758,7 +759,8 @@ describe('variant drop and image-registry reset (U6, object-visuals)', () => {
 
     const state = useCanvasStore.getState()
     expect(state.items).toHaveLength(1)
-    expect(state.items[0]).toMatchObject({ type: 'tables', x: 60, y: 80, width: 40, height: 40 })
+    // Snapped to the 40px free-move step: 60→80, 80→80.
+    expect(state.items[0]).toMatchObject({ type: 'tables', x: 80, y: 80, width: 40, height: 40 })
     expect(state.items[0].properties).toEqual({})
     expect(state.selectedItemIds).toEqual([state.items[0].id])
     expect(state.activeTool).toBe('select')
@@ -929,15 +931,16 @@ describe('armed placement: click-to-place (object-visuals follow-up)', () => {
       | ((point: { x: number; y: number }) => void)
       | undefined
     expect(onPlaceAt).toBeTypeOf('function')
-    // A raw (unsnapped) stage point: the page snaps to the 20px grid.
+    // A raw (unsnapped) stage point: the page snaps to the 40px free-move step.
     act(() => onPlaceAt!({ x: 105, y: 95 }))
 
     const state = useCanvasStore.getState()
     expect(state.items).toHaveLength(1)
     expect(state.items[0]).toMatchObject({
       type: 'chairs',
-      x: 100,
-      y: 100,
+      // 105→120, 95→80 on the 40px step.
+      x: 120,
+      y: 80,
       width: 40,
       height: 20,
     })
