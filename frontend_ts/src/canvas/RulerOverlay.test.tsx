@@ -149,10 +149,10 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     expect(within(screen.getByTestId('ruler-top')).getByText('2.00 m')).toBeInTheDocument()
   })
 
-  it('the bands HUG the canvas edges, not the workspace viewport edges', () => {
-    // Canvas (stage) inset inside a larger viewport — the real layout: the
-    // white canvas floats in the padded, scrollable workspace. The bands
-    // must sit at the canvas corner (100,80), NOT the viewport corner (0,0).
+  it('sits in the MARGIN just outside the canvas edges (not over the page)', () => {
+    // Canvas (stage) inset inside a larger viewport — the white canvas floats
+    // in the padded workspace at corner (100,80). The bands sit just OUTSIDE
+    // that corner (one 22px thickness up/left), so they never cover the page.
     const { getStage } = makeFakeStage({
       stage: { left: 100, top: 80, width: 400, height: 300 },
       view: { left: 0, top: 0, width: 800, height: 600 },
@@ -160,16 +160,16 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     render(<RulerOverlay getStage={getStage} {...BASE_PROPS} />)
 
     const corner = screen.getByTestId('ruler-corner')
-    expect(corner.style.left).toBe('100px') // canvas left edge, not viewport 0
-    expect(corner.style.top).toBe('80px') // canvas top edge, not viewport 0
+    expect(corner.style.left).toBe('78px') // canvasLeft(100) - thickness(22)
+    expect(corner.style.top).toBe('58px') // canvasTop(80) - thickness(22)
 
     const top = screen.getByTestId('ruler-top')
-    expect(top.style.top).toBe('80px') // rides the canvas top edge
-    expect(top.style.left).toBe('122px') // canvasLeft + corner thickness (22)
+    expect(top.style.top).toBe('58px') // JUST ABOVE the canvas top edge
+    expect(top.style.left).toBe('100px') // starts at the canvas left edge
 
     const left = screen.getByTestId('ruler-left')
-    expect(left.style.left).toBe('100px') // rides the canvas left edge
-    expect(left.style.top).toBe('102px') // canvasTop + corner thickness (22)
+    expect(left.style.left).toBe('78px') // JUST LEFT of the canvas left edge
+    expect(left.style.top).toBe('80px') // starts at the canvas top edge
   })
 
   it('hugs the DOCUMENT (page) rect tracking stagePosition, not the Stage container', () => {
@@ -191,13 +191,13 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     )
 
     const corner = screen.getByTestId('ruler-corner')
-    expect(corner.style.left).toBe('150px') // container(0) + pan(150) = page corner
-    expect(corner.style.top).toBe('100px')
+    expect(corner.style.left).toBe('128px') // page corner 150 - thickness 22
+    expect(corner.style.top).toBe('78px') // page corner 100 - thickness 22
 
-    // The band ends at the page's own right edge (150 + 400*zoom = 550), not
-    // the container's far edge: width = docRight(550) - topStart(150+22).
+    // The top band spans the page's full width: canvasLeft(150) → docRight
+    // (150 + 400*zoom = 550) = 400.
     const top = screen.getByTestId('ruler-top')
-    expect(top.style.width).toBe('378px')
+    expect(top.style.width).toBe('400px')
   })
 
   it('stops at the Stage CONTAINER edge when a dragged canvas spills past it', () => {
@@ -220,25 +220,28 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
       />,
     )
 
-    // canvasLeft = docLeft 150; topStart = 172; canvasRight = min(container
-    // 400, doc 550) = 400 → width 228, clipped at the container (not 378).
+    // canvasLeft = docLeft 150; canvasRight = min(container 400, doc 550) =
+    // 400 → width 250, clipped at the container edge (not the document's 550).
     const top = screen.getByTestId('ruler-top')
-    expect(top.style.width).toBe('228px')
+    expect(top.style.width).toBe('250px')
   })
 
-  it('clamps a band to the viewport when the canvas is scrolled past the top-left', () => {
+  it('keeps the visible-canvas edge clamped to the viewport when scrolled past the top-left', () => {
     // Canvas origin scrolled ABOVE/LEFT of the viewport (negative rect): the
-    // bands stick to the viewport edge (0,0) so they never disappear, even
-    // though the canvas corner is off-screen.
+    // visible-canvas edge clamps to the viewport (0,0), and the ruler sits one
+    // thickness outside it — its tick marks land right at the viewport edge.
     const { getStage } = makeFakeStage({
       stage: { left: -300, top: -200, width: 4000, height: 3000 },
       view: { left: 0, top: 0, width: 800, height: 600 },
     })
     render(<RulerOverlay getStage={getStage} {...BASE_PROPS} />)
 
+    // canvasLeft/Top clamp to the viewport (0,0); the corner sits 22px outside.
     const corner = screen.getByTestId('ruler-corner')
-    expect(corner.style.left).toBe('0px') // clamped to viewport, not -300
-    expect(corner.style.top).toBe('0px') // clamped to viewport, not -200
+    expect(corner.style.left).toBe('-22px')
+    expect(corner.style.top).toBe('-22px')
+    // The top band's bottom edge (its tick marks) lands at the viewport top.
+    expect(screen.getByTestId('ruler-top').style.top).toBe('-22px')
   })
 
   it('AE2: switching the unit prop relabels the ticks to feet-inches', () => {
@@ -292,8 +295,9 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     const root = () => screen.getByTestId('ruler-root')
     const corner = () => screen.getByTestId('ruler-corner')
     const topBand = () => screen.getByTestId('ruler-top')
-    // At rest the page's 0,0 corner sits at the container origin, no transform.
-    expect(corner().style.left).toBe('0px')
+    // At rest the corner sits one thickness outside the page's 0,0 (screen
+    // -22), no transform.
+    expect(corner().style.left).toBe('-22px')
     expect(root().style.transform).toBe('')
     expect(within(topBand()).getByText('2.00 m')).toBeInTheDocument()
 
@@ -310,7 +314,7 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
       firePan('dragmove')
     })
     expect(root().style.transform).toBe('translate(120px, 0px)') // followed the pan
-    expect(corner().style.left).toBe('0px') // band at base; the wrapper carries it
+    expect(corner().style.left).toBe('-22px') // band at base; the wrapper carries it
     expect(within(topBand()).queryByText('2.00 m')).not.toBeInTheDocument() // still masked
 
     // Gesture end commits the position to the store → the prop updates; the
@@ -319,7 +323,7 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     act(() => firePan('dragend'))
     rerender(<RulerOverlay getStage={getStage} {...BASE_PROPS} stagePosition={{ x: 120, y: 0 }} />)
     expect(root().style.transform).toBe('')
-    expect(corner().style.left).toBe('120px')
+    expect(corner().style.left).toBe('98px') // settled page corner 120, minus 22
     expect(within(topBand()).getByText('2.00 m')).toBeInTheDocument()
   })
 
@@ -334,8 +338,8 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     render(<RulerOverlay getStage={getStage} {...BASE_PROPS} stagePosition={{ x: 40, y: 30 }} />)
 
     const corner = screen.getByTestId('ruler-corner')
-    expect(corner.style.left).toBe('40px') // prop offset, not the stale node 999
-    expect(corner.style.top).toBe('30px')
+    expect(corner.style.left).toBe('18px') // page corner (prop 40) - thickness 22
+    expect(corner.style.top).toBe('8px') // page corner (prop 30) - thickness 22
   })
 
   it('renders nothing when the stage is unavailable (pre-mount / jsdom default)', () => {

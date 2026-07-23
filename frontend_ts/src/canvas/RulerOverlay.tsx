@@ -319,11 +319,10 @@ export function RulerOverlay({
   const canvasRight = Math.min(viewRight, containerRight, docRight)
   const canvasBottom = Math.min(viewBottom, containerBottom, docBottom)
 
-  // Drawable spans begin one thickness past the corner so the top and left
-  // bands don't overlap where they meet.
-  const topStart = canvasLeft + RULER_THICKNESS
-  const leftStart = canvasTop + RULER_THICKNESS
-
+  // The bands sit in the MARGIN just outside the canvas — the top band above
+  // the top edge, the left band left of the left edge — so they never cover
+  // the canvas content (an on-canvas band read as a dark border blocking the
+  // page). The tick window is the full visible-canvas span.
   const horizontal = buildAxisTicks(
     zoom,
     gridSize,
@@ -331,7 +330,7 @@ export function RulerOverlay({
     unit,
     stage.left,
     offsetX,
-    topStart,
+    canvasLeft,
     canvasRight,
   )
   const vertical = buildAxisTicks(
@@ -341,7 +340,7 @@ export function RulerOverlay({
     unit,
     stage.top,
     offsetY,
-    leftStart,
+    canvasTop,
     canvasBottom,
   )
 
@@ -360,15 +359,15 @@ export function RulerOverlay({
       aria-hidden="true"
       className="pointer-events-none fixed inset-0 z-30"
     >
-      {/* Top (horizontal) ruler band — overlays the canvas's top edge */}
+      {/* Top (horizontal) ruler band — sits just ABOVE the canvas top edge */}
       <div
         data-testid="ruler-top"
         aria-hidden="true"
         className={`${bandStyle} border-b`}
         style={{
-          left: topStart,
-          top: canvasTop,
-          width: Math.max(0, canvasRight - topStart),
+          left: canvasLeft,
+          top: canvasTop - RULER_THICKNESS,
+          width: Math.max(0, canvasRight - canvasLeft),
           height: RULER_THICKNESS,
         }}
       >
@@ -382,7 +381,7 @@ export function RulerOverlay({
                 : 'absolute bottom-0 border-l border-border/50'
             }
             style={{
-              left: tick.screen - topStart,
+              left: tick.screen - canvasLeft,
               height: tick.label != null ? RULER_THICKNESS : RULER_THICKNESS / 2,
             }}
           >
@@ -393,16 +392,16 @@ export function RulerOverlay({
         ))}
       </div>
 
-      {/* Left (vertical) ruler band — overlays the canvas's left edge */}
+      {/* Left (vertical) ruler band — sits just LEFT of the canvas left edge */}
       <div
         data-testid="ruler-left"
         aria-hidden="true"
         className={`${bandStyle} border-r`}
         style={{
-          left: canvasLeft,
-          top: leftStart,
+          left: canvasLeft - RULER_THICKNESS,
+          top: canvasTop,
           width: RULER_THICKNESS,
-          height: Math.max(0, canvasBottom - leftStart),
+          height: Math.max(0, canvasBottom - canvasTop),
         }}
       >
         {vertical.map((tick, index) => (
@@ -415,7 +414,7 @@ export function RulerOverlay({
                 : 'absolute right-0 border-t border-border/50'
             }
             style={{
-              top: tick.screen - leftStart,
+              top: tick.screen - canvasTop,
               width: tick.label != null ? RULER_THICKNESS : RULER_THICKNESS / 2,
             }}
           >
@@ -436,12 +435,18 @@ export function RulerOverlay({
         ))}
       </div>
 
-      {/* Corner box where the two rulers meet — the canvas's top-left corner */}
+      {/* Corner box where the two rulers meet — just off the canvas's
+          top-left corner (both bands sit in the margin, not over the page) */}
       <div
         data-testid="ruler-corner"
         aria-hidden="true"
         className={`${bandStyle} border-r border-b`}
-        style={{ left: canvasLeft, top: canvasTop, width: RULER_THICKNESS, height: RULER_THICKNESS }}
+        style={{
+          left: canvasLeft - RULER_THICKNESS,
+          top: canvasTop - RULER_THICKNESS,
+          width: RULER_THICKNESS,
+          height: RULER_THICKNESS,
+        }}
       />
     </div>
   )
