@@ -293,26 +293,31 @@ export function RulerOverlay({
   const offsetX = stagePosition.x
   const offsetY = stagePosition.y
 
-  // The bands hug the CANVAS DOCUMENT — the white page the user sees — NOT
-  // the Stage container div. The container stays `canvasWidth×canvasHeight`
-  // CSS px while the content scales by `zoom` and pans by `stagePosition`
-  // INSIDE it, so the document is a sub-rectangle of the container whenever
-  // zoomed or panned; hugging the container drifted the ruler off the page
-  // (the review photo). The document's on-screen rect is model
-  // `(0,0)→(canvasWidth,canvasHeight)` through the SAME origin+offset+zoom
-  // transform the ticks use, so `docLeft` is exactly the model-0 tick — the
-  // ruler's `0,0` lands on the page's own corner. Clamp each edge to the
-  // viewport so a band never leaves the visible area on scroll/pan.
+  // The bands hug the VISIBLE canvas. Three rects bound it:
+  // - The DOCUMENT: model `(0,0)→(canvasWidth,canvasHeight)` through the same
+  //   origin+offset+zoom transform the ticks use, so `docLeft` is the model-0
+  //   tick and the ruler's `0,0` lands on the page corner. This is where the
+  //   ticks live and it MOVES as the canvas is panned/dragged.
+  // - The Stage CONTAINER (`stage.*`): the fixed window Konva clips the drawn
+  //   content to. When the canvas is dragged, the document spills past the
+  //   container edge — but that spill is clipped away (not visible canvas,
+  //   just workspace gutter), so the ruler must STOP at the container edge,
+  //   not follow the document into the gutter (the drag-overhang bug).
+  // - The WORKSPACE viewport (`view.*`): so a band never leaves the on-screen
+  //   scrollable area either.
+  // Visible canvas = document ∩ container ∩ viewport.
   const viewRight = view.left + view.width
   const viewBottom = view.top + view.height
+  const containerRight = stage.left + stage.width
+  const containerBottom = stage.top + stage.height
   const docLeft = stage.left + offsetX
   const docTop = stage.top + offsetY
   const docRight = docLeft + canvasWidth * zoom
   const docBottom = docTop + canvasHeight * zoom
-  const canvasLeft = Math.max(view.left, docLeft)
-  const canvasTop = Math.max(view.top, docTop)
-  const canvasRight = Math.min(viewRight, docRight)
-  const canvasBottom = Math.min(viewBottom, docBottom)
+  const canvasLeft = Math.max(view.left, stage.left, docLeft)
+  const canvasTop = Math.max(view.top, stage.top, docTop)
+  const canvasRight = Math.min(viewRight, containerRight, docRight)
+  const canvasBottom = Math.min(viewBottom, containerBottom, docBottom)
 
   // Drawable spans begin one thickness past the corner so the top and left
   // bands don't overlap where they meet.

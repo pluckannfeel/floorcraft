@@ -200,6 +200,32 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     expect(top.style.width).toBe('378px')
   })
 
+  it('stops at the Stage CONTAINER edge when a dragged canvas spills past it', () => {
+    // The canvas is dragged +150 right, but the Stage container is only
+    // 400 wide — the document now runs screen 150→550 while Konva clips the
+    // drawn canvas at the container edge (400). The ruler must STOP at 400
+    // (the visible canvas edge), not follow the document into the gutter at
+    // 550. This is the drag-overhang bug from the review photo.
+    const { getStage } = makeFakeStage({
+      stage: { left: 0, top: 0, width: 400, height: 300 },
+      view: { left: 0, top: 0, width: 800, height: 600 },
+    })
+    render(
+      <RulerOverlay
+        getStage={getStage}
+        {...BASE_PROPS}
+        stagePosition={{ x: 150, y: 0 }}
+        canvasWidth={400}
+        canvasHeight={300}
+      />,
+    )
+
+    // canvasLeft = docLeft 150; topStart = 172; canvasRight = min(container
+    // 400, doc 550) = 400 → width 228, clipped at the container (not 378).
+    const top = screen.getByTestId('ruler-top')
+    expect(top.style.width).toBe('228px')
+  })
+
   it('clamps a band to the viewport when the canvas is scrolled past the top-left', () => {
     // Canvas origin scrolled ABOVE/LEFT of the viewport (negative rect): the
     // bands stick to the viewport edge (0,0) so they never disappear, even
