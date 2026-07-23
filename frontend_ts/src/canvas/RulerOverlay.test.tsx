@@ -260,7 +260,7 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     // overlay must read the live offset off the Stage node and follow it.
     const pan = { offset: { x: 0, y: 0 } }
     const { getStage, firePan } = makeFakeStage(RECTS, pan)
-    render(<RulerOverlay getStage={getStage} {...BASE_PROPS} />)
+    const { rerender } = render(<RulerOverlay getStage={getStage} {...BASE_PROPS} />)
 
     const corner = () => screen.getByTestId('ruler-corner')
     const topBand = () => screen.getByTestId('ruler-top')
@@ -275,7 +275,8 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     expect(topBand().querySelectorAll('[data-tick]').length).toBeGreaterThan(0)
 
     // Drag 120px right: the live node offset moves, so the ruler (hugging the
-    // page) follows — its corner tracks the page frame-by-frame.
+    // page) follows — its corner tracks the page frame-by-frame. (Only while
+    // panning does the overlay read the live node; see the zoom test below.)
     act(() => {
       pan.offset = { x: 120, y: 0 }
       firePan('dragmove')
@@ -283,10 +284,27 @@ describe('RulerOverlay (DOM overlay, U3)', () => {
     expect(corner().style.left).toBe('120px') // followed the pan
     expect(within(topBand()).queryByText('2.00 m')).not.toBeInTheDocument() // still masked
 
-    // Gesture end: the ruler stays at the panned position and labels return.
+    // Gesture end commits the position to the store → the prop updates; the
+    // overlay switches back to trusting the prop, and labels return.
     act(() => firePan('dragend'))
+    rerender(<RulerOverlay getStage={getStage} {...BASE_PROPS} stagePosition={{ x: 120, y: 0 }} />)
     expect(corner().style.left).toBe('120px')
     expect(within(topBand()).getByText('2.00 m')).toBeInTheDocument()
+  })
+
+  it('trusts the stagePosition PROP when NOT panning, so a wheel-zoom stays aligned', () => {
+    // Regression: a wheel-zoom commits new zoom+position to the store together,
+    // but the Konva node's x/y lag the props by one commit. If the overlay read
+    // the node here it would pair the NEW zoom with an OLD offset and drift the
+    // ticks off the grid. The stale node value (999) must be IGNORED — the prop
+    // (40,30) wins because we're not panning.
+    const pan = { offset: { x: 999, y: 999 } } // stale, pre-commit node value
+    const { getStage } = makeFakeStage(RECTS, pan)
+    render(<RulerOverlay getStage={getStage} {...BASE_PROPS} stagePosition={{ x: 40, y: 30 }} />)
+
+    const corner = screen.getByTestId('ruler-corner')
+    expect(corner.style.left).toBe('40px') // prop offset, not the stale node 999
+    expect(corner.style.top).toBe('30px')
   })
 
   it('renders nothing when the stage is unavailable (pre-mount / jsdom default)', () => {

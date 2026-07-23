@@ -249,14 +249,20 @@ export function RulerOverlay({
 
   const { stage, view } = rects
 
-  // The pan offset: read LIVE off the Stage node (`.x()/.y()`) rather than the
-  // `stagePosition` prop, so ticks track a drag-to-pan frame-by-frame — the
-  // prop only commits on `dragend`. At rest the node equals the prop; the
-  // `stagePosition` prop still triggers the re-render that reads it. Falls
-  // back to the prop for non-Konva test stubs without `.x()`.
+  // The pan offset. During an ACTIVE drag-to-pan we read it LIVE off the Stage
+  // node (`.x()/.y()`), because the store's `stagePosition` only commits on
+  // `dragend` — so the node is the only current source mid-gesture. Otherwise
+  // we trust the `stagePosition` PROP: on a store-driven change like a
+  // wheel-zoom, `zoom` and `stagePosition` update together, but the Konva
+  // node's x/y lag the props by one commit — reading them there would pair a
+  // NEW zoom with an OLD offset and drift the ticks off the freshly-scaled
+  // grid (the zoom bug). Prop and node agree at rest, so this only matters
+  // mid-gesture. `.x` is feature-detected for non-Konva test stubs.
   const stageNode = getStage()
-  const offsetX = typeof stageNode?.x === 'function' ? stageNode.x() : stagePosition.x
-  const offsetY = typeof stageNode?.y === 'function' ? stageNode.y() : stagePosition.y
+  const offsetX =
+    panning && typeof stageNode?.x === 'function' ? stageNode.x() : stagePosition.x
+  const offsetY =
+    panning && typeof stageNode?.y === 'function' ? stageNode.y() : stagePosition.y
 
   // The bands hug the CANVAS DOCUMENT — the white page the user sees — NOT
   // the Stage container div. The container stays `canvasWidth×canvasHeight`
