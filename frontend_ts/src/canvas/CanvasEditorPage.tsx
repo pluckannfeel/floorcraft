@@ -978,6 +978,17 @@ export function CanvasEditorPage() {
             className="relative w-fit rounded-sm shadow-md ring-1 ring-border"
             style={{ transform: `translate(${canvasOffset.x}px, ${canvasOffset.y}px)` }}
           >
+          {/* Edge rulers live INSIDE the canvas box, so they travel,
+              scale and clip with the page instead of chasing it as a
+              floating overlay. */}
+          <RulerOverlay
+            zoom={zoom}
+            gridSize={floorPlan.grid_size}
+            canvasWidth={canvasSize.width}
+            canvasHeight={canvasSize.height}
+            realSizePerGridSquare={floorPlan.real_size_per_grid_square}
+            unit={floorPlan.unit}
+          />
           <CanvasStage
             ref={stageRef}
             width={canvasSize.width}
@@ -1025,20 +1036,6 @@ export function CanvasEditorPage() {
         <PropertyPanel />
       </div>
 
-      {/* U3 (canvas-rulers-scale): top + left edge rulers — a fixed-position
-          DOM overlay (like TextEditOverlay) reading the plan's scale/unit
-          off the query (flowed like grid_size) and the live zoom/pan from
-          the store. Renders nothing until the stage container exists. */}
-      <RulerOverlay
-        getStage={getStage}
-        zoom={zoom}
-        stagePosition={stagePosition}
-        gridSize={floorPlan.grid_size}
-        canvasWidth={canvasSize.width}
-        canvasHeight={canvasSize.height}
-        realSizePerGridSquare={floorPlan.real_size_per_grid_square}
-        unit={floorPlan.unit}
-      />
 
       {/* U7: the DOM text-editing overlay (fixed-positioned over the
           canvas, like the context menu below). Keyed per editing session so
