@@ -6,7 +6,6 @@ import type { GuideLines } from './AlignmentGuides'
 import {
   clampGroupDragDelta,
   clientToContainerPoint,
-  computePinchZoom,
   clampZoom,
   containerToStagePoint,
   isEditableTarget,
@@ -20,9 +19,21 @@ import {
   unionBoundingBoxes,
 } from './coordinates'
 
+/** Screen-space point for a drag event. Middle-mouse pan calls
+ * `stage.startDrag()` with no source event (Konva.dragButtons excludes it),
+ * so `event.evt` is undefined — fall back to the stage's pointer position
+ * mapped back into client coords. */
+function dragClientPoint(stage: Konva.Stage, evt: MouseEvent | undefined): Point | null {
+  if (evt) return { x: evt.clientX, y: evt.clientY }
+  const p = stage.getPointerPosition()
+  if (!p) return null
+  const rect = stage.container().getBoundingClientRect()
+  return { x: rect.left + p.x, y: rect.top + p.y }
+}
+
 /** Per wheel-tick zoom factor (the old `computeWheelZoom` default). */
 const WHEEL_ZOOM_STEP = 1.05
-import type { BoundingBox, ZoomPanState } from './coordinates'
+import type { BoundingBox } from './coordinates'
 import { CURSOR_CROSSHAIR, CURSOR_GRAB, CURSOR_GRABBING, CURSOR_TEXT } from './cursors'
 import { beginCanvasGesture, endCanvasGesture } from './gesture'
 import { buildClipboardPayload } from './clipboard'
@@ -1522,10 +1533,11 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // frame, so a container-relative delta feeds back on itself (the box
         // would trail the cursor at half speed).
         const start = panStartRef.current
-        if (!start) return
+        const client = dragClientPoint(stage, event.evt as MouseEvent | undefined)
+        if (!start || !client) return
         const next = {
-          x: start.offset.x + (event.evt.clientX - start.client.x),
-          y: start.offset.y + (event.evt.clientY - start.client.y),
+          x: start.offset.x + (client.x - start.client.x),
+          y: start.offset.y + (client.y - start.client.y),
         }
         panLiveRef.current = next
         onPanDrag?.(next)
@@ -1537,10 +1549,8 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // bubbled ones.
         const stage = event.target.getStage()
         if (!stage || event.target !== stage) return
-        panStartRef.current = {
-          client: { x: event.evt.clientX, y: event.evt.clientY },
-          offset: canvasOffset,
-        }
+        const startClient = dragClientPoint(stage, event.evt as MouseEvent | undefined)
+        panStartRef.current = startClient ? { client: startClient, offset: canvasOffset } : null
         setPanDragging(true)
       }}
       onDragEnd={(event) => {
@@ -1612,9 +1622,15 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // would fight over its x/y.
         if (stage.isDragging()) stage.stopDrag()
 
-        const current: ZoomPanState = { zoom, position: stagePosition }
-        const next = computePinchZoom(current, center, distance / previous.lastDistance)
-        onZoomChange?.(next.zoom, next.position)
+        // Box model, same as the wheel handler: slide the BOX so the point
+        // between the fingers stays put. (Building a CONTENT position here
+        // dropped the accumulated pan, teleporting a panned page.)
+        const newZoom = clampZoom(zoom * (distance / previous.lastDistance))
+        const k = 1 - newZoom / zoom
+        onZoomChange?.(newZoom, {
+          x: canvasOffset.x + center.x * k,
+          y: canvasOffset.y + center.y * k,
+        })
       }}
       onTouchEnd={(event) => {
         if (event.evt.touches.length < 2) pinchRef.current = null
