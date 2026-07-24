@@ -10,6 +10,32 @@ import type { CanvasObject, CatalogType, LineType, Point, ShapeType, TextType } 
 const TOOLBAR_ZOOM_STEP = 1.2
 
 /**
+ * Toolbar zoom keeps the PAGE's own center fixed on screen, rather than only
+ * changing `zoom` (which lets the box grow/shrink toward its top-left corner
+ * and drift off-workspace — a CSS transform's negative overflow isn't
+ * scrollable, so the page could strand out of reach). Anchoring at the page
+ * center needs no viewport knowledge: `pageCenter = canvasOffset + size/2 *
+ * zoom` must stay put, so `newOffset = canvasOffset + size/2 * (zoom -
+ * newZoom)`. No-ops safely before the canvas is seeded.
+ */
+function zoomAroundPageCenter(
+  state: { zoom: number; canvasOffset: Point; canvasSize: CanvasSize | null },
+  rawNewZoom: number,
+): { zoom: number; canvasOffset: Point } {
+  const newZoom = clampZoom(rawNewZoom)
+  const size = state.canvasSize
+  if (!size) return { zoom: newZoom, canvasOffset: state.canvasOffset }
+  const delta = (state.zoom - newZoom) / 2
+  return {
+    zoom: newZoom,
+    canvasOffset: {
+      x: state.canvasOffset.x + size.width * delta,
+      y: state.canvasOffset.y + size.height * delta,
+    },
+  }
+}
+
+/**
  * Active canvas tool. `'pan'` is the DEFAULT/idle mode: no tool is engaged,
  * so a plain drag navigates the canvas (the same gesture Space+drag and
  * middle-mouse give from any mode) and nothing on the canvas responds to
@@ -992,11 +1018,9 @@ export const useCanvasStore = create<CanvasState>()(
 
       setCanvasOffset: (offset) => set({ canvasOffset: offset }),
 
-      zoomIn: () =>
-        set((state) => ({ zoom: clampZoom(state.zoom * TOOLBAR_ZOOM_STEP) })),
+      zoomIn: () => set((state) => zoomAroundPageCenter(state, state.zoom * TOOLBAR_ZOOM_STEP)),
 
-      zoomOut: () =>
-        set((state) => ({ zoom: clampZoom(state.zoom / TOOLBAR_ZOOM_STEP) })),
+      zoomOut: () => set((state) => zoomAroundPageCenter(state, state.zoom / TOOLBAR_ZOOM_STEP)),
 
       resetZoom: () => set({ zoom: 1, stagePosition: { x: 0, y: 0 }, canvasOffset: { x: 0, y: 0 } }),
     }),
