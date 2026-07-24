@@ -9,19 +9,17 @@ import {
 /**
  * The canvas's edge rulers (canvas-rulers-scale R5-R8, AE1/AE4).
  *
- * Rendered INSIDE the canvas box wrapper (which is `relative`), positioned
- * against the box itself. That's the whole trick: the box IS the page, and
- * the page's content fills it at `zoom`, so a model coordinate `M` simply
- * sits at `M * zoom` box-pixels in. There is no screen-coordinate math, no
- * `getBoundingClientRect`, no scroll/pan listeners and no z-index layer —
- * the ruler is part of the box, so it travels, scales and clips with the
- * canvas for free.
+ * Rendered in a workspace-clipped DOM layer that CanvasEditorPage pins to the
+ * page origin (`stagePosition`) and translates each pan frame. So everything
+ * here is measured from that origin (0,0 = the page's top-left): a model
+ * coordinate `M` sits at `M * zoom` px in. No screen-coordinate math, no
+ * `getBoundingClientRect`, no listeners — just arithmetic against the page.
  *
  * (It used to be a fixed-position overlay that re-derived screen rects every
- * frame and chased the canvas around. That approach caused every ruler bug
- * on this branch — overhang past the page, covering the page, jumpy panning,
- * and floating over the toolbar/sidebar. Being a child of the box makes all
- * of those structurally impossible.)
+ * frame and chased the canvas around. That approach caused every ruler bug on
+ * this branch — overhang past the page, covering the page, jumpy panning, and
+ * floating over the toolbar/sidebar. Positioning against the page origin, and
+ * being clipped by the workspace, makes all of those structurally impossible.)
  *
  * CANONICAL METERS: `realSizePerGridSquare` is meters (U1); `modelToReal`
  * returns meters and `formatMeasurement` renders the display `unit`, so
@@ -93,8 +91,6 @@ export interface RulerOverlayProps {
   /** The plan's scale in CANONICAL METERS per grid square (U1). */
   realSizePerGridSquare: number
   unit: Unit
-  /** Hide the numbers mid-gesture (they'd reflow every frame); marks stay. */
-  quiet?: boolean
 }
 
 export function RulerOverlay({
@@ -104,7 +100,6 @@ export function RulerOverlay({
   canvasHeight,
   realSizePerGridSquare,
   unit,
-  quiet = false,
 }: RulerOverlayProps) {
   const horizontal = buildBoxTicks(canvasWidth, zoom, gridSize, realSizePerGridSquare, unit)
   const vertical = buildBoxTicks(canvasHeight, zoom, gridSize, realSizePerGridSquare, unit)
@@ -139,7 +134,7 @@ export function RulerOverlay({
               height: tick.label != null ? RULER_THICKNESS : RULER_THICKNESS / 2,
             }}
           >
-            {tick.label != null && !quiet && (
+            {tick.label != null && (
               <span className="absolute top-0 left-0.5 whitespace-nowrap">{tick.label}</span>
             )}
           </div>
@@ -167,7 +162,7 @@ export function RulerOverlay({
               width: tick.label != null ? RULER_THICKNESS : RULER_THICKNESS / 2,
             }}
           >
-            {tick.label != null && !quiet && (
+            {tick.label != null && (
               // Vertical text via writing-mode (a rotate transform pushed the
               // glyphs out past the band's edge).
               <span

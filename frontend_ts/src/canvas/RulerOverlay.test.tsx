@@ -113,13 +113,4 @@ describe('RulerOverlay (box-relative DOM)', () => {
     expect(within(top).getAllByText(/^\d+' \d+"$/).length).toBeGreaterThan(0)
   })
 
-  it('quiet mode hides the numbers but keeps the tick marks (mid-gesture)', () => {
-    const { rerender } = render(<RulerOverlay {...BASE_PROPS} />)
-    const top = () => screen.getByTestId('ruler-top')
-    expect(within(top()).getByText('2.00 m')).toBeInTheDocument()
-
-    rerender(<RulerOverlay {...BASE_PROPS} quiet />)
-    expect(within(top()).queryByText('2.00 m')).not.toBeInTheDocument()
-    expect(top().querySelectorAll('[data-tick]').length).toBeGreaterThan(0)
-  })
 })
