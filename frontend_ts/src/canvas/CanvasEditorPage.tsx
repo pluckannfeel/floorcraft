@@ -87,6 +87,9 @@ function isNotFoundError(error: unknown): boolean {
 export function CanvasEditorPage() {
   const { logout } = useAuth();
   const stageRef = useRef<Konva.Stage | null>(null);
+  // The canvas box element — translated imperatively each pan frame so the
+  // sheet tracks the cursor without a React round-trip.
+  const canvasBoxRef = useRef<HTMLDivElement>(null);
 
   // U5: the editor is route-driven. A malformed (`NaN` after `Number(...)`)
   // or non-positive param can never match a backend row, so it's treated
@@ -133,6 +136,11 @@ export function CanvasEditorPage() {
   const canvasSize = useCanvasStore((state) => state.canvasSize);
   const zoom = useCanvasStore((state) => state.zoom);
   const stagePosition = useCanvasStore((state) => state.stagePosition);
+  // Where the canvas BOX sits in the gray workspace (Photoshop model: the
+  // page is a sheet you slide around). Drag/zoom move THIS; the Stage's own
+  // content stays pinned at its origin and always fills the box.
+  const canvasOffset = useCanvasStore((state) => state.canvasOffset);
+  const setCanvasOffset = useCanvasStore((state) => state.setCanvasOffset);
   const dirty = useCanvasStore((state) => state.dirty);
   const setItems = useCanvasStore((state) => state.setItems);
   const applyCrop = useCanvasStore((state) => state.applyCrop);
@@ -169,7 +177,6 @@ export function CanvasEditorPage() {
   const setZoomAndPosition = useCanvasStore(
     (state) => state.setZoomAndPosition,
   );
-  const setStagePosition = useCanvasStore((state) => state.setStagePosition);
 
   // Airtight in-flight guard (a render-closure `isSaving` isn't: two rapid
   // Ctrl+S presses can both land before the re-registered listener sees the
@@ -966,7 +973,11 @@ export function CanvasEditorPage() {
             `w-fit` keeps the ring/shadow hugging the stage rather than the
             scroll area. */}
         <div data-canvas-workspace className="flex-1 overflow-auto bg-muted p-6">
-          <div className="w-fit rounded-sm shadow-md ring-1 ring-border">
+          <div
+            ref={canvasBoxRef}
+            className="relative w-fit rounded-sm shadow-md ring-1 ring-border"
+            style={{ transform: `translate(${canvasOffset.x}px, ${canvasOffset.y}px)` }}
+          >
           <CanvasStage
             ref={stageRef}
             width={canvasSize.width}
@@ -987,7 +998,13 @@ export function CanvasEditorPage() {
             zoom={zoom}
             stagePosition={stagePosition}
             onZoomChange={setZoomAndPosition}
-            onPanEnd={setStagePosition}
+            canvasOffset={canvasOffset}
+            onPanDrag={(offset) => {
+              // Live frame: move the sheet imperatively (no re-render).
+              const box = canvasBoxRef.current;
+              if (box) box.style.transform = `translate(${offset.x}px, ${offset.y}px)`;
+            }}
+            onPanEnd={setCanvasOffset}
             onOpenContextMenu={openContextMenu}
             onDuplicateSelection={commitPayloadAt}
             onCreateTextAt={handleCreateTextAt}

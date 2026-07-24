@@ -195,9 +195,20 @@ export interface CanvasState {
    * `setZoom`/`setStagePosition`/etc. below ever touch `items`, so no
    * history entry is ever pushed for them). */
   zoom: number
-  /** U11: current Stage `x`/`y` (pan offset). Same untracked-by-undo
-   * reasoning as `zoom` above. */
+  /** The Stage's internal content offset. Held at `{0,0}`: the canvas
+   * content always FILLS its box — panning moves the box itself
+   * (`canvasOffset`) rather than sliding content around inside a fixed
+   * frame, which used to leave dead space in the box. Kept (rather than
+   * removed) because every screen<->model conversion passes it, and zero is
+   * the correct content origin for all of them. */
   stagePosition: Point
+  /**
+   * Where the canvas BOX sits in the gray workspace, in screen px — the
+   * Photoshop model: the page is a sheet you slide around the work area.
+   * Drag-to-pan and zoom-to-cursor both move THIS (the box travels, content
+   * stays glued to it). Untracked by undo, same reasoning as `zoom`.
+   */
+  canvasOffset: Point
   /**
    * Explicit-save model: true whenever `items` has diverged from the last
    * server-confirmed baseline — set by every content-mutating action
@@ -527,6 +538,9 @@ export interface CanvasState {
    * (`dragend`) — mirrors `updateItemGeometry`'s "commit on release, not
    * every intermediate move" convention. */
   setStagePosition: (position: Point) => void
+  /** Commits where the canvas BOX has been slid to in the workspace, on the
+   * pan gesture's release (the live frames move it imperatively). */
+  setCanvasOffset: (offset: Point) => void
   /** U11 Toolbar button: zooms in by a fixed step, anchored at the current
    * pan position (no cursor to anchor to for a button click). */
   zoomIn: () => void
@@ -622,6 +636,7 @@ export const useCanvasStore = create<CanvasState>()(
       canvasSize: null,
       zoom: 1,
       stagePosition: { x: 0, y: 0 },
+      canvasOffset: { x: 0, y: 0 },
       dirty: false,
       serverIdMap: {},
 
@@ -969,9 +984,13 @@ export const useCanvasStore = create<CanvasState>()(
               { activeTool: 'pan', placement: null, selectedItemIds: [] },
         ),
 
-      setZoomAndPosition: (zoom, position) => set({ zoom: clampZoom(zoom), stagePosition: position }),
+      // `position` is the canvas BOX's new workspace offset (zoom-to-cursor
+      // keeps the point under the cursor by sliding the box, not the content).
+      setZoomAndPosition: (zoom, position) => set({ zoom: clampZoom(zoom), canvasOffset: position }),
 
       setStagePosition: (position) => set({ stagePosition: position }),
+
+      setCanvasOffset: (offset) => set({ canvasOffset: offset }),
 
       zoomIn: () =>
         set((state) => ({ zoom: clampZoom(state.zoom * TOOLBAR_ZOOM_STEP) })),
@@ -979,7 +998,7 @@ export const useCanvasStore = create<CanvasState>()(
       zoomOut: () =>
         set((state) => ({ zoom: clampZoom(state.zoom / TOOLBAR_ZOOM_STEP) })),
 
-      resetZoom: () => set({ zoom: 1, stagePosition: { x: 0, y: 0 } }),
+      resetZoom: () => set({ zoom: 1, stagePosition: { x: 0, y: 0 }, canvasOffset: { x: 0, y: 0 } }),
     }),
     {
       // `items` AND `canvasSize` (U8) form the tracked/restorable snapshot —

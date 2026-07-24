@@ -578,7 +578,10 @@ describe('canvasStore zoom/pan actions (U11)', () => {
   it('setZoomAndPosition updates both fields together', () => {
     useCanvasStore.getState().setZoomAndPosition(2, { x: -30, y: 15 })
     expect(useCanvasStore.getState().zoom).toBe(2)
-    expect(useCanvasStore.getState().stagePosition).toEqual({ x: -30, y: 15 })
+    // Zoom-to-cursor slides the canvas BOX (the sheet), never the content
+    // inside it — `stagePosition` stays pinned at the content origin.
+    expect(useCanvasStore.getState().canvasOffset).toEqual({ x: -30, y: 15 })
+    expect(useCanvasStore.getState().stagePosition).toEqual({ x: 0, y: 0 })
   })
 
   it('setZoomAndPosition clamps zoom defensively even if called with an out-of-range value', () => {
@@ -641,7 +644,7 @@ describe('canvasStore zoom/pan actions (U11)', () => {
     // leaves zoom/pan exactly as they were set.
     expect(useCanvasStore.getState().items).toEqual([])
     expect(useCanvasStore.getState().zoom).toBe(2)
-    expect(useCanvasStore.getState().stagePosition).toEqual({ x: 40, y: 40 })
+    expect(useCanvasStore.getState().canvasOffset).toEqual({ x: 40, y: 40 })
   })
 })
 

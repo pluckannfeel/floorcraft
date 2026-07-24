@@ -7,7 +7,7 @@ import {
   clampGroupDragDelta,
   clientToContainerPoint,
   computePinchZoom,
-  computeWheelZoom,
+  clampZoom,
   containerToStagePoint,
   isEditableTarget,
   rectFromPoints,
@@ -19,6 +19,9 @@ import {
   translatePoints,
   unionBoundingBoxes,
 } from './coordinates'
+
+/** Per wheel-tick zoom factor (the old `computeWheelZoom` default). */
+const WHEEL_ZOOM_STEP = 1.05
 import type { BoundingBox, ZoomPanState } from './coordinates'
 import { CURSOR_CROSSHAIR, CURSOR_GRAB, CURSOR_GRABBING, CURSOR_TEXT } from './cursors'
 import { beginCanvasGesture, endCanvasGesture } from './gesture'
@@ -126,6 +129,12 @@ interface CanvasStageProps {
   /** Commits a drag-to-pan gesture's final position on `dragend` (U11),
    * mirroring `onGeometryChange`'s commit-on-release convention. */
   onPanEnd?: (position: Point) => void
+  /** Where the canvas BOX currently sits in the workspace (screen px). The
+   * drag/zoom math is relative to this. */
+  canvasOffset?: Point
+  /** Live per-frame box offset during a pan drag — the caller moves the box
+   * imperatively so it tracks the cursor without a React round-trip. */
+  onPanDrag?: (offset: Point) => void
   /** U5: a right-click on the canvas wants the context menu opened. Fired
    * AFTER the right-click selection rule has been applied (see
    * `resolveContextMenuSelection`), so by the time the caller renders the
@@ -855,6 +864,8 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onLinePointDragEnd,
     zoom = 1,
     stagePosition = { x: 0, y: 0 },
+    canvasOffset = { x: 0, y: 0 },
+    onPanDrag,
     onZoomChange,
     onPanEnd,
     onOpenContextMenu,
@@ -908,6 +919,12 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // U2: whether a stage pan drag is actually in flight — drives the
   // grab (pan available) vs grabbing (panning) cursor distinction.
   const [panDragging, setPanDragging] = useState(false)
+  // Live box offset during a pan drag (written every frame by dragBoundFunc,
+  // read on dragend to commit). A ref so per-frame moves cost no re-render.
+  const panLiveRef = useRef<Point | null>(null)
+  // Screen-space origin of the active pan: where the cursor went down and
+  // where the box was at that moment.
+  const panStartRef = useRef<{ client: Point; offset: Point } | null>(null)
 
   // U2: internal handle on the Stage, merged with the forwarded ref — the
   // cursor effect and the marquee's window-level pointermove need
@@ -1482,13 +1499,37 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     <>
     <Stage
       ref={setStageRef}
-      width={width}
-      height={height}
+      // The BOX hugs its scaled content: model dims x zoom. Content is pinned
+      // at the origin (x/y 0) and always fills the box — panning slides the
+      // whole box through the workspace (Photoshop's sheet-of-paper model)
+      // instead of sliding content around inside a fixed frame, which used to
+      // leave dead space in the box.
+      width={width * zoom}
+      height={height * zoom}
       scaleX={zoom}
       scaleY={zoom}
-      x={stagePosition.x}
-      y={stagePosition.y}
+      x={0}
+      y={0}
       draggable={stageDraggable}
+      // Pin the content at the origin: the drag moves the BOX (below), never
+      // the content inside it.
+      dragBoundFunc={() => ({ x: 0, y: 0 })}
+      onDragMove={(event) => {
+        const stage = event.target.getStage()
+        if (!stage || event.target !== stage) return
+        // Drive the box from the RAW SCREEN pointer, not Konva's
+        // container-relative delta: we're moving the container itself each
+        // frame, so a container-relative delta feeds back on itself (the box
+        // would trail the cursor at half speed).
+        const start = panStartRef.current
+        if (!start) return
+        const next = {
+          x: start.offset.x + (event.evt.clientX - start.client.x),
+          y: start.offset.y + (event.evt.clientY - start.client.y),
+        }
+        panLiveRef.current = next
+        onPanDrag?.(next)
+      }}
       onDragStart={(event) => {
         // Only the Stage's own drag is a pan — an Object's dragstart fires
         // on the Object node, not the Stage (Konva dispatches drag events on
@@ -1496,6 +1537,10 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // bubbled ones.
         const stage = event.target.getStage()
         if (!stage || event.target !== stage) return
+        panStartRef.current = {
+          client: { x: event.evt.clientX, y: event.evt.clientY },
+          offset: canvasOffset,
+        }
         setPanDragging(true)
       }}
       onDragEnd={(event) => {
@@ -1512,7 +1557,10 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         // stick until some unrelated prop change — hence `stageDraggable`,
         // the same expression the prop uses.
         stage.draggable(stageDraggable)
-        onPanEnd?.({ x: stage.x(), y: stage.y() })
+        // Commit where the BOX ended up (the node itself stays pinned at 0).
+        onPanEnd?.(panLiveRef.current ?? canvasOffset)
+        panLiveRef.current = null
+        panStartRef.current = null
       }}
       onWheel={(event) => {
         // Standard Konva zoom-on-wheel recipe: prevent the page from
@@ -1524,8 +1572,18 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         if (!stage) return
         const pointer = stage.getPointerPosition()
         if (!pointer) return
-        const next = computeWheelZoom({ zoom, position: stagePosition }, pointer, event.evt.deltaY)
-        onZoomChange?.(next.zoom, next.position)
+        // Box model: content sits at the origin scaled by `zoom`, so the
+        // model point under the cursor is `pointer / zoom`. After zooming it
+        // renders at `pointer * (newZoom/zoom)`, so sliding the BOX by
+        // `pointer * (1 - newZoom/zoom)` keeps that point under the cursor.
+        const newZoom = clampZoom(
+          event.evt.deltaY < 0 ? zoom * WHEEL_ZOOM_STEP : zoom / WHEEL_ZOOM_STEP,
+        )
+        const k = 1 - newZoom / zoom
+        onZoomChange?.(newZoom, {
+          x: canvasOffset.x + pointer.x * k,
+          y: canvasOffset.y + pointer.y * k,
+        })
       }}
       onTouchMove={(event) => {
         // U11: two-finger pinch-to-zoom (R10's touch-support requirement).
