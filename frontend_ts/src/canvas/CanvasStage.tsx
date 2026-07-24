@@ -1415,7 +1415,9 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // with the finished (snapped/clamped) geometry; the caller (CanvasEditorPage)
   // both creates the item and resets `activeTool` back to `'select'`.
   const shapeTool = useShapeTool({
-    gridSize: SNAP_STEP, // coarser free-move snap, not the fine ruler grid
+    // Drawing snaps to the plan grid so structure lines up; only MOVING an
+    // object is free (SNAP_STEP), which is what "place it anywhere" meant.
+    gridSize,
     canvasWidth: width,
     canvasHeight: height,
     onCommit: (type, geometry) => onCreateShape?.(type, geometry),
@@ -1425,7 +1427,8 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // click or Escape) only when >= 2 points were placed; the caller both
   // creates the item and resets `activeTool` back to `'select'`.
   const lineTool = useLineTool({
-    gridSize: SNAP_STEP, // coarser free-move snap, not the fine ruler grid
+    // Wall/line endpoints snap to the plan grid so they actually meet.
+    gridSize,
     canvasWidth: width,
     canvasHeight: height,
     onCommit: (type, points) => onCreateLine?.(type, points),
@@ -1919,7 +1922,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
           <LineAnchorHandles
             object={selectedObject}
             points={parseLinePoints(selectedObject.properties)}
-            gridSize={SNAP_STEP}
+            gridSize={gridSize}
             canvasWidth={width}
             canvasHeight={height}
             onPointDragEnd={(id, pointIndex, point) => onLinePointDragEnd?.(id, pointIndex, point)}
