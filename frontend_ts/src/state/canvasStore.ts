@@ -11,26 +11,25 @@ const TOOLBAR_ZOOM_STEP = 1.2
 
 /**
  * Toolbar zoom keeps the PAGE's own center fixed on screen, rather than only
- * changing `zoom` (which lets the box grow/shrink toward its top-left corner
- * and drift off-workspace — a CSS transform's negative overflow isn't
- * scrollable, so the page could strand out of reach). Anchoring at the page
- * center needs no viewport knowledge: `pageCenter = canvasOffset + size/2 *
- * zoom` must stay put, so `newOffset = canvasOffset + size/2 * (zoom -
- * newZoom)`. No-ops safely before the canvas is seeded.
+ * changing `zoom` (which lets the page grow/shrink toward the viewport origin
+ * and drift out of reach). Anchoring at the page center needs no viewport
+ * knowledge: `pageCenter = stagePosition + size/2 * zoom` must stay put, so
+ * `newPosition = stagePosition + size/2 * (zoom - newZoom)`. No-ops safely
+ * before the canvas is seeded.
  */
 function zoomAroundPageCenter(
-  state: { zoom: number; canvasOffset: Point; canvasSize: CanvasSize | null },
+  state: { zoom: number; stagePosition: Point; canvasSize: CanvasSize | null },
   rawNewZoom: number,
-): { zoom: number; canvasOffset: Point } {
+): { zoom: number; stagePosition: Point } {
   const newZoom = clampZoom(rawNewZoom)
   const size = state.canvasSize
-  if (!size) return { zoom: newZoom, canvasOffset: state.canvasOffset }
+  if (!size) return { zoom: newZoom, stagePosition: state.stagePosition }
   const delta = (state.zoom - newZoom) / 2
   return {
     zoom: newZoom,
-    canvasOffset: {
-      x: state.canvasOffset.x + size.width * delta,
-      y: state.canvasOffset.y + size.height * delta,
+    stagePosition: {
+      x: state.stagePosition.x + size.width * delta,
+      y: state.stagePosition.y + size.height * delta,
     },
   }
 }
@@ -221,20 +220,12 @@ export interface CanvasState {
    * `setZoom`/`setStagePosition`/etc. below ever touch `items`, so no
    * history entry is ever pushed for them). */
   zoom: number
-  /** The Stage's internal content offset. Held at `{0,0}`: the canvas
-   * content always FILLS its box — panning moves the box itself
-   * (`canvasOffset`) rather than sliding content around inside a fixed
-   * frame, which used to leave dead space in the box. Kept (rather than
-   * removed) because every screen<->model conversion passes it, and zero is
-   * the correct content origin for all of them. */
+  /** The pan offset: the screen-px position of the page's model origin
+   * within the viewport (= the Stage's x/y). The Stage fills the VIEWPORT,
+   * so the page floats inside it and panning slides the page around on the
+   * gray workspace (the Photoshop model), memory-bounded at any zoom.
+   * Untracked by undo, same reasoning as `zoom`. */
   stagePosition: Point
-  /**
-   * Where the canvas BOX sits in the gray workspace, in screen px — the
-   * Photoshop model: the page is a sheet you slide around the work area.
-   * Drag-to-pan and zoom-to-cursor both move THIS (the box travels, content
-   * stays glued to it). Untracked by undo, same reasoning as `zoom`.
-   */
-  canvasOffset: Point
   /**
    * Explicit-save model: true whenever `items` has diverged from the last
    * server-confirmed baseline — set by every content-mutating action
@@ -564,9 +555,6 @@ export interface CanvasState {
    * (`dragend`) — mirrors `updateItemGeometry`'s "commit on release, not
    * every intermediate move" convention. */
   setStagePosition: (position: Point) => void
-  /** Commits where the canvas BOX has been slid to in the workspace, on the
-   * pan gesture's release (the live frames move it imperatively). */
-  setCanvasOffset: (offset: Point) => void
   /** U11 Toolbar button: zooms in by a fixed step, anchored at the current
    * pan position (no cursor to anchor to for a button click). */
   zoomIn: () => void
@@ -662,7 +650,6 @@ export const useCanvasStore = create<CanvasState>()(
       canvasSize: null,
       zoom: 1,
       stagePosition: { x: 0, y: 0 },
-      canvasOffset: { x: 0, y: 0 },
       dirty: false,
       serverIdMap: {},
 
@@ -1010,19 +997,15 @@ export const useCanvasStore = create<CanvasState>()(
               { activeTool: 'pan', placement: null, selectedItemIds: [] },
         ),
 
-      // `position` is the canvas BOX's new workspace offset (zoom-to-cursor
-      // keeps the point under the cursor by sliding the box, not the content).
-      setZoomAndPosition: (zoom, position) => set({ zoom: clampZoom(zoom), canvasOffset: position }),
+      setZoomAndPosition: (zoom, position) => set({ zoom: clampZoom(zoom), stagePosition: position }),
 
       setStagePosition: (position) => set({ stagePosition: position }),
-
-      setCanvasOffset: (offset) => set({ canvasOffset: offset }),
 
       zoomIn: () => set((state) => zoomAroundPageCenter(state, state.zoom * TOOLBAR_ZOOM_STEP)),
 
       zoomOut: () => set((state) => zoomAroundPageCenter(state, state.zoom / TOOLBAR_ZOOM_STEP)),
 
-      resetZoom: () => set({ zoom: 1, stagePosition: { x: 0, y: 0 }, canvasOffset: { x: 0, y: 0 } }),
+      resetZoom: () => set({ zoom: 1, stagePosition: { x: 0, y: 0 } }),
     }),
     {
       // `items` AND `canvasSize` (U8) form the tracked/restorable snapshot —

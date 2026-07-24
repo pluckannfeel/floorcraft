@@ -573,7 +573,7 @@ describe('canvasStore zoom/pan actions (U11)', () => {
   beforeEach(() => {
     useCanvasStore.setState({
       items: [], selectedItemIds: [], activeTool: 'select',
-      zoom: 1, stagePosition: { x: 0, y: 0 }, canvasOffset: { x: 0, y: 0 },
+      zoom: 1, stagePosition: { x: 0, y: 0 },
       canvasSize: { width: 800, height: 600 },
     })
     useCanvasStore.temporal.getState().clear()
@@ -582,10 +582,8 @@ describe('canvasStore zoom/pan actions (U11)', () => {
   it('setZoomAndPosition updates both fields together', () => {
     useCanvasStore.getState().setZoomAndPosition(2, { x: -30, y: 15 })
     expect(useCanvasStore.getState().zoom).toBe(2)
-    // Zoom-to-cursor slides the canvas BOX (the sheet), never the content
-    // inside it — `stagePosition` stays pinned at the content origin.
-    expect(useCanvasStore.getState().canvasOffset).toEqual({ x: -30, y: 15 })
-    expect(useCanvasStore.getState().stagePosition).toEqual({ x: 0, y: 0 })
+    // Zoom-to-cursor moves the pan (stagePosition) to keep the point fixed.
+    expect(useCanvasStore.getState().stagePosition).toEqual({ x: -30, y: 15 })
   })
 
   it('setZoomAndPosition clamps zoom defensively even if called with an out-of-range value', () => {
@@ -623,25 +621,24 @@ describe('canvasStore zoom/pan actions (U11)', () => {
   })
 
   it('resetZoom returns to 1x with the page back at the origin', () => {
-    useCanvasStore.setState({ zoom: 3, canvasOffset: { x: 500, y: -200 } })
+    useCanvasStore.setState({ zoom: 3, stagePosition: { x: 500, y: -200 } })
     useCanvasStore.getState().resetZoom()
     expect(useCanvasStore.getState().zoom).toBe(1)
-    // The pan lives in canvasOffset now — reset must bring the page back.
-    expect(useCanvasStore.getState().canvasOffset).toEqual({ x: 0, y: 0 })
+    expect(useCanvasStore.getState().stagePosition).toEqual({ x: 0, y: 0 })
   })
 
   it('zoomIn/zoomOut keep the PAGE CENTER fixed (page does not drift off)', () => {
     // 800x600 page at 1x, top-left at (100,100) → center at (500,400).
-    useCanvasStore.setState({ zoom: 1, canvasOffset: { x: 100, y: 100 } })
+    useCanvasStore.setState({ zoom: 1, stagePosition: { x: 100, y: 100 } })
     useCanvasStore.getState().zoomIn() // -> 1.2x
     const s1 = useCanvasStore.getState()
-    // center = offset + size/2 * zoom stays at (500,400).
-    expect(s1.canvasOffset.x + 400 * s1.zoom).toBeCloseTo(500)
-    expect(s1.canvasOffset.y + 300 * s1.zoom).toBeCloseTo(400)
+    // center = stagePosition + size/2 * zoom stays at (500,400).
+    expect(s1.stagePosition.x + 400 * s1.zoom).toBeCloseTo(500)
+    expect(s1.stagePosition.y + 300 * s1.zoom).toBeCloseTo(400)
     useCanvasStore.getState().zoomOut() // back to 1x
     const s2 = useCanvasStore.getState()
-    expect(s2.canvasOffset.x).toBeCloseTo(100)
-    expect(s2.canvasOffset.y).toBeCloseTo(100)
+    expect(s2.stagePosition.x).toBeCloseTo(100)
+    expect(s2.stagePosition.y).toBeCloseTo(100)
   })
 
   it('none of the zoom/pan actions create undo history entries', () => {
@@ -663,7 +660,7 @@ describe('canvasStore zoom/pan actions (U11)', () => {
     // leaves zoom/pan exactly as they were set.
     expect(useCanvasStore.getState().items).toEqual([])
     expect(useCanvasStore.getState().zoom).toBe(2)
-    expect(useCanvasStore.getState().canvasOffset).toEqual({ x: 40, y: 40 })
+    expect(useCanvasStore.getState().stagePosition).toEqual({ x: 40, y: 40 })
   })
 })
 

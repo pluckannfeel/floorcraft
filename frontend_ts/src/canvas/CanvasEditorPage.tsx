@@ -87,9 +87,15 @@ function isNotFoundError(error: unknown): boolean {
 export function CanvasEditorPage() {
   const { logout } = useAuth();
   const stageRef = useRef<Konva.Stage | null>(null);
-  // The canvas box element — translated imperatively each pan frame so the
-  // sheet tracks the cursor without a React round-trip.
-  const canvasBoxRef = useRef<HTMLDivElement>(null);
+  // The workspace element the Stage fills — measured so the Stage stays
+  // viewport-sized (memory-bounded) rather than page-sized.
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const [viewport, setViewport] = useState<{ width: number; height: number } | null>(null);
+  // The ruler layer — positioned at the page origin, and translated
+  // imperatively each pan frame so it tracks the page without a per-frame
+  // React re-render (Konva moves the page itself; stagePosition commits on
+  // release).
+  const rulerRef = useRef<HTMLDivElement>(null);
 
   // U5: the editor is route-driven. A malformed (`NaN` after `Number(...)`)
   // or non-positive param can never match a backend row, so it's treated
@@ -135,12 +141,11 @@ export function CanvasEditorPage() {
   // loading gate below holds the editor back until then.
   const canvasSize = useCanvasStore((state) => state.canvasSize);
   const zoom = useCanvasStore((state) => state.zoom);
+  // The pan offset: the page's screen position within the viewport. The
+  // Stage fills the viewport and the page floats inside it (Photoshop model),
+  // so panning slides the page around the gray workspace.
   const stagePosition = useCanvasStore((state) => state.stagePosition);
-  // Where the canvas BOX sits in the gray workspace (Photoshop model: the
-  // page is a sheet you slide around). Drag/zoom move THIS; the Stage's own
-  // content stays pinned at its origin and always fills the box.
-  const canvasOffset = useCanvasStore((state) => state.canvasOffset);
-  const setCanvasOffset = useCanvasStore((state) => state.setCanvasOffset);
+  const setStagePosition = useCanvasStore((state) => state.setStagePosition);
   const dirty = useCanvasStore((state) => state.dirty);
   const setItems = useCanvasStore((state) => state.setItems);
   const applyCrop = useCanvasStore((state) => state.applyCrop);
@@ -489,6 +494,23 @@ export function CanvasEditorPage() {
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty, isSaving]);
+
+  // Measure the workspace so the Stage element fills it (viewport-sized,
+  // memory-bounded) rather than being sized to the page. Re-measures on
+  // window/layout resize via a ResizeObserver.
+  useEffect(() => {
+    // Re-run once the workspace actually mounts: the loading gate keeps it
+    // out of the tree until `canvasSize` is seeded, so `workspaceRef` is null
+    // on the first mount.
+    const el = workspaceRef.current;
+    if (!el) return;
+    const measure = () =>
+      setViewport({ width: el.clientWidth, height: el.clientHeight });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [canvasSize]);
 
   const confirmLeaveWithUnsavedChanges = useCallback(
     () =>
@@ -968,31 +990,39 @@ export function CanvasEditorPage() {
           canvasHeight={canvasSize.height}
           onDrop={handleDrop}
         />
-        {/* Gray workspace backdrop so the (white) canvas reads as a page
-            sitting on a surface, the way design tools frame a document —
-            `w-fit` keeps the ring/shadow hugging the stage rather than the
-            scroll area. */}
-        <div data-canvas-workspace className="flex-1 overflow-auto bg-muted p-6">
+        {/* Gray workspace: the Stage FILLS this (viewport-sized), and the
+            white page floats inside it — you pan the page around the surface.
+            `overflow-hidden` because navigation is panning, not scrolling. */}
+        <div
+          ref={workspaceRef}
+          data-canvas-workspace
+          className="relative flex-1 overflow-hidden bg-muted"
+        >
+          {/* Edge rulers: a DOM layer pinned to the page origin
+              (`stagePosition`) and translated imperatively each pan frame so
+              they ride the page. Clipped by the workspace, so they can't
+              cover the toolbar/sidebar. */}
           <div
-            ref={canvasBoxRef}
-            className="relative w-fit rounded-sm shadow-md ring-1 ring-border"
-            style={{ transform: `translate(${canvasOffset.x}px, ${canvasOffset.y}px)` }}
+            ref={rulerRef}
+            aria-hidden="true"
+            className="pointer-events-none absolute left-0 top-0 z-10"
+            style={{ transform: `translate(${stagePosition.x}px, ${stagePosition.y}px)` }}
           >
-          {/* Edge rulers live INSIDE the canvas box, so they travel,
-              scale and clip with the page instead of chasing it as a
-              floating overlay. */}
-          <RulerOverlay
-            zoom={zoom}
-            gridSize={floorPlan.grid_size}
-            canvasWidth={canvasSize.width}
-            canvasHeight={canvasSize.height}
-            realSizePerGridSquare={floorPlan.real_size_per_grid_square}
-            unit={floorPlan.unit}
-          />
+            <RulerOverlay
+              zoom={zoom}
+              gridSize={floorPlan.grid_size}
+              canvasWidth={canvasSize.width}
+              canvasHeight={canvasSize.height}
+              realSizePerGridSquare={floorPlan.real_size_per_grid_square}
+              unit={floorPlan.unit}
+            />
+          </div>
           <CanvasStage
             ref={stageRef}
             width={canvasSize.width}
             height={canvasSize.height}
+            viewportWidth={viewport?.width}
+            viewportHeight={viewport?.height}
             gridSize={floorPlan.grid_size}
             objects={items}
             selectedItemIds={selectedItemIds}
@@ -1009,13 +1039,13 @@ export function CanvasEditorPage() {
             zoom={zoom}
             stagePosition={stagePosition}
             onZoomChange={setZoomAndPosition}
-            canvasOffset={canvasOffset}
             onPanDrag={(offset) => {
-              // Live frame: move the sheet imperatively (no re-render).
-              const box = canvasBoxRef.current;
-              if (box) box.style.transform = `translate(${offset.x}px, ${offset.y}px)`;
+              // Live pan frame: move the ruler layer imperatively so it tracks
+              // the page (Konva moves the page itself); no React re-render.
+              const r = rulerRef.current;
+              if (r) r.style.transform = `translate(${offset.x}px, ${offset.y}px)`;
             }}
-            onPanEnd={setCanvasOffset}
+            onPanEnd={setStagePosition}
             onOpenContextMenu={openContextMenu}
             onDuplicateSelection={commitPayloadAt}
             onCreateTextAt={handleCreateTextAt}
@@ -1031,7 +1061,6 @@ export function CanvasEditorPage() {
             }
             onApplyCrop={handleApplyCrop}
           />
-          </div>
         </div>
         <PropertyPanel />
       </div>

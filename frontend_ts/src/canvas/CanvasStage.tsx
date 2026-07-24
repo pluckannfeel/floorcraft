@@ -6,7 +6,8 @@ import type { GuideLines } from './AlignmentGuides'
 import {
   clampGroupDragDelta,
   clientToContainerPoint,
-  clampZoom,
+  computePinchZoom,
+  computeWheelZoom,
   containerToStagePoint,
   isEditableTarget,
   rectFromPoints,
@@ -19,20 +20,6 @@ import {
   unionBoundingBoxes,
 } from './coordinates'
 
-/** Screen-space point for a drag event. Middle-mouse pan calls
- * `stage.startDrag()` with no source event (Konva.dragButtons excludes it),
- * so `event.evt` is undefined — fall back to the stage's pointer position
- * mapped back into client coords. */
-function dragClientPoint(stage: Konva.Stage, evt: MouseEvent | undefined): Point | null {
-  if (evt) return { x: evt.clientX, y: evt.clientY }
-  const p = stage.getPointerPosition()
-  if (!p) return null
-  const rect = stage.container().getBoundingClientRect()
-  return { x: rect.left + p.x, y: rect.top + p.y }
-}
-
-/** Per wheel-tick zoom factor (the old `computeWheelZoom` default). */
-const WHEEL_ZOOM_STEP = 1.05
 import type { BoundingBox } from './coordinates'
 import { CURSOR_CROSSHAIR, CURSOR_GRAB, CURSOR_GRABBING, CURSOR_TEXT } from './cursors'
 import { beginCanvasGesture, endCanvasGesture } from './gesture'
@@ -72,8 +59,15 @@ import type { CanvasObject, LineType, Point, ShapeType } from './types'
 Konva.dragButtons = [0]
 
 interface CanvasStageProps {
+  /** The PAGE's model dimensions (grid, background, clamps, crop). */
   width: number
   height: number
+  /** The VIEWPORT the Stage element fills (the workspace), in screen px.
+   * Kept separate from the page dims so the Stage stays memory-bounded at
+   * any zoom while the page floats inside it. Falls back to the page dims
+   * before the workspace is measured. */
+  viewportWidth?: number
+  viewportHeight?: number
   gridSize: number
   objects: CanvasObject[]
   /** U1: the current selection set (ordered id array — see
@@ -140,11 +134,8 @@ interface CanvasStageProps {
   /** Commits a drag-to-pan gesture's final position on `dragend` (U11),
    * mirroring `onGeometryChange`'s commit-on-release convention. */
   onPanEnd?: (position: Point) => void
-  /** Where the canvas BOX currently sits in the workspace (screen px). The
-   * drag/zoom math is relative to this. */
-  canvasOffset?: Point
-  /** Live per-frame box offset during a pan drag — the caller moves the box
-   * imperatively so it tracks the cursor without a React round-trip. */
+  /** Live pan offset each drag frame — the caller moves the DOM ruler
+   * imperatively so it tracks the page without a per-frame React re-render. */
   onPanDrag?: (offset: Point) => void
   /** U5: a right-click on the canvas wants the context menu opened. Fired
    * AFTER the right-click selection rule has been applied (see
@@ -860,6 +851,8 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   {
     width,
     height,
+    viewportWidth,
+    viewportHeight,
     gridSize,
     objects,
     selectedItemIds,
@@ -875,7 +868,6 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     onLinePointDragEnd,
     zoom = 1,
     stagePosition = { x: 0, y: 0 },
-    canvasOffset = { x: 0, y: 0 },
     onPanDrag,
     onZoomChange,
     onPanEnd,
@@ -930,12 +922,7 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
   // U2: whether a stage pan drag is actually in flight — drives the
   // grab (pan available) vs grabbing (panning) cursor distinction.
   const [panDragging, setPanDragging] = useState(false)
-  // Live box offset during a pan drag (written every frame by dragBoundFunc,
-  // read on dragend to commit). A ref so per-frame moves cost no re-render.
-  const panLiveRef = useRef<Point | null>(null)
-  // Screen-space origin of the active pan: where the cursor went down and
-  // where the box was at that moment.
-  const panStartRef = useRef<{ client: Point; offset: Point } | null>(null)
+
 
   // U2: internal handle on the Stage, merged with the forwarded ref — the
   // cursor effect and the marquee's window-level pointermove need
@@ -1518,91 +1505,60 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
       // whole box through the workspace (Photoshop's sheet-of-paper model)
       // instead of sliding content around inside a fixed frame, which used to
       // leave dead space in the box.
-      width={width * zoom}
-      height={height * zoom}
+      // The Stage fills the VIEWPORT (memory-bounded at any zoom); the page
+      // floats INSIDE it at `stagePosition`, scaled by `zoom`. Panning slides
+      // the page around on the gray workspace; the workspace shows through
+      // around it. Content is drawn at model coords and clipped to the
+      // viewport, so a 4x zoom costs no extra canvas memory (the old
+      // `model*zoom`-sized Stage blew past Safari's per-canvas pixel cap and
+      // rendered blank).
+      width={viewportWidth ?? width}
+      height={viewportHeight ?? height}
       scaleX={zoom}
       scaleY={zoom}
-      x={0}
-      y={0}
+      x={stagePosition.x}
+      y={stagePosition.y}
       draggable={stageDraggable}
-      // Pin the content at the origin: the drag moves the BOX (below), never
-      // the content inside it.
-      dragBoundFunc={() => ({ x: 0, y: 0 })}
-      onDragMove={(event) => {
-        const stage = event.target.getStage()
-        if (!stage || event.target !== stage) return
-        // Drive the box from the RAW SCREEN pointer, not Konva's
-        // container-relative delta: we're moving the container itself each
-        // frame, so a container-relative delta feeds back on itself (the box
-        // would trail the cursor at half speed).
-        const start = panStartRef.current
-        const client = dragClientPoint(stage, event.evt as MouseEvent | undefined)
-        if (!start || !client) return
-        const next = {
-          x: start.offset.x + (client.x - start.client.x),
-          y: start.offset.y + (client.y - start.client.y),
-        }
-        panLiveRef.current = next
-        onPanDrag?.(next)
-      }}
       onDragStart={(event) => {
-        // Only the Stage's own drag is a pan — an Object's dragstart fires
-        // on the Object node, not the Stage (Konva dispatches drag events on
-        // the node actually being dragged), so this guard filters the
-        // bubbled ones.
+        // Only the Stage's own drag is a pan — an Object's dragstart fires on
+        // its own node, so this guard filters bubbled child drags.
         const stage = event.target.getStage()
         if (!stage || event.target !== stage) return
-        const startClient = dragClientPoint(stage, event.evt as MouseEvent | undefined)
-        panStartRef.current = startClient ? { client: startClient, offset: canvasOffset } : null
         setPanDragging(true)
       }}
+      onDragMove={(event) => {
+        // Report the live pan offset each frame so the DOM ruler (a sibling
+        // overlay) can track the page without a per-frame React re-render.
+        const stage = event.target.getStage()
+        if (!stage || event.target !== stage) return
+        onPanDrag?.({ x: stage.x(), y: stage.y() })
+      }}
       onDragEnd={(event) => {
-        // Only the Stage's own drag (pan) should reach here — an Object's
-        // drag (`ObjectShape.tsx`'s Group) fires `dragend` on that Group.
-        // The `event.target === stage` guard filters bubbled child drags.
         const stage = event.target.getStage()
         if (!stage || event.target !== stage) return
         setPanDragging(false)
-        // Restore prop-truth after the imperative per-gesture enables
-        // (middle-mouse/touch, below): react-konva only re-applies
-        // `draggable` when the PROP changes between renders, so both an
-        // imperative `draggable(true)` and a restore to the WRONG value
-        // stick until some unrelated prop change — hence `stageDraggable`,
-        // the same expression the prop uses.
+        // react-konva only re-applies `draggable` when the PROP changes, so
+        // restore prop-truth after the imperative middle-mouse/touch enables.
         stage.draggable(stageDraggable)
-        // Commit where the BOX ended up (the node itself stays pinned at 0).
-        onPanEnd?.(panLiveRef.current ?? canvasOffset)
-        panLiveRef.current = null
-        panStartRef.current = null
+        onPanEnd?.({ x: stage.x(), y: stage.y() })
       }}
       onWheel={(event) => {
-        // Standard Konva zoom-on-wheel recipe: prevent the page from
-        // scrolling, read the pointer's container-relative position, and
-        // delegate the point-anchored math to `coordinates.ts`'s pure
-        // `computeWheelZoom` so this handler stays thin plumbing.
+        // Standard Konva zoom-on-wheel recipe: prevent page scroll, read the
+        // pointer's container-relative position, and delegate the
+        // point-anchored math to the pure `computeWheelZoom` (which returns
+        // the new `zoom` + `stagePosition` that keeps the point fixed).
         event.evt.preventDefault()
         const stage = event.target.getStage()
         if (!stage) return
         const pointer = stage.getPointerPosition()
         if (!pointer) return
-        // Box model: content sits at the origin scaled by `zoom`, so the
-        // model point under the cursor is `pointer / zoom`. After zooming it
-        // renders at `pointer * (newZoom/zoom)`, so sliding the BOX by
-        // `pointer * (1 - newZoom/zoom)` keeps that point under the cursor.
-        const newZoom = clampZoom(
-          event.evt.deltaY < 0 ? zoom * WHEEL_ZOOM_STEP : zoom / WHEEL_ZOOM_STEP,
-        )
-        const k = 1 - newZoom / zoom
-        onZoomChange?.(newZoom, {
-          x: canvasOffset.x + pointer.x * k,
-          y: canvasOffset.y + pointer.y * k,
-        })
+        const next = computeWheelZoom({ zoom, position: stagePosition }, pointer, event.evt.deltaY)
+        onZoomChange?.(next.zoom, next.position)
       }}
       onTouchMove={(event) => {
-        // U11: two-finger pinch-to-zoom (R10's touch-support requirement).
-        // Single-finger touch drag already pans via the Stage's own
-        // `draggable` handling above — this only takes over once a SECOND
-        // touch point appears.
+        // U11: two-finger pinch-to-zoom (R10's touch requirement). A single
+        // touch pans via the Stage's own draggable above; this takes over
+        // once a SECOND touch appears.
         const touches = event.evt.touches
         if (touches.length !== 2) return
         event.evt.preventDefault()
@@ -1619,21 +1575,12 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
         pinchRef.current = { lastDistance: distance }
         if (!previous || previous.lastDistance === 0) return
 
-        // If a single-finger pan was already underway when the second
-        // finger touched down, stop it first — Konva's own pinch sandbox
-        // does the same, since dragging and pinching the Stage at once
-        // would fight over its x/y.
+        // Stop any single-finger pan first — dragging and pinching the Stage
+        // at once would fight over its x/y.
         if (stage.isDragging()) stage.stopDrag()
 
-        // Box model, same as the wheel handler: slide the BOX so the point
-        // between the fingers stays put. (Building a CONTENT position here
-        // dropped the accumulated pan, teleporting a panned page.)
-        const newZoom = clampZoom(zoom * (distance / previous.lastDistance))
-        const k = 1 - newZoom / zoom
-        onZoomChange?.(newZoom, {
-          x: canvasOffset.x + center.x * k,
-          y: canvasOffset.y + center.y * k,
-        })
+        const next = computePinchZoom({ zoom, position: stagePosition }, center, distance / previous.lastDistance)
+        onZoomChange?.(next.zoom, next.position)
       }}
       onTouchEnd={(event) => {
         if (event.evt.touches.length < 2) pinchRef.current = null
@@ -1853,7 +1800,25 @@ export const CanvasStage = forwardRef<Konva.Stage, CanvasStageProps>(function Ca
     >
       {/* Grid/background layer: static, non-interactive. */}
       <Layer listening={false}>
-        <Rect x={0} y={0} width={width} height={height} fill="#f9fafb" />
+        {/* The page: a white sheet floating on the gray workspace. The
+            border + shadow (drawn here, since the page is Konva content now,
+            not a bordered wrapper div) read it as a sheet; `*ScaleEnabled=
+            false` keeps them a constant 1px/soft regardless of zoom. */}
+        <Rect
+          x={0}
+          y={0}
+          width={width}
+          height={height}
+          fill="#f9fafb"
+          stroke="#d1d5db"
+          strokeWidth={1}
+          strokeScaleEnabled={false}
+          shadowColor="#000000"
+          shadowOpacity={0.15}
+          shadowBlur={12}
+          shadowOffsetY={2}
+          shadowForStrokeEnabled={false}
+        />
         {gridLines.map((points, index) => (
           <Line key={index} points={points} stroke="#e5e7eb" strokeWidth={1} />
         ))}
