@@ -45,14 +45,21 @@ export function containerToStagePoint(containerPoint: Point, zoom: number, stage
 }
 
 /**
- * The editor SNAP step in model px — deliberately DECOUPLED from the plan's
+ * The editor snap step in model px — deliberately DECOUPLED from the plan's
  * `grid_size` (which drives the visible grid and the ruler's real-world
- * scale). Snapping objects to a coarser step than the fine ruler grid makes
- * dragging feel free: a shape moves smoothly within a cell and only clicks
- * into place at the coarser boundary, instead of magnetizing to every small
- * grid line. Tune here to taste (larger = freer / chunkier).
+ * scale). Set to 1 so placement is effectively FREE: you can put a shape
+ * anywhere, including between grid lines, instead of it magnetizing onto the
+ * grid on every drag frame.
+ *
+ * Snapping that actually helps still happens: `snapDragPosition` applies
+ * OBJECT-TO-OBJECT alignment snapping (with the guide lines) first, and only
+ * falls through to this step. So shapes still click into alignment with each
+ * other — they just aren't forced onto a grid the rest of the time.
+ *
+ * Raise this to re-introduce grid magnetism (e.g. `20` to snap to the
+ * default grid).
  */
-export const SNAP_STEP = 40
+export const SNAP_STEP = 1
 
 /** Rounds a point's coordinates to the nearest multiple of `gridSize`. */
 export function snapToGrid(point: Point, gridSize: number): Point {
